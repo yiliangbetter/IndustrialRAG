@@ -36,6 +36,11 @@ class RAGAnythingConfig:
 
     # Multimodal Processing Configuration
     # ---
+    allow_embedding_only_ingestion: bool = field(
+        default=get_env_value("ALLOW_EMBEDDING_ONLY_INGESTION", False, bool)
+    )
+    """Enable ingestion path that only relies on embedding model (skips LLM-dependent extraction)."""
+
     enable_image_processing: bool = field(
         default=get_env_value("ENABLE_IMAGE_PROCESSING", True, bool)
     )

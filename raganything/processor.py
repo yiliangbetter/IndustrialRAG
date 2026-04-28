@@ -130,6 +130,58 @@ class ProcessorMixin:
 
         return doc_id
 
+    async def _insert_text_content_embedding_only(
+        self, text_content: str, file_ref: str, doc_id: str
+    ) -> None:
+        """Insert text chunks directly into vector/text storages without LLM extraction."""
+        if not text_content.strip():
+            await self._mark_multimodal_processing_complete(doc_id)
+            return
+
+        raw_chunks = [chunk.strip() for chunk in text_content.split("\n\n") if chunk.strip()]
+        if not raw_chunks:
+            raw_chunks = [text_content.strip()]
+
+        chunk_data = {}
+        for idx, chunk_text in enumerate(raw_chunks):
+            chunk_id = compute_mdhash_id(f"{doc_id}:{idx}:{chunk_text}", prefix="chunk-")
+            try:
+                tokens = len(self.lightrag.tokenizer.encode(chunk_text))
+            except Exception:
+                tokens = len(chunk_text.split())
+            chunk_data[chunk_id] = {
+                "content": chunk_text,
+                "tokens": tokens,
+                "full_doc_id": doc_id,
+                "chunk_order_index": idx,
+                "file_path": file_ref,
+                "llm_cache_list": [],
+            }
+
+        await self.lightrag.text_chunks.upsert(chunk_data)
+        await self.lightrag.chunks_vdb.upsert(chunk_data)
+        await self.lightrag.text_chunks.index_done_callback()
+        await self.lightrag.chunks_vdb.index_done_callback()
+
+        # Persist a minimal processed status so the document appears indexed.
+        await self.lightrag.doc_status.upsert(
+            {
+                doc_id: {
+                    "status": DocStatus.PROCESSED,
+                    "content": text_content[:2000],
+                    "error_msg": "",
+                    "content_summary": text_content[:500],
+                    "chunks_list": list(chunk_data.keys()),
+                    "chunks_count": len(chunk_data),
+                    "multimodal_processed": True,
+                    "file_path": file_ref,
+                    "updated_at": time.strftime("%Y-%m-%dT%H:%M:%S+00:00"),
+                }
+            }
+        )
+        await self.lightrag.doc_status.index_done_callback()
+        await self.lightrag._insert_done()
+
     async def _get_cached_result(
         self, cache_key: str, file_path: Path, parse_method: str = None, **kwargs
     ) -> tuple[List[Dict[str, Any]], str] | None:
@@ -1573,6 +1625,17 @@ class ProcessorMixin:
             # Step 2: Separate text and multimodal content
             text_content, multimodal_items = separate_content(content_list)
 
+            if self.config.allow_embedding_only_ingestion:
+                if file_name is None:
+                    file_name = self._get_file_reference(file_path)
+                await self._insert_text_content_embedding_only(
+                    text_content=text_content, file_ref=file_name, doc_id=doc_id
+                )
+                self.logger.info(
+                    "Embedding-only ingestion enabled: skipped multimodal and LLM-dependent extraction."
+                )
+                return
+
             # Step 2.5: Set content source for context extraction in multimodal processing
             if hasattr(self, "set_content_source_for_context") and multimodal_items:
                 self.logger.info(
@@ -1979,6 +2042,9 @@ class ProcessorMixin:
         if doc_id is None:
             doc_id = self._generate_content_based_doc_id(content_list)
 
+        # Use full path or basename based on config
+        file_ref = self._get_file_reference(file_path)
+
         # Display content statistics if requested
         if display_stats:
             self.logger.info("\nContent Information:")
@@ -1996,8 +2062,18 @@ class ProcessorMixin:
             for block_type, count in block_types.items():
                 self.logger.info(f"  - {block_type}: {count}")
 
+        # Normalize occasional nested-list blocks from parser outputs
+        normalized_content_list: List[Dict[str, Any]] = []
+        for item in content_list:
+            if isinstance(item, list):
+                normalized_content_list.extend(
+                    sub_item for sub_item in item if isinstance(sub_item, dict)
+                )
+            elif isinstance(item, dict):
+                normalized_content_list.append(item)
+
         # Step 1: Separate text and multimodal content
-        text_content, multimodal_items = separate_content(content_list)
+        text_content, multimodal_items = separate_content(normalized_content_list)
 
         # Step 1.5: Set content source for context extraction in multimodal processing
         if hasattr(self, "set_content_source_for_context") and multimodal_items:
@@ -2005,13 +2081,29 @@ class ProcessorMixin:
                 "Setting content source for context-aware multimodal processing..."
             )
             self.set_content_source_for_context(
-                content_list, self.config.content_format
+                normalized_content_list, self.config.content_format
             )
 
         # Step 2: Insert pure text content with all parameters
+        if self.config.allow_embedding_only_ingestion:
+            # Some parser formats store text in paragraph/title/list blocks.
+            if not text_content.strip():
+                text_parts = []
+                for item in normalized_content_list:
+                    candidate = item.get("text")
+                    if isinstance(candidate, str) and candidate.strip():
+                        text_parts.append(candidate.strip())
+                text_content = "\n\n".join(text_parts)
+
+            await self._insert_text_content_embedding_only(
+                text_content=text_content, file_ref=file_ref, doc_id=doc_id
+            )
+            self.logger.info(
+                "Embedding-only ingestion enabled: inserted text-only chunks from content list."
+            )
+            return
+
         if text_content.strip():
-            # Use full path or basename based on config
-            file_ref = self._get_file_reference(file_path)
             if callback_manager is not None:
                 callback_manager.dispatch(
                     "on_text_insert_start",
@@ -2037,8 +2129,8 @@ class ProcessorMixin:
                     doc_id=doc_id,
                 )
         else:
-            # Determine file reference even if no text content
-            file_ref = self._get_file_reference(file_path)
+            # file_ref is already derived above for subsequent multimodal stage
+            pass
 
         # Step 3: Process multimodal content (using specialized processors)
         if multimodal_items:
