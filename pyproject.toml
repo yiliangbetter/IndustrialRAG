@@ -28,6 +28,7 @@ dependencies = [
 ]
 
 [project.optional-dependencies]
+local-embed = ["sentence-transformers>=3.0.0"]
 image = ["Pillow>=10.0.0"]
 text = ["reportlab>=4.0.0"]
 office = []  # Requires LibreOffice (external program)

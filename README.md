@@ -296,6 +296,7 @@ uv sync --all-extras                 # All optional features
 
 - **`[image]`** - Enables processing of BMP, TIFF, GIF, WebP image formats (requires Pillow)
 - **`[text]`** - Enables processing of TXT and MD files (requires ReportLab)
+- **`[local-embed]`** - Enables local Hugging Face embeddings via `sentence-transformers`
 - **`[all]`** - Includes all Python optional dependencies
 
 > **⚠️ Office Document Processing Requirements:**
@@ -1036,6 +1037,27 @@ python examples/image_format_test.py --check-pillow --file dummy
 # Check ReportLab installation
 python examples/text_format_test.py --check-reportlab --file dummy
 ```
+
+### Utility scripts for endpoint checks and batch workflows
+
+```bash
+# 1) Validate LLM + embedding endpoints from .env (with basic retries)
+python scripts/validate_ark_endpoints.py
+
+# 2) Ingest all MinerU *_content_list_v2.json files under output/data_upload_test_v3
+#    into a target LightRAG/RAGAnything working directory
+python scripts/batch_ingest_content_lists.py -w ./rag_storage_wt1536
+
+# 3) Run Demo question bank batch QA and write both XLSX + JSONL outputs
+python scripts/run_demo_question_bank.py --mode mix --delay 4
+```
+
+Useful environment variables for these scripts:
+
+- `LLM_BINDING_HOST`, `LLM_MODEL`, `OPENAI_API_KEY` or `LLM_BINDING_API_KEY`
+- `EMBEDDING_BACKEND` (`openai` or `hf`), `EMBEDDING_MODEL`, `EMBEDDING_DIM`
+- `EMBEDDING_BINDING_HOST` and `EMBEDDING_API_KEY` (when embedding host/key differs)
+- `HF_HOME` (optional cache path; defaults to `<repo>/.hf_cache` when present)
 
 ---
 
