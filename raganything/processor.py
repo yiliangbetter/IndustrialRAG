@@ -130,6 +130,92 @@ class ProcessorMixin:
 
         return doc_id
 
+    def _normalize_nested_content_list(
+        self, content_list: List[Any]
+    ) -> List[Dict[str, Any]]:
+        """Flatten top-level list wrappers from MinerU *_content_list_v2.json."""
+        normalized: List[Dict[str, Any]] = []
+        for item in content_list:
+            if isinstance(item, list):
+                normalized.extend(
+                    sub_item for sub_item in item if isinstance(sub_item, dict)
+                )
+            elif isinstance(item, dict):
+                normalized.append(item)
+        return normalized
+
+    def _mineru_span_text(self, node: Any) -> str:
+        """Extract plain text from nested MinerU span trees (title_content, paragraph_content, etc.)."""
+        if node is None:
+            return ""
+        if isinstance(node, str):
+            return node.strip()
+        if isinstance(node, list):
+            parts = [self._mineru_span_text(x) for x in node]
+            return " ".join(p for p in parts if p).strip()
+        if isinstance(node, dict):
+            if node.get("type") == "text" and isinstance(node.get("content"), str):
+                return str(node["content"]).strip()
+            if isinstance(node.get("text"), str):
+                return str(node["text"]).strip()
+            if "content" in node:
+                return self._mineru_span_text(node["content"])
+        return ""
+
+    def _mineru_list_items_text(self, list_items: Any) -> str:
+        if not isinstance(list_items, list):
+            return ""
+        lines: List[str] = []
+        for it in list_items:
+            if not isinstance(it, dict):
+                continue
+            prefix = it.get("prefix") or ""
+            body = self._mineru_span_text(it.get("item_content"))
+            if not body:
+                continue
+            lines.append(f"{prefix} {body}".strip() if prefix else body)
+        return "\n".join(lines)
+
+    def _plaintext_from_mineru_blocks(self, items: List[Dict[str, Any]]) -> str:
+        """Recover plaintext from MinerU v2 paragraph/title/list/table/image blocks."""
+        parts: List[str] = []
+        for item in items:
+            if not isinstance(item, dict):
+                continue
+            block_type = item.get("type")
+            content = item.get("content")
+
+            if block_type == "text" and isinstance(item.get("text"), str):
+                s = item["text"].strip()
+                if s:
+                    parts.append(s)
+                continue
+
+            if not isinstance(content, dict):
+                continue
+
+            if block_type == "paragraph":
+                s = self._mineru_span_text(content.get("paragraph_content"))
+            elif block_type == "title":
+                s = self._mineru_span_text(content.get("title_content"))
+            elif block_type == "list":
+                s = self._mineru_list_items_text(content.get("list_items"))
+            elif block_type == "table":
+                s = (content.get("html") or "").strip()
+            elif block_type == "image":
+                caps = content.get("image_caption") or []
+                if isinstance(caps, list):
+                    s = " ".join(str(x) for x in caps if x).strip()
+                else:
+                    s = str(caps).strip()
+            else:
+                s = ""
+
+            if s:
+                parts.append(s)
+
+        return "\n\n".join(parts)
+
     async def _insert_text_content_embedding_only(
         self, text_content: str, file_ref: str, doc_id: str
     ) -> None:
@@ -465,11 +551,12 @@ class ProcessorMixin:
                 self.logger.info(
                     "Detected Office or HTML document, using parser for Office/HTML..."
                 )
+                office_parse_kwargs = {**kwargs, "method": parse_method}
                 content_list = await asyncio.to_thread(
                     doc_parser.parse_office_doc,
                     doc_path=file_path,
                     output_dir=output_dir,
-                    **kwargs,
+                    **office_parse_kwargs,
                 )
             else:
                 # For other or unknown formats, use generic parser
@@ -1988,12 +2075,13 @@ class ProcessorMixin:
 
     async def insert_content_list(
         self,
-        content_list: List[Dict[str, Any]],
+        content_list: List[Any],
         file_path: str = "unknown_document",
         split_by_character: str | None = None,
         split_by_character_only: bool = False,
         doc_id: str | None = None,
         display_stats: bool = None,
+        skip_multimodal_processing: bool = False,
     ):
         """
         Insert content list directly without document parsing
@@ -2014,6 +2102,8 @@ class ProcessorMixin:
             split_by_character_only: If True, split only by the specified character
             doc_id: Optional document ID, if not provided will be generated from content
             display_stats: Whether to display content statistics (defaults to config.display_content_stats)
+            skip_multimodal_processing: If True and non-empty text was inserted via LightRAG,
+                skip multimodal processors and mark multimodal stage complete (text-only KG path).
 
         Note:
             - img_path must be an absolute path to the image file
@@ -2034,13 +2124,16 @@ class ProcessorMixin:
         if display_stats is None:
             display_stats = self.config.display_content_stats
 
+        normalized_content_list = self._normalize_nested_content_list(content_list)
+
         self.logger.info(
-            f"Starting direct content list insertion for: {file_path} ({len(content_list)} items)"
+            f"Starting direct content list insertion for: {file_path} "
+            f"({len(normalized_content_list)} blocks after normalization)"
         )
 
-        # Generate doc_id based on content if not provided
+        # Generate doc_id from normalized blocks so nested [[...]] wrappers do not hash empty.
         if doc_id is None:
-            doc_id = self._generate_content_based_doc_id(content_list)
+            doc_id = self._generate_content_based_doc_id(normalized_content_list)
 
         # Use full path or basename based on config
         file_ref = self._get_file_reference(file_path)
@@ -2048,11 +2141,13 @@ class ProcessorMixin:
         # Display content statistics if requested
         if display_stats:
             self.logger.info("\nContent Information:")
-            self.logger.info(f"* Total blocks in content_list: {len(content_list)}")
+            self.logger.info(
+                f"* Total blocks in content_list: {len(normalized_content_list)}"
+            )
 
             # Count elements by type
             block_types: Dict[str, int] = {}
-            for block in content_list:
+            for block in normalized_content_list:
                 if isinstance(block, dict):
                     block_type = block.get("type", "unknown")
                     if isinstance(block_type, str):
@@ -2062,18 +2157,18 @@ class ProcessorMixin:
             for block_type, count in block_types.items():
                 self.logger.info(f"  - {block_type}: {count}")
 
-        # Normalize occasional nested-list blocks from parser outputs
-        normalized_content_list: List[Dict[str, Any]] = []
-        for item in content_list:
-            if isinstance(item, list):
-                normalized_content_list.extend(
-                    sub_item for sub_item in item if isinstance(sub_item, dict)
-                )
-            elif isinstance(item, dict):
-                normalized_content_list.append(item)
-
         # Step 1: Separate text and multimodal content
         text_content, multimodal_items = separate_content(normalized_content_list)
+
+        if not text_content.strip():
+            text_content = self._plaintext_from_mineru_blocks(normalized_content_list)
+        if not text_content.strip():
+            text_parts = []
+            for item in normalized_content_list:
+                candidate = item.get("text")
+                if isinstance(candidate, str) and candidate.strip():
+                    text_parts.append(candidate.strip())
+            text_content = "\n\n".join(text_parts)
 
         # Step 1.5: Set content source for context extraction in multimodal processing
         if hasattr(self, "set_content_source_for_context") and multimodal_items:
@@ -2086,15 +2181,6 @@ class ProcessorMixin:
 
         # Step 2: Insert pure text content with all parameters
         if self.config.allow_embedding_only_ingestion:
-            # Some parser formats store text in paragraph/title/list blocks.
-            if not text_content.strip():
-                text_parts = []
-                for item in normalized_content_list:
-                    candidate = item.get("text")
-                    if isinstance(candidate, str) and candidate.strip():
-                        text_parts.append(candidate.strip())
-                text_content = "\n\n".join(text_parts)
-
             await self._insert_text_content_embedding_only(
                 text_content=text_content, file_ref=file_ref, doc_id=doc_id
             )
@@ -2128,6 +2214,22 @@ class ProcessorMixin:
                     duration_seconds=insert_duration,
                     doc_id=doc_id,
                 )
+            if skip_multimodal_processing:
+                await self._mark_multimodal_processing_complete(doc_id)
+                self.logger.info(
+                    "skip_multimodal_processing=True: text ingested via LightRAG; "
+                    "skipping multimodal batch for this document."
+                )
+                self.logger.info(f"Content list insertion complete for: {file_path}")
+                if callback_manager is not None:
+                    duration = time.time() - doc_start_time
+                    callback_manager.dispatch(
+                        "on_document_complete",
+                        file_path=file_path,
+                        doc_id=doc_id,
+                        duration_seconds=duration,
+                    )
+                return
         else:
             # file_ref is already derived above for subsequent multimodal stage
             pass

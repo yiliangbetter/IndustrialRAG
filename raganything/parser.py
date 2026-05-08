@@ -25,6 +25,7 @@ from __future__ import annotations
 
 
 import os
+import sys
 import platform
 import hashlib
 import json
@@ -230,6 +231,12 @@ class Parser:
                 # Prepare subprocess parameters to hide console window on Windows
                 # Try LibreOffice commands in order of preference
                 commands_to_try = ["libreoffice", "soffice"]
+                if sys.platform == "darwin":
+                    mac_soffice = Path(
+                        "/Applications/LibreOffice.app/Contents/MacOS/soffice"
+                    )
+                    if mac_soffice.is_file():
+                        commands_to_try.insert(0, str(mac_soffice))
 
                 conversion_successful = False
                 last_cmd = commands_to_try[-1]
@@ -805,12 +812,26 @@ class MineruParser(Parser):
             # Log the command being executed
             cls.logger.info(f"Executing mineru command: {' '.join(cmd)}")
 
-            env = None
+            env = os.environ.copy()
             if custom_env:
-                env = os.environ.copy()
                 env.update(custom_env)
+            # Nested mineru-api binds to loopback; HTTP(S)_PROXY breaks /health via proxy (502).
+            no_proxy_parts: list[str] = []
+            for key in ("NO_PROXY", "no_proxy"):
+                raw = env.get(key, "")
+                if raw:
+                    no_proxy_parts.extend(
+                        x.strip() for x in raw.split(",") if x.strip()
+                    )
+            for host in ("127.0.0.1", "localhost", "::1"):
+                if host not in no_proxy_parts:
+                    no_proxy_parts.append(host)
+            merged_no_proxy = ",".join(dict.fromkeys(no_proxy_parts))
+            env["NO_PROXY"] = merged_no_proxy
+            env["no_proxy"] = merged_no_proxy
 
             subprocess_kwargs = {
+                "stdin": subprocess.DEVNULL,
                 "stdout": subprocess.PIPE,
                 "stderr": subprocess.PIPE,
                 "text": True,
@@ -1299,6 +1320,7 @@ class MineruParser(Parser):
         doc_path: Union[str, Path],
         output_dir: Optional[str] = None,
         lang: Optional[str] = None,
+        method: str = "auto",
         **kwargs,
     ) -> List[Dict[str, Any]]:
         """
@@ -1313,18 +1335,22 @@ class MineruParser(Parser):
             doc_path: Path to the document file (.doc, .docx, .ppt, .pptx, .xls, .xlsx)
             output_dir: Output directory path
             lang: Document language for OCR optimization
+            method: Parsing method forwarded to MinerU (auto, txt, ocr)
             **kwargs: Additional parameters for mineru command
 
         Returns:
             List[Dict[str, Any]]: List of content blocks
         """
         try:
-            # Convert Office document to PDF using base class method
             pdf_path = self.convert_office_to_pdf(doc_path, output_dir)
 
             # Parse the converted PDF
             return self.parse_pdf(
-                pdf_path=pdf_path, output_dir=output_dir, lang=lang, **kwargs
+                pdf_path=pdf_path,
+                output_dir=output_dir,
+                method=method,
+                lang=lang,
+                **kwargs,
             )
 
         except Exception as e:
@@ -1336,6 +1362,7 @@ class MineruParser(Parser):
         text_path: Union[str, Path],
         output_dir: Optional[str] = None,
         lang: Optional[str] = None,
+        method: str = "auto",
         **kwargs,
     ) -> List[Dict[str, Any]]:
         """
@@ -1347,6 +1374,7 @@ class MineruParser(Parser):
             text_path: Path to the text file (.txt, .md)
             output_dir: Output directory path
             lang: Document language for OCR optimization
+            method: Parsing method forwarded to MinerU (auto, txt, ocr)
             **kwargs: Additional parameters for mineru command
 
         Returns:
@@ -1358,7 +1386,11 @@ class MineruParser(Parser):
 
             # Parse the converted PDF
             return self.parse_pdf(
-                pdf_path=pdf_path, output_dir=output_dir, lang=lang, **kwargs
+                pdf_path=pdf_path,
+                output_dir=output_dir,
+                method=method,
+                lang=lang,
+                **kwargs,
             )
 
         except Exception as e:
@@ -1404,9 +1436,13 @@ class MineruParser(Parser):
                 f"Warning: Office document detected ({ext}). "
                 f"MinerU 2.0 requires conversion to PDF first."
             )
-            return self.parse_office_doc(file_path, output_dir, lang, **kwargs)
+            return self.parse_office_doc(
+                file_path, output_dir, lang, method=method, **kwargs
+            )
         elif ext in self.TEXT_FORMATS:
-            return self.parse_text_file(file_path, output_dir, lang, **kwargs)
+            return self.parse_text_file(
+                file_path, output_dir, lang, method=method, **kwargs
+            )
         else:
             # For unsupported file types, try as PDF
             self.logger.warning(
