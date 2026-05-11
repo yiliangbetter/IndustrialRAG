@@ -50,7 +50,8 @@ async def async_main() -> None:
         "--data-repo-root",
         type=Path,
         default=None,
-        help="Checkout containing output/data_upload_test_v3 ... (or export RAG_DATA_REPO).",
+        help="Checkout containing output/data_upload_test_v3 ... "
+        "(or export RAG_DATA_REPO; default: this repository root).",
     )
     args = p.parse_args()
 
@@ -60,7 +61,7 @@ async def async_main() -> None:
         if env_dr:
             repo_data = Path(env_dr)
         else:
-            repo_data = Path("/Users/luli/Desktop/OpenSourceProjects/RAG-Anything")
+            repo_data = _ROOT
 
     repo_root = repo_data.expanduser().resolve()
     glob_root = (repo_root / "output" / "data_upload_test_v3").resolve()
