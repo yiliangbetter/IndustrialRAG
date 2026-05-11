@@ -53,6 +53,7 @@ async def run_batch(
     delay_seconds: float,
     embedding_func_max_async: int,
     embedding_batch_num: int,
+    limit_questions: int,
 ) -> None:
     import openpyxl
 
@@ -66,7 +67,11 @@ async def run_batch(
 
     embedding_backend = os.getenv("EMBEDDING_BACKEND", "openai").strip().lower()
 
-    base_url = os.getenv("LLM_BINDING_HOST", "").strip() or None
+    base_url = (
+        os.getenv("LLM_BINDING_HOST", "").strip()
+        or os.getenv("OPENAI_BASE_URL", "").strip()
+        or None
+    )
     emb_host = os.getenv("EMBEDDING_BINDING_HOST", "").strip()
     embedding_base_url = emb_host if emb_host else base_url
     if embedding_backend != "hf":
@@ -207,7 +212,10 @@ async def run_batch(
 
     records: list[dict] = []
     rows = list(ws_in.iter_rows(min_row=2, values_only=False))
+    answered = 0
     for row_cells in rows:
+        if limit_questions > 0 and answered >= limit_questions:
+            break
         q_cell = row_cells[q_col - 1]
         question = q_cell.value
         if question is None or (isinstance(question, str) and not question.strip()):
@@ -232,6 +240,7 @@ async def run_batch(
         }
         rec["RAG回答"] = answer
         records.append(rec)
+        answered += 1
         if delay_seconds > 0:
             await asyncio.sleep(delay_seconds)
 
@@ -290,6 +299,12 @@ def main() -> None:
         type=int,
         default=int(os.getenv("EMBEDDING_BATCH_NUM", "1")),
     )
+    p.add_argument(
+        "--limit",
+        type=int,
+        default=0,
+        help="Answer at most N non-empty questions from the sheet (0 = all).",
+    )
     args = p.parse_args()
     asyncio.run(
         run_batch(
@@ -301,6 +316,7 @@ def main() -> None:
             args.delay,
             args.embedding_max_async,
             args.embedding_batch_num,
+            args.limit,
         )
     )
 
