@@ -6,6 +6,7 @@ Set EMBEDDING_BACKEND=hf and EMBEDDING_DIM / EMBEDDING_MODEL / HF_HOME as needed
 
 from __future__ import annotations
 
+import asyncio
 import os
 from typing import Any
 
@@ -32,7 +33,8 @@ def make_local_hf_embedding_func(embedding_dim: int, embedding_model: str | None
     except ImportError as e:
         raise ImportError(
             "sentence-transformers (and numpy) are required for EMBEDDING_BACKEND=hf. "
-            'Install with: pip install "sentence-transformers>=3.0.0"'
+            'Install with: pip install "raganything[local-embed]" '
+            'or pip install "sentence-transformers>=3.0.0".'
         ) from e
 
     model_id = embedding_model or os.getenv("EMBEDDING_MODEL", "BAAI/bge-m3")
@@ -49,10 +51,10 @@ def make_local_hf_embedding_func(embedding_dim: int, embedding_model: str | None
 
     max_token_size = int(os.getenv("HF_EMBED_MAX_TOKEN", "8192"))
 
-    async def hf_embed(texts):
+    def _encode_sync(text_list: list[str]) -> np.ndarray:
         model = _get_model()
         vecs = model.encode(
-            list(texts),
+            text_list,
             normalize_embeddings=True,
             convert_to_numpy=True,
         )
@@ -63,6 +65,9 @@ def make_local_hf_embedding_func(embedding_dim: int, embedding_model: str | None
                 "Set EMBEDDING_DIM to match the model (1024 for BAAI/bge-m3)."
             )
         return out
+
+    async def hf_embed(texts):
+        return await asyncio.to_thread(_encode_sync, list(texts))
 
     return EmbeddingFunc(
         embedding_dim=embedding_dim,

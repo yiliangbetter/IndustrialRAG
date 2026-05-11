@@ -24,7 +24,6 @@ dependencies = [
     "huggingface_hub",
     "lightrag-hku",
     "mineru[core]",
-    "sentence-transformers>=5.4.1",
     "tqdm",
 ]
 
@@ -45,6 +44,7 @@ markdown = [
 all = [
     "Pillow>=10.0.0",
     "reportlab>=4.0.0",
+    "sentence-transformers>=3.0.0",
     "paddleocr>=2.7.0",
     "pypdfium2>=4.25.0",
     "markdown>=3.4.0",

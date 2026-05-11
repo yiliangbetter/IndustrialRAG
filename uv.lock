@@ -4189,7 +4189,6 @@ dependencies = [
     { name = "huggingface-hub" },
     { name = "lightrag-hku" },
     { name = "mineru", extra = ["core"] },
-    { name = "sentence-transformers" },
     { name = "tqdm" },
 ]
 
@@ -4201,6 +4200,7 @@ all = [
     { name = "pygments" },
     { name = "pypdfium2" },
     { name = "reportlab" },
+    { name = "sentence-transformers" },
     { name = "weasyprint" },
 ]
 image = [
@@ -4251,7 +4251,7 @@ requires-dist = [
     { name = "pypdfium2", marker = "extra == 'paddleocr'", specifier = ">=4.25.0" },
     { name = "reportlab", marker = "extra == 'all'", specifier = ">=4.0.0" },
     { name = "reportlab", marker = "extra == 'text'", specifier = ">=4.0.0" },
-    { name = "sentence-transformers", specifier = ">=5.4.1" },
+    { name = "sentence-transformers", marker = "extra == 'all'", specifier = ">=3.0.0" },
     { name = "sentence-transformers", marker = "extra == 'local-embed'", specifier = ">=3.0.0" },
     { name = "tqdm" },
     { name = "weasyprint", marker = "extra == 'all'", specifier = ">=60.0" },
