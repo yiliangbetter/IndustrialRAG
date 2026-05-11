@@ -551,11 +551,12 @@ class ProcessorMixin:
                 self.logger.info(
                     "Detected Office or HTML document, using parser for Office/HTML..."
                 )
+                office_parse_kwargs = {**kwargs, "method": parse_method}
                 content_list = await asyncio.to_thread(
                     doc_parser.parse_office_doc,
                     doc_path=file_path,
                     output_dir=output_dir,
-                    **kwargs,
+                    **office_parse_kwargs,
                 )
             else:
                 # For other or unknown formats, use generic parser
@@ -2102,7 +2103,7 @@ class ProcessorMixin:
             doc_id: Optional document ID, if not provided will be generated from content
             display_stats: Whether to display content statistics (defaults to config.display_content_stats)
             skip_multimodal_processing: If True and non-empty text was inserted via LightRAG,
-                skip multimodal processors and mark multimodal stage complete (text-first KG path).
+                skip multimodal processors and mark multimodal stage complete (text-only KG path).
 
         Note:
             - img_path must be an absolute path to the image file
