@@ -18,6 +18,8 @@ Examples (run from repo root with ``uv run python``):
   ``scripts/rag_pipeline_parse_graph_chat.py --input-folder ./pdfs -w ./rag_storage_run --ingest-only``
 - One-shot question after ingest:
   ``scripts/rag_pipeline_parse_graph_chat.py --input-folder ./pdfs -w ./rag_storage_run --query '...'``
+- Query only (reuse existing ``-w`` storage after a prior ingest):
+  ``scripts/rag_pipeline_parse_graph_chat.py --query-only -w ./rag_storage_run``
 """
 
 from __future__ import annotations
@@ -35,6 +37,11 @@ from dotenv import load_dotenv
 _ROOT = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(_ROOT))
 load_dotenv(dotenv_path=_ROOT / ".env", override=False)
+
+# Before heavy imports (e.g. lightrag → transformers), honor embed-offline for hub.
+if (os.getenv("HF_EMBED_OFFLINE") or "").strip().lower() in ("1", "true", "yes"):
+    os.environ["HF_HUB_OFFLINE"] = "1"
+    os.environ.setdefault("TRANSFORMERS_OFFLINE", "1")
 
 
 def _ensure_venv_bin_on_path() -> None:
@@ -304,21 +311,57 @@ async def _ingest_folder(
     return ok, fail
 
 
+_QUIT_TOKENS = frozenset(
+    {
+        "exit",
+        "quit",
+        "bye",
+        "/exit",
+        "/quit",
+        ":q",
+        "!q",
+        "退出",
+        "再见",
+    }
+)
+
+
+def _interactive_should_quit(line: str) -> bool:
+    t = (line or "").strip()
+    if not t:
+        return False
+    if t in _QUIT_TOKENS:
+        return True
+    return t.lower() in _QUIT_TOKENS
+
+
 async def _interactive_loop(rag, query_mode: str) -> None:
     from lightrag.utils import logger
 
     print(
-        "Ready. Type a question and press Enter. Empty line or 'exit' / 'quit' ends.\n",
+        "Ready. Ask a question after the Q> prompt.\n"
+        "  Empty line: new Q> line only (like a terminal).\n"
+        "  Exit: exit | quit | bye | /exit | /quit | :q | !q | 退出 | 再见\n"
+        "  Or: Ctrl+C (Windows: Ctrl+Break may work if Ctrl+C is swallowed)\n",
         flush=True,
     )
     while True:
-        q = await asyncio.to_thread(input, "Q> ")
-        q = (q or "").strip()
-        if not q or q.lower() in ("exit", "quit"):
+        try:
+            q = await asyncio.to_thread(input, "Q> ")
+        except (EOFError, KeyboardInterrupt):
+            print("\n[exit]", flush=True)
             break
+        q = (q or "").strip()
+        if _interactive_should_quit(q):
+            break
+        if not q:
+            continue
         try:
             ans = await rag.aquery(q, mode=query_mode, vlm_enhanced=False)
             print(ans or "", flush=True)
+        except (asyncio.CancelledError, KeyboardInterrupt):
+            print("\n[exit]", flush=True)
+            break
         except Exception as e:
             logger.error(f"Query failed: {e}")
             print(f"[error] {e}", flush=True)
@@ -331,8 +374,9 @@ async def async_main() -> None:
     p.add_argument(
         "--input-folder",
         type=Path,
-        required=True,
-        help="Folder containing documents (PDF, Office, images, …).",
+        default=None,
+        help="Folder containing documents (PDF, Office, images, …). "
+        "Not required when --query-only.",
     )
     p.add_argument(
         "-w",
@@ -383,6 +427,11 @@ async def async_main() -> None:
         help="Parse + graph ingest only; do not start the question loop.",
     )
     p.add_argument(
+        "--query-only",
+        action="store_true",
+        help="Skip parsing/ingest; load existing graph from -w and run --query or interactive chat.",
+    )
+    p.add_argument(
         "--query",
         type=str,
         default="",
@@ -395,36 +444,44 @@ async def async_main() -> None:
     )
     args = p.parse_args()
 
-    input_folder = args.input_folder.expanduser().resolve()
-    if not input_folder.is_dir():
-        raise SystemExit(f"Not a directory: {input_folder}")
+    if args.query_only and args.ingest_only:
+        raise SystemExit("Choose either --query-only or --ingest-only, not both.")
+    if not args.query_only:
+        if args.input_folder is None:
+            raise SystemExit("--input-folder is required unless --query-only.")
+        input_folder = args.input_folder.expanduser().resolve()
+        if not input_folder.is_dir():
+            raise SystemExit(f"Not a directory: {input_folder}")
+    else:
+        input_folder = None
 
     args.working_dir = args.working_dir.expanduser().resolve()
     args.parser_output_dir = args.parser_output_dir.expanduser().resolve()
     args.parser_output_dir.mkdir(parents=True, exist_ok=True)
 
-    if args.mineru_download_models:
+    if args.mineru_download_models and not args.query_only:
         _download_mineru_pipeline_models()
 
     rag, config, logger = await _build_rag(
         args.working_dir,
         args.parser_output_dir,
     )
-    parse_extra = _mineru_parse_kwargs(config.parser)
 
-    await _ingest_folder(
-        rag,
-        config,
-        logger,
-        input_folder=input_folder,
-        parser_output_dir=args.parser_output_dir,
-        parse_method=args.parse_method,
-        parse_extra=parse_extra,
-        recursive=args.recursive,
-        limit=args.limit,
-        skip_multimodal=args.skip_multimodal,
-    )
-    await rag.finalize_storages()
+    if not args.query_only:
+        parse_extra = _mineru_parse_kwargs(config.parser)
+        await _ingest_folder(
+            rag,
+            config,
+            logger,
+            input_folder=input_folder,
+            parser_output_dir=args.parser_output_dir,
+            parse_method=args.parse_method,
+            parse_extra=parse_extra,
+            recursive=args.recursive,
+            limit=args.limit,
+            skip_multimodal=args.skip_multimodal,
+        )
+        await rag.finalize_storages()
 
     if args.ingest_only:
         return

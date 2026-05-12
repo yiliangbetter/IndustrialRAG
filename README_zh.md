@@ -298,6 +298,10 @@ python -c "from raganything import RAGAnything; rag = RAGAnything(); print('✅ 
 
 模型在首次使用时自动下载。手动下载参考[MinerU模型源配置](https://github.com/opendatalab/MinerU/blob/master/README_zh-CN.md#22-%E6%A8%A1%E5%9E%8B%E6%BA%90%E9%85%8D%E7%BD%AE)：
 
+### 流水线脚本（解析 → 灌库 → 问答）
+
+从源码仓库本地运行时，可使用 **`scripts/rag_pipeline_parse_graph_chat.py`** 完成文档解析、图谱写入与交互或单次问答（支持 **`--ingest-only`**、**`--query-only`** 等）。命令行参数、`.env` 配置与示例见 **[文档解析灌库与图谱问答脚本说明](docs/文档解析灌库与图谱问答脚本说明.md)**。
+
 ### 使用示例
 
 #### 1. 端到端文档处理

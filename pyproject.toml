@@ -58,8 +58,8 @@ Documentation = "https://github.com/HKUDS/RAG-Anything"
 Repository = "https://github.com/HKUDS/RAG-Anything"
 Issues = "https://github.com/HKUDS/RAG-Anything/issues"
 
-[tool.uv]
-dev-dependencies = [
+[dependency-groups]
+dev = [
     "pytest>=6.0",
     "pytest-asyncio",
     "black",
@@ -68,6 +68,24 @@ dev-dependencies = [
     "mypy",
     "openai",
     "python-dotenv",
+]
+
+# Resolve torch/torchvision/torchaudio from the official CUDA 13.0 wheel index so
+# `uv sync` / `uv run` do not reinstall the small PyPI CPU-only Windows wheels.
+# (Other platforms: remove or adjust these entries if resolution fails locally.)
+[[tool.uv.index]]
+name = "pytorch-cu130"
+url = "https://download.pytorch.org/whl/cu130"
+explicit = true
+
+[tool.uv.sources]
+torch = { index = "pytorch-cu130" }
+torchvision = { index = "pytorch-cu130" }
+
+[tool.uv]
+override-dependencies = [
+    "torch==2.11.0+cu130",
+    "torchvision==0.26.0+cu130",
 ]
 
 [tool.setuptools.packages.find]
