@@ -62,6 +62,7 @@ Issues = "https://github.com/HKUDS/RAG-Anything/issues"
 dev-dependencies = [
     "pytest>=6.0",
     "pytest-asyncio",
+    "pytest-cov>=4.0",
     "black",
     "isort",
     "flake8",
@@ -86,3 +87,16 @@ target-version = "py310"
 testpaths = ["tests"]
 python_files = ["test*.py"]
 norecursedirs = ["examples"]
+
+[tool.coverage.run]
+source = ["raganything"]
+branch = true
+
+[tool.coverage.report]
+omit = ["*/tests/*"]
+exclude_lines = [
+    "pragma: no cover",
+    "if TYPE_CHECKING:",
+    "\\.\\.\\.",
+    "raise NotImplementedError",
+]
