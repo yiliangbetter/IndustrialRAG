@@ -300,7 +300,7 @@ python -c "from raganything import RAGAnything; rag = RAGAnything(); print('✅ 
 
 ### 流水线脚本（解析 → 灌库 → 问答）
 
-从源码仓库本地运行时，可使用 **`scripts/rag_pipeline_parse_graph_chat.py`** 完成文档解析、图谱写入与交互或单次问答（支持 **`--ingest-only`**、**`--query-only`** 等）。命令行参数、`.env` 配置与示例见 **[文档解析灌库与图谱问答脚本说明](docs/文档解析灌库与图谱问答脚本说明.md)**。
+从源码仓库本地运行时，可使用 **`scripts/rag_pipeline_parse_graph_chat.py`** 完成文档解析、图谱写入与交互或单次问答（支持 **`--ingest-only`**、**`--query-only`** 等）。命令行参数、`.env` 配置与示例见 **[文档解析灌库与图谱问答脚本说明](docs/文档解析灌库与图谱问答脚本说明.md)**。分步说明（预下载模型、仅灌库、仅问答、排错）见 **[Model download, ingest-only, and query-only](docs/model-download-ingest-query.md)**（英文路径名，正文为中文）。
 
 ### 使用示例
 

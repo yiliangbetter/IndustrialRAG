@@ -27,6 +27,7 @@ from raganything.local_hf_embedding import (
     ensure_hf_home_from_repo_fallback,
     make_local_hf_embedding_func,
 )
+from raganything.pipeline_rerank import build_rerank_model_func_from_env
 
 
 def _json_safe(val):
@@ -178,10 +179,13 @@ async def run_batch(
             ),
         )
 
+    rerank_model_func = build_rerank_model_func_from_env()
+
     lightrag = LightRAG(
         working_dir=str(working_dir),
         llm_model_func=llm_model_func,
         embedding_func=embedding_func,
+        rerank_model_func=rerank_model_func,
         enable_llm_cache=True,
         embedding_func_max_async=embedding_func_max_async,
         embedding_batch_num=embedding_batch_num,

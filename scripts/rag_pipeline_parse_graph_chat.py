@@ -96,6 +96,8 @@ def _download_mineru_pipeline_models() -> None:
 async def _build_rag(
     working_dir: Path,
     parser_output_dir: Path,
+    *,
+    skip_multimodal: bool = True,
 ):
     from lightrag import LightRAG
     from lightrag.llm.openai import openai_complete_if_cache, openai_embed
@@ -107,6 +109,12 @@ async def _build_rag(
     )
 
     ensure_hf_home_from_repo_fallback(_ROOT)
+
+    def _env_bool(name: str, default: bool) -> bool:
+        v = os.getenv(name)
+        if v is None or not str(v).strip():
+            return default
+        return str(v).strip().lower() in ("1", "true", "yes", "on")
 
     llm_key = (
         os.getenv("OPENAI_API_KEY", "").strip()
@@ -140,15 +148,24 @@ async def _build_rag(
         embedding_dim = int(os.getenv("EMBEDDING_DIM", "1536"))
         embedding_model = os.getenv("EMBEDDING_MODEL", "text-embedding-3-small")
 
+    if skip_multimodal:
+        enable_image_processing = False
+        enable_table_processing = False
+        enable_equation_processing = False
+    else:
+        enable_image_processing = _env_bool("ENABLE_IMAGE_PROCESSING", True)
+        enable_table_processing = _env_bool("ENABLE_TABLE_PROCESSING", True)
+        enable_equation_processing = _env_bool("ENABLE_EQUATION_PROCESSING", True)
+
     config = RAGAnythingConfig(
         working_dir=str(working_dir),
         allow_embedding_only_ingestion=False,
         parser=os.getenv("PARSER", "mineru"),
         parse_method=os.getenv("PARSE_METHOD", "auto"),
         parser_output_dir=str(parser_output_dir),
-        enable_image_processing=False,
-        enable_table_processing=False,
-        enable_equation_processing=False,
+        enable_image_processing=enable_image_processing,
+        enable_table_processing=enable_table_processing,
+        enable_equation_processing=enable_equation_processing,
         max_concurrent_files=int(os.getenv("MAX_CONCURRENT_FILES", "1")),
     )
 
@@ -234,10 +251,15 @@ async def _build_rag(
             ),
         )
 
+    from raganything.pipeline_rerank import build_rerank_model_func_from_env
+
+    rerank_model_func = build_rerank_model_func_from_env()
+
     lightrag = LightRAG(
         working_dir=str(working_dir),
         llm_model_func=llm_model_func,
         embedding_func=embedding_func,
+        rerank_model_func=rerank_model_func,
         enable_llm_cache=True,
         embedding_func_max_async=int(os.getenv("EMBEDDING_FUNC_MAX_ASYNC", "1")),
         embedding_batch_num=int(os.getenv("EMBEDDING_BATCH_NUM", "1")),
@@ -335,6 +357,28 @@ def _interactive_should_quit(line: str) -> bool:
     return t.lower() in _QUIT_TOKENS
 
 
+def _split_env_csv(name: str) -> list[str]:
+    raw = (os.getenv(name) or "").strip()
+    if not raw:
+        return []
+    return [x.strip() for x in raw.split(",") if x.strip()]
+
+
+def _query_extras_from_env() -> dict:
+    """Optional ``QueryParam`` fields from ``.env`` (retrieval / answer steering)."""
+    out: dict = {}
+    up = (os.getenv("RAG_QUERY_USER_PROMPT") or "").strip()
+    if up:
+        out["user_prompt"] = up
+    hk = _split_env_csv("RAG_QUERY_HL_KEYWORDS")
+    if hk:
+        out["hl_keywords"] = hk
+    lk = _split_env_csv("RAG_QUERY_LL_KEYWORDS")
+    if lk:
+        out["ll_keywords"] = lk
+    return out
+
+
 async def _interactive_loop(rag, query_mode: str) -> None:
     from lightrag.utils import logger
 
@@ -357,7 +401,9 @@ async def _interactive_loop(rag, query_mode: str) -> None:
         if not q:
             continue
         try:
-            ans = await rag.aquery(q, mode=query_mode, vlm_enhanced=False)
+            ans = await rag.aquery(
+                q, mode=query_mode, vlm_enhanced=False, **_query_extras_from_env()
+            )
             print(ans or "", flush=True)
         except (asyncio.CancelledError, KeyboardInterrupt):
             print("\n[exit]", flush=True)
@@ -413,7 +459,12 @@ async def async_main() -> None:
         "--skip-multimodal",
         action=argparse.BooleanOptionalAction,
         default=True,
-        help="After text LightRAG insert, skip multimodal processors (default: True).",
+        help=(
+            "After text LightRAG insert, skip multimodal processors (default: True). "
+            "Use --no-skip-multimodal for table/image/equation processing; "
+            "then enable_* flags follow env ENABLE_IMAGE_PROCESSING, ENABLE_TABLE_PROCESSING, "
+            "ENABLE_EQUATION_PROCESSING (each defaults to true when unset)."
+        ),
     )
     p.add_argument(
         "--query-mode",
@@ -465,6 +516,7 @@ async def async_main() -> None:
     rag, config, logger = await _build_rag(
         args.working_dir,
         args.parser_output_dir,
+        skip_multimodal=args.skip_multimodal,
     )
 
     if not args.query_only:
@@ -491,6 +543,7 @@ async def async_main() -> None:
             args.query.strip(),
             mode=args.query_mode,
             vlm_enhanced=False,
+            **_query_extras_from_env(),
         )
         print(ans or "", flush=True)
         return

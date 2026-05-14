@@ -216,6 +216,31 @@ class ProcessorMixin:
 
         return "\n\n".join(parts)
 
+    def _flatten_table_text_for_skip_multimodal(
+        self, items: List[Dict[str, Any]]
+    ) -> str:
+        """Collect table bodies for text-only ingest when multimodal stage is skipped.
+
+        ``separate_content`` only merges ``type=='text'``; ``type=='table'`` blocks go to
+        ``multimodal_items`` and are never inserted if ``skip_multimodal_processing`` is True.
+        """
+        parts: List[str] = []
+        for item in items:
+            if not isinstance(item, dict) or item.get("type") != "table":
+                continue
+            body = item.get("table_body")
+            if isinstance(body, str) and body.strip():
+                parts.append(body.strip())
+                continue
+            content = item.get("content")
+            if isinstance(content, dict):
+                html = (content.get("html") or "").strip()
+                if html:
+                    parts.append(html)
+        if not parts:
+            return ""
+        return "\n\n".join(f"[Table]\n{t}" for t in parts)
+
     async def _insert_text_content_embedding_only(
         self, text_content: str, file_ref: str, doc_id: str
     ) -> None:
@@ -2169,6 +2194,20 @@ class ProcessorMixin:
                 if isinstance(candidate, str) and candidate.strip():
                     text_parts.append(candidate.strip())
             text_content = "\n\n".join(text_parts)
+
+        if skip_multimodal_processing:
+            table_blob = self._flatten_table_text_for_skip_multimodal(
+                normalized_content_list
+            )
+            if table_blob:
+                if text_content.strip():
+                    text_content = text_content.strip() + "\n\n" + table_blob
+                else:
+                    text_content = table_blob
+                self.logger.info(
+                    "skip_multimodal_processing: appended %d chars of table text for indexing",
+                    len(table_blob),
+                )
 
         # Step 1.5: Set content source for context extraction in multimodal processing
         if hasattr(self, "set_content_source_for_context") and multimodal_items:
