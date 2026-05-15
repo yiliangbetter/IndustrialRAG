@@ -1721,6 +1721,15 @@ class ProcessorMixin:
                 self.logger.info(
                     "Embedding-only ingestion enabled: skipped multimodal and LLM-dependent extraction."
                 )
+                self.logger.info(f"Document {file_path} processing complete!")
+                if callback_manager is not None:
+                    duration = time.time() - doc_start_time
+                    callback_manager.dispatch(
+                        "on_document_complete",
+                        file_path=str(file_path),
+                        doc_id=doc_id,
+                        duration_seconds=duration,
+                    )
                 return
 
             # Step 2.5: Set content source for context extraction in multimodal processing
@@ -2187,6 +2196,15 @@ class ProcessorMixin:
             self.logger.info(
                 "Embedding-only ingestion enabled: inserted text-only chunks from content list."
             )
+            self.logger.info(f"Content list insertion complete for: {file_path}")
+            if callback_manager is not None:
+                duration = time.time() - doc_start_time
+                callback_manager.dispatch(
+                    "on_document_complete",
+                    file_path=file_path,
+                    doc_id=doc_id,
+                    duration_seconds=duration,
+                )
             return
 
         if text_content.strip():
