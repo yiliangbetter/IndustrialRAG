@@ -72,9 +72,6 @@ lightrag-dev/
 gui/
 tiktoken_cache/
 
-# unit-test files
-test_*
-
 # Cline files
 memory-bank/
 
