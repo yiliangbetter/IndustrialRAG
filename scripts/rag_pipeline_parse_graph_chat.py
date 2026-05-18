@@ -271,6 +271,13 @@ async def _build_rag(
     )
     await lightrag.initialize_storages()
 
+    scripts_dir = Path(__file__).resolve().parent
+    if str(scripts_dir) not in sys.path:
+        sys.path.insert(0, str(scripts_dir))
+    from query_doc_steering import install_query_steering_hooks  # noqa: WPS433
+
+    install_query_steering_hooks()
+
     rag = RAGAnything(
         config=config,
         lightrag=lightrag,
@@ -369,10 +376,19 @@ def _split_env_csv(name: str) -> list[str]:
     return [x.strip() for x in raw.split(",") if x.strip()]
 
 
-def _query_extras_from_env() -> dict:
+def _query_extras_from_env(query: str | None = None) -> dict:
     """Optional ``QueryParam`` fields from ``.env`` (retrieval / answer steering)."""
     out: dict = {}
     up = (os.getenv("RAG_QUERY_USER_PROMPT") or "").strip()
+    if query:
+        scripts_dir = Path(__file__).resolve().parent
+        if str(scripts_dir) not in sys.path:
+            sys.path.insert(0, str(scripts_dir))
+        from query_doc_steering import build_steering_user_prompt  # noqa: WPS433
+
+        steer = build_steering_user_prompt(query)
+        if steer:
+            up = f"{up}\n{steer}".strip() if up else steer
     if up:
         out["user_prompt"] = up
     hk = _split_env_csv("RAG_QUERY_HL_KEYWORDS")
@@ -407,7 +423,7 @@ async def _interactive_loop(rag, query_mode: str) -> None:
             continue
         try:
             ans = await rag.aquery(
-                q, mode=query_mode, vlm_enhanced=False, **_query_extras_from_env()
+                q, mode=query_mode, vlm_enhanced=False, **_query_extras_from_env(q)
             )
             print(ans or "", flush=True)
         except (asyncio.CancelledError, KeyboardInterrupt):
@@ -548,7 +564,7 @@ async def async_main() -> None:
             args.query.strip(),
             mode=args.query_mode,
             vlm_enhanced=False,
-            **_query_extras_from_env(),
+            **_query_extras_from_env(args.query.strip()),
         )
         print(ans or "", flush=True)
         return

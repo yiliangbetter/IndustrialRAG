@@ -1,0 +1,170 @@
+<!DOCTYPE html>
+
+<html lang="zh-CN">
+
+  <head>
+
+    <meta charset="UTF-8" />
+
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+
+    <title>RAG-Anything 问答</title>
+
+    <link rel="stylesheet" href="/static/styles.css" />
+
+  </head>
+
+  <body>
+
+    <div class="app">
+
+      <aside class="sidebar">
+
+        <header class="brand">
+
+          <span class="brand-mark">RAG</span>
+
+          <div>
+
+            <h1>RAG-Anything</h1>
+
+            <p class="brand-sub">图谱 + 向量 · 浏览器问答</p>
+
+          </div>
+
+        </header>
+
+
+
+        <section class="panel" id="status-panel">
+
+          <h2>服务状态</h2>
+
+          <dl class="meta">
+
+            <dt>就绪</dt>
+
+            <dd id="meta-ready">—</dd>
+
+            <dt>工作目录</dt>
+
+            <dd id="meta-wd" class="mono">—</dd>
+
+            <dt>查询模式</dt>
+
+            <dd id="meta-mode">—</dd>
+
+          </dl>
+
+          <p id="meta-error" class="error hidden"></p>
+
+        </section>
+
+
+
+        <section class="panel">
+
+          <h2>查询设置</h2>
+
+          <label class="field">
+
+            <span>LightRAG 模式</span>
+
+            <select id="query-mode">
+
+              <option value="mix">mix（图谱 + 向量）</option>
+
+              <option value="hybrid">hybrid</option>
+
+              <option value="local">local</option>
+
+              <option value="global">global</option>
+
+              <option value="naive">naive（仅向量）</option>
+
+            </select>
+
+          </label>
+
+        </section>
+
+
+
+        <section class="panel">
+
+          <h2>上传灌库</h2>
+
+          <p class="hint">解析并写入当前工作目录下的知识库（耗时较长，请勿关闭页面）。</p>
+
+          <label class="upload-zone" id="upload-zone">
+
+            <input type="file" id="file-input" multiple accept=".pdf,.doc,.docx,.ppt,.pptx,.xls,.xlsx,.txt,.md,.png,.jpg,.jpeg" />
+
+            <span>点击或拖拽文件到此处</span>
+
+          </label>
+
+          <ul id="file-list" class="file-list"></ul>
+
+          <button type="button" class="btn secondary" id="btn-ingest" disabled>开始灌库</button>
+
+          <p id="ingest-status" class="hint"></p>
+
+        </section>
+
+      </aside>
+
+
+
+      <main class="chat">
+
+        <header class="chat-header">
+
+          <h2>对话</h2>
+
+          <button type="button" class="btn ghost" id="btn-clear" title="清空对话">清空</button>
+
+        </header>
+
+
+
+        <div class="messages" id="messages" aria-live="polite">
+
+          <div id="messages-end" class="messages-end" aria-hidden="true"></div>
+
+        </div>
+
+
+
+        <form class="composer" id="composer">
+
+          <textarea
+
+            id="query-input"
+
+            rows="2"
+
+            placeholder="输入问题，Enter 发送，Shift+Enter 换行…"
+
+            required
+
+          ></textarea>
+
+          <button type="submit" class="btn primary" id="btn-send">发送</button>
+
+        </form>
+
+      </main>
+
+    </div>
+
+    <script src="/static/vendor/marked.min.js"></script>
+
+    <script src="/static/vendor/purify.min.js"></script>
+
+    <script src="/static/app.js"></script>
+
+  </body>
+
+</html>
+

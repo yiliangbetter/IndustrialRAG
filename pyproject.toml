@@ -51,6 +51,13 @@ all = [
     "weasyprint>=60.0",
     "pygments>=2.10.0",
 ]
+web = [
+    "fastapi>=0.115.0",
+    "uvicorn[standard]>=0.32.0",
+    "python-multipart>=0.0.12",
+    # HF embedding (EMBEDDING_BACKEND=hf) used by the pipeline Web UI
+    "sentence-transformers>=3.0.0",
+]
 
 [project.urls]
 Homepage = "https://github.com/HKUDS/RAG-Anything"
