@@ -1,11 +1,17 @@
 #!/usr/bin/env python3
-"""Print structured retrieval (entities / relations / chunks) for a query — same path as aquery, no LLM.
+"""Dump LightRAG retrieval context for any query (``aquery_data`` path, no LLM).
 
-Uses LightRAG ``aquery_data`` (see lightrag docs). Example:
+Prints metadata, chunk list with previews, and optional substring hit checks.
+Examples::
 
-  uv run python scripts/dump_query_context.py -w ./rag_storage_run
-  uv run python scripts/dump_query_context.py -w D:/data/rag_storage_run --query-mode mix \\
-    "高速智能封边机的保养中，哪些部件需要使用美孚长效液压油？"
+  uv run python scripts/dump_query_context.py -w ./rag_storage_run \\
+    "四种封边机电控板保养周期分别是多久"
+
+  uv run python scripts/dump_query_context.py -w ./rag_storage_run \\
+    --markers "3.14.5,每季度,电控板,变频器" \\
+    "四种封边机电控板保养周期分别是多久"
+
+If QUERY is omitted, uses env ``DUMP_QUERY_DEFAULT`` when set; otherwise the script exits with an error.
 """
 
 from __future__ import annotations
@@ -37,6 +43,12 @@ spec.loader.exec_module(rpc)
 from lightrag import QueryParam  # noqa: E402
 
 
+def _split_markers(raw: str | None) -> list[str]:
+    if not raw or not raw.strip():
+        return []
+    return [x.strip() for x in raw.split(",") if x.strip()]
+
+
 async def _async_main() -> None:
     p = argparse.ArgumentParser(description=__doc__)
     p.add_argument(
@@ -59,10 +71,13 @@ async def _async_main() -> None:
         help="LightRAG mode: mix, naive, hybrid, local, global, ...",
     )
     p.add_argument(
-        "query",
-        nargs="?",
-        default="高速智能封边机的保养中，哪些部件需要使用美孚长效液压油？",
-        help="Question text (default: Mobil oil parts question).",
+        "--markers",
+        type=str,
+        default="",
+        help=(
+            "Optional comma-separated substrings to search in merged chunk text "
+            "(e.g. '3.14.5,每季度,电控板'). Omit to skip marker sections."
+        ),
     )
     p.add_argument(
         "--chunk-preview",
@@ -74,16 +89,33 @@ async def _async_main() -> None:
         "--out",
         type=Path,
         default=None,
-        help="Write full report as UTF-8 to this file (recommended on Windows). Default: docs/query_context_dump.txt under repo root.",
+        help="Write full report as UTF-8 (recommended on Windows). Default: docs/query_context_dump.txt.",
+    )
+    p.add_argument(
+        "query",
+        nargs="?",
+        default=None,
+        help="Question text. If omitted, set DUMP_QUERY_DEFAULT in .env or export it.",
     )
     args = p.parse_args()
+
+    query = (args.query or "").strip() or (os.getenv("DUMP_QUERY_DEFAULT") or "").strip()
+    if not query:
+        p.error(
+            "Missing QUERY: pass it as the last argument, e.g. "
+            'dump_query_context.py -w ./storage "你的问题"'
+            " — or set DUMP_QUERY_DEFAULT in .env."
+        )
+
+    markers = _split_markers(args.markers)
+
     wd = args.working_dir.expanduser().resolve()
     pod = args.parser_output_dir.expanduser().resolve()
     pod.mkdir(parents=True, exist_ok=True)
 
     rag, _, _ = await rpc._build_rag(wd, pod)
     param = QueryParam(mode=args.query_mode.strip())
-    data = await rag.lightrag.aquery_data(args.query, param)
+    data = await rag.lightrag.aquery_data(query, param)
 
     out_path = args.out
     if out_path is None:
@@ -96,6 +128,7 @@ async def _async_main() -> None:
     def out(s: str = "") -> None:
         lines.append(s)
 
+    out("query: " + query)
     out("status: " + str(data.get("status")))
     out("message: " + str(data.get("message", "")))
     meta = data.get("metadata") or {}
@@ -109,35 +142,23 @@ async def _async_main() -> None:
     chunks = inner.get("chunks") or []
     out(f"\n=== counts: entities={len(entities)} relations={len(rels)} chunks={len(chunks)} ===")
 
-    markers = [
-        "美孚长效液压油",
-        "自动注油泵",
-        "导轨",
-        "滑块",
-        "集中润滑",
-        "润滑注油",
-        "注油泵",
-        "辅助进料",
-        "预铣",
-        "平切",
-        "精修",
-        "仿形",
-        "开槽",
-        "刮边",
-    ]
     all_chunk_text = "\n".join((c.get("content") or "") for c in chunks)
-    out("\n=== marker hits in merged chunk text (any chunk) ===")
-    for m in markers:
-        out(f"  {m!r}: {m in all_chunk_text}")
+    if markers:
+        out("\n=== marker hits in merged chunk text (any chunk) ===")
+        for m in markers:
+            out(f"  {m!r}: {m in all_chunk_text}")
+    else:
+        out("\n=== marker hits (skipped; pass --markers 'a,b,c' to scan substrings) ===")
 
     out(f"\n=== chunk previews (query_mode={args.query_mode!r}) ===\n")
     for i, c in enumerate(chunks):
         content = c.get("content") or ""
         fp = c.get("file_path", "")
-        hits = [m for m in markers if m in content]
+        hits = [m for m in markers if m in content] if markers else []
+        marker_note = f"markers_in_chunk={hits} | " if markers else ""
         out(
             f"--- chunk {i + 1}/{len(chunks)} | file_path={fp!r} | "
-            f"chunk_id={c.get('chunk_id', '')!r} | markers_in_chunk={hits} | len={len(content)} ---"
+            f"chunk_id={c.get('chunk_id', '')!r} | {marker_note}len={len(content)} ---"
         )
         limit = max(0, args.chunk_preview)
         if len(content) <= limit:

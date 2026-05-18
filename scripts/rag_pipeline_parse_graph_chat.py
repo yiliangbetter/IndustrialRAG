@@ -255,12 +255,17 @@ async def _build_rag(
 
     rerank_model_func = build_rerank_model_func_from_env()
 
+    enable_llm_cache = os.getenv("ENABLE_LLM_CACHE", "true").strip().lower() in (
+        "1",
+        "true",
+        "yes",
+    )
     lightrag = LightRAG(
         working_dir=str(working_dir),
         llm_model_func=llm_model_func,
         embedding_func=embedding_func,
         rerank_model_func=rerank_model_func,
-        enable_llm_cache=True,
+        enable_llm_cache=enable_llm_cache,
         embedding_func_max_async=int(os.getenv("EMBEDDING_FUNC_MAX_ASYNC", "1")),
         embedding_batch_num=int(os.getenv("EMBEDDING_BATCH_NUM", "1")),
     )
