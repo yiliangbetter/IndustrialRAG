@@ -1044,9 +1044,10 @@ python examples/text_format_test.py --check-reportlab --file dummy
 # 1) Validate LLM + embedding endpoints from .env (with basic retries)
 python scripts/validate_ark_endpoints.py
 
-# 2) Ingest all MinerU *_content_list_v2.json files under output/data_upload_test_v3
-#    into a target LightRAG/RAGAnything working directory
-python scripts/batch_ingest_content_lists.py -w ./rag_storage_wt1536
+# 2) Batch ingest MinerU *_content_list_v2.json (output/data_upload_test_v3) with **local HF**
+#    embeddings only (sentence-transformers; ``pip install "raganything[local-embed]"``).
+#    Exits with code 2 if EMBEDDING_BACKEND is set to anything other than ``hf``.
+uv run python scripts/batch_ingest_content_lists_local_hf.py -w ./rag_storage_wt1536
 
 # 3) Run Demo question bank batch QA and write both XLSX + JSONL outputs
 python scripts/run_demo_question_bank.py --mode mix --delay 4
