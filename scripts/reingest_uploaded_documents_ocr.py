@@ -198,7 +198,9 @@ async def main() -> None:
     )
     parse_extra = _mineru_parse_kwargs(config.parser)
 
-    def llm_model_func(prompt, system_prompt=None, history_messages=[], **kwargs):
+    def llm_model_func(prompt, system_prompt=None, history_messages=None, **kwargs):
+        if history_messages is None:
+            history_messages = []
         return openai_complete_if_cache(
             llm_model,
             prompt,
