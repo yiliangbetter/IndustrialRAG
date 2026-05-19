@@ -551,7 +551,12 @@ class ProcessorMixin:
                 self.logger.info(
                     "Detected Office or HTML document, using parser for Office/HTML..."
                 )
-                office_parse_kwargs = {**kwargs, "method": parse_method}
+                office_parse_kwargs = {
+                    k: v for k, v in kwargs.items() if k != "method"
+                }
+                effective_method = parse_method or self.config.parse_method
+                if effective_method is not None:
+                    office_parse_kwargs["method"] = effective_method
                 content_list = await asyncio.to_thread(
                     doc_parser.parse_office_doc,
                     doc_path=file_path,
