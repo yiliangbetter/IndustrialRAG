@@ -102,7 +102,9 @@ async def run_batch(
         enable_equation_processing=True,
     )
 
-    def llm_model_func(prompt, system_prompt=None, history_messages=[], **kwargs):
+    def llm_model_func(prompt, system_prompt=None, history_messages=None, **kwargs):
+        if history_messages is None:
+            history_messages = []
         return openai_complete_if_cache(
             llm_model,
             prompt,
