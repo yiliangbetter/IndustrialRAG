@@ -480,7 +480,7 @@ btnIngest.addEventListener("click", async () => {
   }
 });
 
-appendMessage("system", "欢迎使用 RAG-Anything。左侧可查看工作目录与模式，下方输入问题开始对话。");
+appendMessage("system", "欢迎使用南兴知识库问答助手。左侧可查看工作目录与模式，下方输入问题开始对话。");
 initMessagesScroll();
 pinMessagesEnd();
 refreshStatus();
