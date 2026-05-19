@@ -27,15 +27,21 @@ async def test_hf_embed_does_not_block_event_loop(monkeypatch):
 
     fake_sentence_transformers = types.ModuleType("sentence_transformers")
     fake_sentence_transformers.SentenceTransformer = FakeSentenceTransformer
-    monkeypatch.setitem(__import__("sys").modules, "sentence_transformers", fake_sentence_transformers)
+    monkeypatch.setitem(
+        __import__("sys").modules, "sentence_transformers", fake_sentence_transformers
+    )
 
     fake_lightrag = types.ModuleType("lightrag")
     fake_lightrag_utils = types.ModuleType("lightrag.utils")
     fake_lightrag_utils.EmbeddingFunc = FakeEmbeddingFunc
     monkeypatch.setitem(__import__("sys").modules, "lightrag", fake_lightrag)
-    monkeypatch.setitem(__import__("sys").modules, "lightrag.utils", fake_lightrag_utils)
+    monkeypatch.setitem(
+        __import__("sys").modules, "lightrag.utils", fake_lightrag_utils
+    )
 
-    embedding = make_local_hf_embedding_func(embedding_dim=3, embedding_model="fake/model")
+    embedding = make_local_hf_embedding_func(
+        embedding_dim=3, embedding_model="fake/model"
+    )
 
     tick_count = 0
     stop = asyncio.Event()
@@ -57,4 +63,3 @@ async def test_hf_embed_does_not_block_event_loop(monkeypatch):
     # and ticker does not advance during embedding.
     assert tick_count >= 5
     assert result.shape == (2, 3)
-

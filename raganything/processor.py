@@ -224,13 +224,17 @@ class ProcessorMixin:
             await self._mark_multimodal_processing_complete(doc_id)
             return
 
-        raw_chunks = [chunk.strip() for chunk in text_content.split("\n\n") if chunk.strip()]
+        raw_chunks = [
+            chunk.strip() for chunk in text_content.split("\n\n") if chunk.strip()
+        ]
         if not raw_chunks:
             raw_chunks = [text_content.strip()]
 
         chunk_data = {}
         for idx, chunk_text in enumerate(raw_chunks):
-            chunk_id = compute_mdhash_id(f"{doc_id}:{idx}:{chunk_text}", prefix="chunk-")
+            chunk_id = compute_mdhash_id(
+                f"{doc_id}:{idx}:{chunk_text}", prefix="chunk-"
+            )
             try:
                 tokens = len(self.lightrag.tokenizer.encode(chunk_text))
             except Exception:
@@ -551,9 +555,7 @@ class ProcessorMixin:
                 self.logger.info(
                     "Detected Office or HTML document, using parser for Office/HTML..."
                 )
-                office_parse_kwargs = {
-                    k: v for k, v in kwargs.items() if k != "method"
-                }
+                office_parse_kwargs = {k: v for k, v in kwargs.items() if k != "method"}
                 effective_method = parse_method or self.config.parse_method
                 if effective_method is not None:
                     office_parse_kwargs["method"] = effective_method

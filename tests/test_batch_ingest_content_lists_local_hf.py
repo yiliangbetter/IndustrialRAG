@@ -33,7 +33,9 @@ def bicl():
 def _restore_environ_after_each_test():
     """async_main mutates os.environ; avoid leaking into other test modules."""
     before = {
-        "ALLOW_EMBEDDING_ONLY_INGESTION": os.environ.get("ALLOW_EMBEDDING_ONLY_INGESTION"),
+        "ALLOW_EMBEDDING_ONLY_INGESTION": os.environ.get(
+            "ALLOW_EMBEDDING_ONLY_INGESTION"
+        ),
         "EMBEDDING_BACKEND": os.environ.get("EMBEDDING_BACKEND"),
     }
     yield
@@ -121,15 +123,15 @@ async def test_async_main_returns_1_when_no_content_list_json(
 
 
 @pytest.mark.asyncio
-async def test_async_main_returns_0_on_successful_ingest(
-    bicl, monkeypatch, tmp_path
-):
+async def test_async_main_returns_0_on_successful_ingest(bicl, monkeypatch, tmp_path):
     monkeypatch.setenv("EMBEDDING_BACKEND", "hf")
     repo = tmp_path / "repo"
     out = repo / "output" / "data_upload_test_v3"
     out.mkdir(parents=True)
     json_path = out / "doc_content_list_v2.json"
-    json_path.write_text(json.dumps([{"type": "text", "text": "hello"}]), encoding="utf-8")
+    json_path.write_text(
+        json.dumps([{"type": "text", "text": "hello"}]), encoding="utf-8"
+    )
     wd = tmp_path / "wd"
     wd.mkdir()
     monkeypatch.setattr(
@@ -168,9 +170,7 @@ async def test_async_main_returns_0_on_successful_ingest(
 
 
 @pytest.mark.asyncio
-async def test_async_main_returns_1_when_ingest_raises(
-    bicl, monkeypatch, tmp_path
-):
+async def test_async_main_returns_1_when_ingest_raises(bicl, monkeypatch, tmp_path):
     monkeypatch.setenv("EMBEDDING_BACKEND", "hf")
     repo = tmp_path / "repo"
     out = repo / "output" / "data_upload_test_v3"

@@ -58,7 +58,11 @@ def _mineru_parse_kwargs(parser_name: str) -> dict:
             out[key] = v
     if parser_name.lower() == "mineru" and "backend" not in out:
         out["backend"] = "pipeline"
-    if parser_name.lower() == "mineru" and "device" not in out and sys.platform == "darwin":
+    if (
+        parser_name.lower() == "mineru"
+        and "device" not in out
+        and sys.platform == "darwin"
+    ):
         out["device"] = "cpu"
     return out
 
@@ -261,9 +265,7 @@ async def _ingest_folder(
     limit: int,
     skip_multimodal: bool,
 ) -> tuple[int, int]:
-    files = _collect_files(
-        input_folder, config.supported_file_extensions, recursive
-    )
+    files = _collect_files(input_folder, config.supported_file_extensions, recursive)
     if not files:
         raise SystemExit(
             f"No supported files under {input_folder} "

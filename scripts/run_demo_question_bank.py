@@ -89,9 +89,7 @@ async def run_batch(
         embedding_model = os.getenv("EMBEDDING_MODEL", "BAAI/bge-m3")
     else:
         embedding_dim = int(os.getenv("EMBEDDING_DIM", "1536"))
-        embedding_model = os.getenv(
-            "EMBEDDING_MODEL", "text-embedding-3-small"
-        ).strip()
+        embedding_model = os.getenv("EMBEDDING_MODEL", "text-embedding-3-small").strip()
 
     config = RAGAnythingConfig(
         working_dir=str(working_dir),
@@ -253,9 +251,7 @@ async def run_batch(
         ws_in.cell(row=row_num, column=r_col, value=answer)
         row_vals = [c.value for c in row_cells]
         rec = {
-            headers[i]: _json_safe(row_vals[i])
-            if i < len(row_vals)
-            else None
+            headers[i]: _json_safe(row_vals[i]) if i < len(row_vals) else None
             for i in range(len(headers))
         }
         rec["RAG回答"] = answer
@@ -267,9 +263,7 @@ async def run_batch(
     wb_in.save(out_xlsx)
     with open(out_jsonl, "w", encoding="utf-8") as f:
         for rec in records:
-            f.write(
-                json.dumps(rec, ensure_ascii=False, default=str) + "\n"
-            )
+            f.write(json.dumps(rec, ensure_ascii=False, default=str) + "\n")
 
     logger.info(f"Wrote {len(records)} rows → {out_xlsx} and {out_jsonl}")
 

@@ -25,7 +25,9 @@ def ensure_hf_home_from_repo_fallback(repo_root: str | os.PathLike[str] | None) 
         os.environ["HF_HOME"] = candidate
 
 
-def make_local_hf_embedding_func(embedding_dim: int, embedding_model: str | None = None):
+def make_local_hf_embedding_func(
+    embedding_dim: int, embedding_model: str | None = None
+):
     """Build a LightRAG-compatible EmbeddingFunc for a local HF sentence-transformers model."""
     try:
         from sentence_transformers import SentenceTransformer
