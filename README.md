@@ -296,6 +296,7 @@ uv sync --all-extras                 # All optional features
 
 - **`[image]`** - Enables processing of BMP, TIFF, GIF, WebP image formats (requires Pillow)
 - **`[text]`** - Enables processing of TXT and MD files (requires ReportLab)
+- **`[local-embed]`** - Enables local Hugging Face embeddings via `sentence-transformers`
 - **`[all]`** - Includes all Python optional dependencies
 
 > **⚠️ Office Document Processing Requirements:**
@@ -1036,6 +1037,62 @@ python examples/image_format_test.py --check-pillow --file dummy
 # Check ReportLab installation
 python examples/text_format_test.py --check-reportlab --file dummy
 ```
+
+### Utility scripts for endpoint checks and batch workflows
+
+```bash
+# 1) Validate LLM + embedding endpoints from .env (with basic retries)
+python scripts/validate_ark_endpoints.py
+
+# 2) Batch ingest MinerU *_content_list_v2.json (output/data_upload_test_v3) with **local HF**
+#    embeddings only (sentence-transformers; ``pip install "raganything[local-embed]"``).
+#    Exits with code 2 if EMBEDDING_BACKEND is set to anything other than ``hf``.
+uv run python scripts/batch_ingest_content_lists_local_hf.py -w ./rag_storage_wt1536
+
+# 3) Run Demo question bank batch QA and write both XLSX + JSONL outputs
+python scripts/run_demo_question_bank.py --mode mix --delay 4
+
+# 4) End-to-end CLI: parse a folder with MinerU → LightRAG ingest with LLM graph extraction → interactive Q&A
+#    (same ingestion path as batch graph ingest: insert_content_list + optional skip multimodal after text)
+#    Use uv run from repo root; omit --ingest-only to open the question prompt after indexing.
+uv run python scripts/rag_pipeline_parse_graph_chat.py \
+  --input-folder ./your_documents \
+  -w ./rag_storage_pipeline \
+  --parse-method auto
+
+#    OCR-focused parsing + optional MinerU pipeline weights download
+uv run python scripts/rag_pipeline_parse_graph_chat.py \
+  --input-folder ./your_documents -w ./rag_storage_pipeline \
+  --parse-method ocr \
+  --mineru-download-models
+
+#    Index only, then query later with run_demo_question_bank.py against the same -w directory
+uv run python scripts/rag_pipeline_parse_graph_chat.py \
+  --input-folder ./your_documents -w ./rag_storage_pipeline --ingest-only
+
+#    Single non-interactive question after ingest
+uv run python scripts/rag_pipeline_parse_graph_chat.py \
+  --input-folder ./your_documents -w ./rag_storage_pipeline \
+  --query "Your question here"
+
+#    Default skips multimodal processors after text insert; run full multimodal path with --no-skip-multimodal.
+#    Optional: --limit N, --parser-output-dir ./output/my_parse, --recursive / --no-recursive, --query-mode mix
+
+# 5) Ingest pre-parsed MinerU *_content_list_v2.json trees with LLM entity/relation extraction (knowledge graph)
+#    Point --data-upload-subdir at the folder under output/ that contains the JSON trees (e.g. data_upload_test_v4).
+uv run python scripts/batch_ingest_content_lists_with_graph.py \
+  --data-upload-subdir data_upload_test_v4 \
+  -w ./rag_storage_with_kg
+```
+
+Useful environment variables for these scripts:
+
+- `LLM_BINDING_HOST` or `OPENAI_BASE_URL`, `LLM_MODEL`, `OPENAI_API_KEY` or `LLM_BINDING_API_KEY`
+- `RAG_QUERY_MODE` (default query mode for the pipeline chat step and demos, often `mix`)
+- `EMBEDDING_BACKEND` (`openai` or `hf`), `EMBEDDING_MODEL`, `EMBEDDING_DIM`
+- `EMBEDDING_BINDING_HOST` and `EMBEDDING_API_KEY` (when embedding host/key differs)
+- `PARSE_METHOD`, `MINERU_LANG` / `OCR_LANG`, `MINERU_BACKEND`, `MINERU_DEVICE` (MinerU; see `scripts/reingest_uploaded_documents_ocr.py`)
+- `HF_HOME` (optional cache path; defaults to `<repo>/.hf_cache` when present)
 
 ---
 

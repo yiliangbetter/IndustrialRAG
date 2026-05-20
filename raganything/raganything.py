@@ -108,6 +108,12 @@ class RAGAnything(QueryMixin, ProcessorMixin, BatchMixin):
         if self.config is None:
             self.config = RAGAnythingConfig()
 
+        if self.config.allow_embedding_only_ingestion:
+            # Embedding-only ingestion does not run multimodal/LLM extraction.
+            self.config.enable_image_processing = False
+            self.config.enable_table_processing = False
+            self.config.enable_equation_processing = False
+
         # Set working directory
         self.working_dir = self.config.working_dir
 
@@ -257,16 +263,24 @@ class RAGAnything(QueryMixin, ProcessorMixin, BatchMixin):
         try:
             # Check parser installation first
             if not self._parser_installation_checked:
-                if not self.doc_parser.check_installation():
-                    error_msg = (
-                        f"Parser '{self.config.parser}' is not properly installed. "
-                        "Please install it using 'pip install' or 'uv pip install'."
+                if self.config.allow_embedding_only_ingestion:
+                    self._parser_installation_checked = True
+                    self.logger.info(
+                        "Embedding-only ingestion enabled: parser installation check skipped"
                     )
-                    self.logger.error(error_msg)
-                    return {"success": False, "error": error_msg}
+                else:
+                    if not self.doc_parser.check_installation():
+                        error_msg = (
+                            f"Parser '{self.config.parser}' is not properly installed. "
+                            "Please install it using 'pip install' or 'uv pip install'."
+                        )
+                        self.logger.error(error_msg)
+                        return {"success": False, "error": error_msg}
 
-                self._parser_installation_checked = True
-                self.logger.info(f"Parser '{self.config.parser}' installation verified")
+                    self._parser_installation_checked = True
+                    self.logger.info(
+                        f"Parser '{self.config.parser}' installation verified"
+                    )
 
             if self.lightrag is not None:
                 # LightRAG was pre-provided, but we need to ensure it's properly initialized
@@ -329,9 +343,22 @@ class RAGAnything(QueryMixin, ProcessorMixin, BatchMixin):
 
             # Validate required functions for creating new LightRAG instance
             if self.llm_model_func is None:
-                error_msg = "llm_model_func must be provided when LightRAG is not pre-initialized"
-                self.logger.error(error_msg)
-                return {"success": False, "error": error_msg}
+                if self.config.allow_embedding_only_ingestion:
+                    self.logger.warning(
+                        "allow_embedding_only_ingestion=True: using fallback llm_model_func "
+                        "placeholder and skipping LLM-dependent ingestion stages."
+                    )
+
+                    async def _embedding_only_llm_placeholder(
+                        prompt, system_prompt=None, history_messages=None, **kwargs
+                    ):
+                        return ""
+
+                    self.llm_model_func = _embedding_only_llm_placeholder
+                else:
+                    error_msg = "llm_model_func must be provided when LightRAG is not pre-initialized"
+                    self.logger.error(error_msg)
+                    return {"success": False, "error": error_msg}
 
             if self.embedding_func is None:
                 error_msg = "embedding_func must be provided when LightRAG is not pre-initialized"
