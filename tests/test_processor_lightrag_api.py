@@ -178,7 +178,9 @@ async def test_embedding_only_content_list_recovers_mineru_v2_text_and_status(tm
         "<table><tr><td>A</td></tr></table>",
         "Process diagram",
     ]
-    assert processor.lightrag.chunks_vdb.records == processor.lightrag.text_chunks.records
+    assert (
+        processor.lightrag.chunks_vdb.records == processor.lightrag.text_chunks.records
+    )
     assert processor.lightrag.text_chunks.index_done_calls == 1
     assert processor.lightrag.chunks_vdb.index_done_calls == 1
     assert processor.lightrag.insert_done_calls == 1
