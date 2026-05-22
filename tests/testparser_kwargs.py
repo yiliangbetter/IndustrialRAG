@@ -64,6 +64,33 @@ def test_mineru_env_propagation(
     assert kwargs["env"]["PATH"] == os.environ["PATH"]
 
 
+@patch("subprocess.Popen")
+def test_mineru_env_adds_loopback_to_no_proxy(mock_popen, mineru_parser, dummy_path):
+    mock_process = MagicMock()
+    mock_process.poll.return_value = 0
+    mock_process.wait.return_value = 0
+    mock_process.stdout.readline.return_value = ""
+    mock_process.stderr.readline.return_value = ""
+    mock_popen.return_value = mock_process
+
+    mineru_parser._run_mineru_command(
+        dummy_path,
+        "out",
+        env={"NO_PROXY": "example.com,localhost", "no_proxy": "::1,custom.local"},
+    )
+
+    _, kwargs = mock_popen.call_args
+    no_proxy = kwargs["env"]["NO_PROXY"].split(",")
+    assert no_proxy == [
+        "example.com",
+        "localhost",
+        "::1",
+        "custom.local",
+        "127.0.0.1",
+    ]
+    assert kwargs["env"]["no_proxy"] == kwargs["env"]["NO_PROXY"]
+
+
 @patch("subprocess.run")
 def test_docling_env_propagation(mock_run, docling_parser, dummy_path):
     mock_run.return_value = MagicMock(returncode=0, stdout="")

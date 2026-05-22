@@ -1,6 +1,7 @@
 import pytest
 
 from raganything.batch_parser import BatchParser
+from raganything.parser import MineruParser
 
 
 def test_batch_parser_uses_paddleocr_parser():
@@ -202,3 +203,58 @@ async def test_parse_document_office_skips_none_method(monkeypatch, tmp_path):
     await dummy.parse_document(str(fake_docx), parse_method=None, method=None)
 
     assert "method" not in captured_kwargs
+
+
+@pytest.mark.parametrize(
+    ("conversion_method", "parse_method_name"),
+    [
+        ("convert_text_to_pdf", "parse_text_file"),
+        ("convert_office_to_pdf", "parse_office_doc"),
+    ],
+)
+def test_mineru_converted_documents_forward_parse_method(
+    monkeypatch, tmp_path, conversion_method, parse_method_name
+):
+    source = tmp_path / ("source.md" if "text" in parse_method_name else "source.docx")
+    source.write_bytes(b"input")
+    converted_pdf = tmp_path / "converted.pdf"
+    converted_pdf.write_bytes(b"%PDF-1.4\n")
+    captured = {}
+
+    def fake_convert(cls, file_path, output_dir=None):
+        captured["converted_from"] = file_path
+        captured["convert_output_dir"] = output_dir
+        return converted_pdf
+
+    def fake_parse_pdf(self, pdf_path, output_dir=None, method="auto", lang=None, **kw):
+        captured["parse_pdf"] = {
+            "pdf_path": pdf_path,
+            "output_dir": output_dir,
+            "method": method,
+            "lang": lang,
+            "kwargs": kw,
+        }
+        return [{"type": "text", "text": "parsed"}]
+
+    monkeypatch.setattr(MineruParser, conversion_method, classmethod(fake_convert))
+    monkeypatch.setattr(MineruParser, "parse_pdf", fake_parse_pdf)
+
+    parser = MineruParser()
+    result = getattr(parser, parse_method_name)(
+        source,
+        output_dir=str(tmp_path / "out"),
+        lang="ch",
+        method="ocr",
+        backend="pipeline",
+    )
+
+    assert result == [{"type": "text", "text": "parsed"}]
+    assert captured["converted_from"] == source
+    assert captured["convert_output_dir"] == str(tmp_path / "out")
+    assert captured["parse_pdf"] == {
+        "pdf_path": converted_pdf,
+        "output_dir": str(tmp_path / "out"),
+        "method": "ocr",
+        "lang": "ch",
+        "kwargs": {"backend": "pipeline"},
+    }

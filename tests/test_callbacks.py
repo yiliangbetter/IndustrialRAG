@@ -181,6 +181,193 @@ class TestMetricsCallback:
 
 
 class TestRAGAnythingIntegration:
+    def test_process_document_embedding_only_emits_document_complete(
+        self, monkeypatch, tmp_path
+    ):
+        from raganything.processor import ProcessorMixin
+        import asyncio
+
+        class FakeLogger:
+            def info(self, *args, **kwargs):
+                pass
+
+            def warning(self, *args, **kwargs):
+                pass
+
+            def error(self, *args, **kwargs):
+                pass
+
+            def debug(self, *args, **kwargs):
+                pass
+
+        class DummyProcessor(ProcessorMixin):
+            pass
+
+        processor = DummyProcessor()
+        processor.logger = FakeLogger()
+        processor.config = type(
+            "Config",
+            (),
+            {
+                "allow_embedding_only_ingestion": True,
+                "display_content_stats": False,
+                "parse_method": "auto",
+                "parser_output_dir": str(tmp_path),
+                "use_full_path": False,
+            },
+        )()
+        processor.callback_manager = CallbackManager()
+        cb = RecordingCallback()
+        processor.callback_manager.register(cb)
+
+        source = tmp_path / "source.pdf"
+        captured_insert = {}
+
+        async def fake_ensure():
+            return {"success": True}
+
+        async def fake_parse_document(*args, **kwargs):
+            return ([{"type": "text", "text": "hello world"}], "doc-parsed")
+
+        async def fake_insert_text_content_embedding_only(
+            text_content, file_ref, doc_id
+        ):
+            captured_insert.update(
+                {"text_content": text_content, "file_ref": file_ref, "doc_id": doc_id}
+            )
+
+        monkeypatch.setattr(processor, "_ensure_lightrag_initialized", fake_ensure)
+        monkeypatch.setattr(processor, "parse_document", fake_parse_document)
+        monkeypatch.setattr(
+            processor,
+            "_insert_text_content_embedding_only",
+            fake_insert_text_content_embedding_only,
+        )
+
+        asyncio.run(processor.process_document_complete(str(source)))
+
+        assert captured_insert == {
+            "text_content": "hello world",
+            "file_ref": "source.pdf",
+            "doc_id": "doc-parsed",
+        }
+        assert ("document_complete", str(source)) in cb.events
+
+    def test_insert_content_list_embedding_only_recovers_mineru_v2_text_and_completes(
+        self, monkeypatch, tmp_path
+    ):
+        from raganything.processor import ProcessorMixin
+        import asyncio
+
+        class FakeLogger:
+            def info(self, *args, **kwargs):
+                pass
+
+            def warning(self, *args, **kwargs):
+                pass
+
+            def error(self, *args, **kwargs):
+                pass
+
+            def debug(self, *args, **kwargs):
+                pass
+
+        class DummyProcessor(ProcessorMixin):
+            pass
+
+        processor = DummyProcessor()
+        processor.logger = FakeLogger()
+        processor.config = type(
+            "Config",
+            (),
+            {
+                "allow_embedding_only_ingestion": True,
+                "content_format": "mineru",
+                "display_content_stats": False,
+                "use_full_path": False,
+            },
+        )()
+        processor.callback_manager = CallbackManager()
+        cb = RecordingCallback()
+        processor.callback_manager.register(cb)
+
+        captured_insert = {}
+
+        async def fake_ensure():
+            return {"success": True}
+
+        async def fake_insert_text_content_embedding_only(
+            text_content, file_ref, doc_id
+        ):
+            captured_insert.update(
+                {"text_content": text_content, "file_ref": file_ref, "doc_id": doc_id}
+            )
+
+        monkeypatch.setattr(processor, "_ensure_lightrag_initialized", fake_ensure)
+        monkeypatch.setattr(
+            processor,
+            "_generate_content_based_doc_id",
+            lambda content_list: "doc-v2",
+        )
+        monkeypatch.setattr(
+            processor,
+            "_insert_text_content_embedding_only",
+            fake_insert_text_content_embedding_only,
+        )
+
+        asyncio.run(
+            processor.insert_content_list(
+                [
+                    [
+                        {
+                            "type": "paragraph",
+                            "content": {
+                                "paragraph_content": [
+                                    {"type": "text", "content": "First"},
+                                    {"type": "text", "content": "paragraph"},
+                                ]
+                            },
+                        },
+                        {
+                            "type": "list",
+                            "content": {
+                                "list_items": [
+                                    {
+                                        "prefix": "1.",
+                                        "item_content": {
+                                            "type": "text",
+                                            "content": "Nested item",
+                                        },
+                                    }
+                                ]
+                            },
+                        },
+                        {
+                            "type": "table",
+                            "content": {"html": "<table><tr><td>A</td></tr></table>"},
+                        },
+                        {
+                            "type": "image",
+                            "content": {"image_caption": ["Figure caption"]},
+                        },
+                    ]
+                ],
+                file_path=str(tmp_path / "content_list.json"),
+            )
+        )
+
+        assert captured_insert == {
+            "text_content": (
+                "First paragraph\n\n"
+                "1. Nested item\n\n"
+                "<table><tr><td>A</td></tr></table>\n\n"
+                "Figure caption"
+            ),
+            "file_ref": "content_list.json",
+            "doc_id": "doc-v2",
+        }
+        assert ("document_complete", str(tmp_path / "content_list.json")) in cb.events
+
     def test_process_document_emits_callbacks(self, monkeypatch, tmp_path):
         pytest.importorskip("lightrag")
 
