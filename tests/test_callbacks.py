@@ -439,6 +439,9 @@ class TestRAGAnythingIntegration:
             async def aquery(self, query, param, system_prompt=None):
                 return "answer"
 
+            async def finalize_storages(self):
+                return None
+
         config = RAGAnythingConfig()
         rag = RAGAnything(config=config)
         rag.lightrag = FakeLightRAG()
