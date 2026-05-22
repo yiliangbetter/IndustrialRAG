@@ -236,7 +236,9 @@ class TestRAGAnythingIntegration:
                 {"text_content": text_content, "file_ref": file_ref, "doc_id": doc_id}
             )
 
-        monkeypatch.setattr(processor, "_ensure_lightrag_initialized", fake_ensure)
+        monkeypatch.setattr(
+            processor, "_ensure_lightrag_initialized", fake_ensure, raising=False
+        )
         monkeypatch.setattr(processor, "parse_document", fake_parse_document)
         monkeypatch.setattr(
             processor,
@@ -303,7 +305,9 @@ class TestRAGAnythingIntegration:
                 {"text_content": text_content, "file_ref": file_ref, "doc_id": doc_id}
             )
 
-        monkeypatch.setattr(processor, "_ensure_lightrag_initialized", fake_ensure)
+        monkeypatch.setattr(
+            processor, "_ensure_lightrag_initialized", fake_ensure, raising=False
+        )
         monkeypatch.setattr(
             processor,
             "_generate_content_based_doc_id",
