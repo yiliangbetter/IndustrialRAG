@@ -221,8 +221,9 @@ class ProcessorMixin:
     ) -> None:
         """Insert text chunks directly into vector/text storages without LLM extraction."""
         if not text_content.strip():
-            await self._mark_multimodal_processing_complete(doc_id)
-            return
+            raise ValueError(
+                f"No text content extracted for embedding-only ingestion: {file_ref}"
+            )
 
         raw_chunks = [
             chunk.strip() for chunk in text_content.split("\n\n") if chunk.strip()
@@ -1717,7 +1718,12 @@ class ProcessorMixin:
                 doc_id = content_based_doc_id
 
             # Step 2: Separate text and multimodal content
-            text_content, multimodal_items = separate_content(content_list)
+            normalized_content_list = self._normalize_nested_content_list(content_list)
+            text_content, multimodal_items = separate_content(normalized_content_list)
+            if not text_content.strip():
+                text_content = self._plaintext_from_mineru_blocks(
+                    normalized_content_list
+                )
 
             if self.config.allow_embedding_only_ingestion:
                 if file_name is None:
@@ -1745,7 +1751,7 @@ class ProcessorMixin:
                     "Setting content source for context-aware multimodal processing..."
                 )
                 self.set_content_source_for_context(
-                    content_list, self.config.content_format
+                    normalized_content_list, self.config.content_format
                 )
 
             # Step 3: Insert pure text content with all parameters
@@ -1985,6 +1991,7 @@ class ProcessorMixin:
                         }
                     }
                 )
+                await self.lightrag.doc_status.index_done_callback()
                 self.logger.info(
                     f"Error processing document {file_path}: MineruExecutionError"
                 )
@@ -1999,6 +2006,7 @@ class ProcessorMixin:
                         }
                     }
                 )
+                await self.lightrag.doc_status.index_done_callback()
                 self.logger.info(f"Error processing document {file_path}: {str(e)}")
                 return False
 
@@ -2007,7 +2015,14 @@ class ProcessorMixin:
                 doc_id = content_based_doc_id
 
             # Step 2: Separate text and multimodal content
-            text_content, multimodal_items = separate_content(content_list)
+            normalized_content_list = self._normalize_nested_content_list(content_list)
+            text_content, multimodal_items = separate_content(normalized_content_list)
+            if not text_content.strip():
+                text_content = self._plaintext_from_mineru_blocks(
+                    normalized_content_list
+                )
+            if not text_content.strip():
+                raise ValueError(f"No text content extracted from {file_path}")
 
             # Step 2.5: Set content source for context extraction in multimodal processing
             if hasattr(self, "set_content_source_for_context") and multimodal_items:
@@ -2015,7 +2030,7 @@ class ProcessorMixin:
                     "Setting content source for context-aware multimodal processing..."
                 )
                 self.set_content_source_for_context(
-                    content_list, self.config.content_format
+                    normalized_content_list, self.config.content_format
                 )
 
             # Step 3: Insert pure text content and multimodal content with all parameters
@@ -2030,6 +2045,22 @@ class ProcessorMixin:
                     ids=doc_id,
                     scheme_name=scheme_name,
                 )
+
+            await self.lightrag.doc_status.upsert(
+                {
+                    doc_pre_id: {
+                        **current_doc_status,
+                        "status": DocStatus.PROCESSED,
+                        "content": text_content[:2000],
+                        "error_msg": "",
+                        "content_summary": text_content[:500],
+                        "content_length": len(text_content),
+                        "updated_at": time.strftime("%Y-%m-%dT%H:%M:%S+00:00"),
+                        "file_path": file_name,
+                    }
+                }
+            )
+            await self.lightrag.doc_status.index_done_callback()
 
             self.logger.info(f"Document {file_path} processing completed successfully")
             return True
