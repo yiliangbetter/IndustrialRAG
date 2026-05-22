@@ -377,7 +377,10 @@ class TestRAGAnythingIntegration:
 
         from raganything import RAGAnything, RAGAnythingConfig
         import raganything.processor as processor_module
+        import raganything.raganything as rag_module
         import asyncio
+
+        monkeypatch.setattr(rag_module.atexit, "register", lambda *args, **kwargs: None)
 
         config = RAGAnythingConfig()
         config.parser_output_dir = str(tmp_path)
@@ -433,7 +436,10 @@ class TestRAGAnythingIntegration:
         pytest.importorskip("lightrag")
 
         from raganything import RAGAnything, RAGAnythingConfig
+        import raganything.raganything as rag_module
         import asyncio
+
+        monkeypatch.setattr(rag_module.atexit, "register", lambda *args, **kwargs: None)
 
         class FakeLightRAG:
             async def aquery(self, query, param, system_prompt=None):
