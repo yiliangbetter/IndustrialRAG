@@ -216,6 +216,24 @@ class ProcessorMixin:
 
         return "\n\n".join(parts)
 
+    def _separate_text_and_multimodal(
+        self, content_list: List[Dict[str, Any]]
+    ) -> Tuple[str, List[Dict[str, Any]]]:
+        """Separate content and recover plaintext from MinerU v2 block shapes."""
+        text_content, multimodal_items = separate_content(content_list)
+
+        if not text_content.strip():
+            text_content = self._plaintext_from_mineru_blocks(content_list)
+        if not text_content.strip():
+            text_parts = []
+            for item in content_list:
+                candidate = item.get("text")
+                if isinstance(candidate, str) and candidate.strip():
+                    text_parts.append(candidate.strip())
+            text_content = "\n\n".join(text_parts)
+
+        return text_content, multimodal_items
+
     async def _insert_text_content_embedding_only(
         self, text_content: str, file_ref: str, doc_id: str
     ) -> None:
@@ -1708,16 +1726,20 @@ class ProcessorMixin:
             self.logger.info(f"Starting complete document processing: {file_path}")
 
             # Step 1: Parse document
-            content_list, content_based_doc_id = await self.parse_document(
+            content_list, _content_based_doc_id = await self.parse_document(
                 file_path, output_dir, parse_method, display_stats, **kwargs
             )
 
-            # Use provided doc_id or fall back to content-based doc_id
+            normalized_content_list = self._normalize_nested_content_list(content_list)
+
+            # Use provided doc_id or fall back to normalized content-based doc_id
             if doc_id is None:
-                doc_id = content_based_doc_id
+                doc_id = self._generate_content_based_doc_id(normalized_content_list)
 
             # Step 2: Separate text and multimodal content
-            text_content, multimodal_items = separate_content(content_list)
+            text_content, multimodal_items = self._separate_text_and_multimodal(
+                normalized_content_list
+            )
 
             if self.config.allow_embedding_only_ingestion:
                 if file_name is None:
@@ -1745,7 +1767,7 @@ class ProcessorMixin:
                     "Setting content source for context-aware multimodal processing..."
                 )
                 self.set_content_source_for_context(
-                    content_list, self.config.content_format
+                    normalized_content_list, self.config.content_format
                 )
 
             # Step 3: Insert pure text content with all parameters
@@ -1964,11 +1986,10 @@ class ProcessorMixin:
             )
 
             content_list = []
-            content_based_doc_id = ""
 
             try:
                 # Step 1: Parse document
-                content_list, content_based_doc_id = await self.parse_document(
+                content_list, _content_based_doc_id = await self.parse_document(
                     file_path, output_dir, parse_method, display_stats, **kwargs
                 )
             except MineruExecutionError as e:
@@ -1988,6 +2009,7 @@ class ProcessorMixin:
                 self.logger.info(
                     f"Error processing document {file_path}: MineruExecutionError"
                 )
+                await self.lightrag.doc_status.index_done_callback()
                 return False
             except Exception as e:
                 await self.lightrag.doc_status.upsert(
@@ -2000,14 +2022,19 @@ class ProcessorMixin:
                     }
                 )
                 self.logger.info(f"Error processing document {file_path}: {str(e)}")
+                await self.lightrag.doc_status.index_done_callback()
                 return False
 
-            # Use provided doc_id or fall back to content-based doc_id
+            normalized_content_list = self._normalize_nested_content_list(content_list)
+
+            # Use provided doc_id or fall back to normalized content-based doc_id
             if doc_id is None:
-                doc_id = content_based_doc_id
+                doc_id = self._generate_content_based_doc_id(normalized_content_list)
 
             # Step 2: Separate text and multimodal content
-            text_content, multimodal_items = separate_content(content_list)
+            text_content, multimodal_items = self._separate_text_and_multimodal(
+                normalized_content_list
+            )
 
             # Step 2.5: Set content source for context extraction in multimodal processing
             if hasattr(self, "set_content_source_for_context") and multimodal_items:
@@ -2015,21 +2042,42 @@ class ProcessorMixin:
                     "Setting content source for context-aware multimodal processing..."
                 )
                 self.set_content_source_for_context(
-                    content_list, self.config.content_format
+                    normalized_content_list, self.config.content_format
                 )
 
             # Step 3: Insert pure text content and multimodal content with all parameters
-            if text_content.strip():
-                await insert_text_content_with_multimodal_content(
-                    self.lightrag,
-                    input=text_content,
-                    multimodal_content=multimodal_items,
-                    file_paths=file_name,
-                    split_by_character=split_by_character,
-                    split_by_character_only=split_by_character_only,
-                    ids=doc_id,
-                    scheme_name=scheme_name,
+            if not text_content.strip():
+                raise ValueError(
+                    "No text content was extracted for LightRAG insertion"
                 )
+
+            await insert_text_content_with_multimodal_content(
+                self.lightrag,
+                input=text_content,
+                multimodal_content=multimodal_items,
+                file_paths=file_name,
+                split_by_character=split_by_character,
+                split_by_character_only=split_by_character_only,
+                ids=doc_id,
+                scheme_name=scheme_name,
+            )
+
+            await self.lightrag.doc_status.upsert(
+                {
+                    doc_pre_id: {
+                        **current_doc_status,
+                        "status": DocStatus.PROCESSED,
+                        "content": text_content[:2000],
+                        "error_msg": "",
+                        "content_summary": text_content[:500],
+                        "content_length": len(text_content),
+                        "multimodal_content": multimodal_items,
+                        "updated_at": time.strftime("%Y-%m-%dT%H:%M:%S+00:00"),
+                        "file_path": file_name,
+                    }
+                }
+            )
+            await self.lightrag.doc_status.index_done_callback()
 
             self.logger.info(f"Document {file_path} processing completed successfully")
             return True
@@ -2174,17 +2222,9 @@ class ProcessorMixin:
                 self.logger.info(f"  - {block_type}: {count}")
 
         # Step 1: Separate text and multimodal content
-        text_content, multimodal_items = separate_content(normalized_content_list)
-
-        if not text_content.strip():
-            text_content = self._plaintext_from_mineru_blocks(normalized_content_list)
-        if not text_content.strip():
-            text_parts = []
-            for item in normalized_content_list:
-                candidate = item.get("text")
-                if isinstance(candidate, str) and candidate.strip():
-                    text_parts.append(candidate.strip())
-            text_content = "\n\n".join(text_parts)
+        text_content, multimodal_items = self._separate_text_and_multimodal(
+            normalized_content_list
+        )
 
         # Step 1.5: Set content source for context extraction in multimodal processing
         if hasattr(self, "set_content_source_for_context") and multimodal_items:
