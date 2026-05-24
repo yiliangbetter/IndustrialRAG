@@ -7,12 +7,22 @@ const composer = $("#composer");
 const btnSend = $("#btn-send");
 const btnClear = $("#btn-clear");
 const btnIngest = $("#btn-ingest");
+const btnStopIngest = $("#btn-stop-ingest");
 const fileInput = $("#file-input");
 const uploadZone = $("#upload-zone");
 const fileList = $("#file-list");
+const fileListToolbar = $("#file-list-toolbar");
+const fileListCount = $("#file-list-count");
+const btnClearFiles = $("#btn-clear-files");
 const ingestStatus = $("#ingest-status");
+const ingestProgress = $("#ingest-progress");
+const ingestProgressBar = $("#ingest-progress-bar");
+const ingestProgressLabel = $("#ingest-progress-label");
+const ingestLog = $("#ingest-log");
 
 let pendingFiles = [];
+let ingestBusy = false;
+let ingestStopping = false;
 /** When false, user scrolled up — do not auto-jump to bottom on every token. */
 let scrollPinnedToBottom = true;
 let scrollRaf = 0;
@@ -248,6 +258,10 @@ async function refreshStatus() {
     } else {
       errEl.classList.add("hidden");
     }
+    const setupLinkWrap = $("#setup-link-wrap");
+    if (setupLinkWrap && h.client_mode) {
+      setupLinkWrap.classList.remove("hidden");
+    }
     btnSend.disabled = !h.ready;
   } catch (e) {
     $("#meta-ready").textContent = "无法连接";
@@ -417,14 +431,38 @@ btnClear.addEventListener("click", () => {
   scrollPinnedToBottom = true;
 });
 
+function updateIngestControls() {
+  const hasFiles = pendingFiles.length > 0;
+  if (fileListToolbar) {
+    fileListToolbar.classList.toggle("hidden", !hasFiles);
+  }
+  if (fileListCount) {
+    fileListCount.textContent = hasFiles ? `已选 ${pendingFiles.length} 个文件` : "";
+  }
+  if (btnClearFiles) {
+    btnClearFiles.disabled = !hasFiles || ingestBusy;
+  }
+  btnIngest.disabled = !hasFiles || ingestBusy;
+  if (btnStopIngest) {
+    btnStopIngest.classList.toggle("hidden", !ingestBusy);
+    btnStopIngest.disabled = !ingestBusy || ingestStopping;
+  }
+}
+
 function renderFileList() {
-  fileList.innerHTML = "";
-  pendingFiles.forEach((f) => {
-    const li = document.createElement("li");
-    li.textContent = `${f.name} (${(f.size / 1024).toFixed(1)} KB)`;
-    fileList.appendChild(li);
+  renderPendingFileList(fileList, pendingFiles, {
+    readOnly: ingestBusy,
+    onRemove: (index) => {
+      pendingFiles.splice(index, 1);
+      renderFileList();
+    },
   });
-  btnIngest.disabled = pendingFiles.length === 0;
+  updateIngestControls();
+}
+
+function clearPendingFiles() {
+  pendingFiles = [];
+  renderFileList();
 }
 
 function addFiles(fileListLike) {
@@ -435,6 +473,11 @@ function addFiles(fileListLike) {
   }
   renderFileList();
 }
+
+btnClearFiles?.addEventListener("click", () => {
+  if (ingestBusy) return;
+  clearPendingFiles();
+});
 
 fileInput.addEventListener("change", () => {
   addFiles(fileInput.files);
@@ -457,26 +500,62 @@ uploadZone.addEventListener("drop", (e) => {
 });
 
 btnIngest.addEventListener("click", async () => {
-  if (!pendingFiles.length) return;
-  btnIngest.disabled = true;
-  ingestStatus.textContent = "灌库进行中，请稍候…";
+  if (!pendingFiles.length || ingestBusy) return;
 
-  const fd = new FormData();
-  pendingFiles.forEach((f) => fd.append("files", f));
+  ingestBusy = true;
+  ingestStopping = false;
+  updateIngestControls();
+  ingestStatus.textContent = "灌库进行中，请稍候…";
+  if (ingestProgressBar) ingestProgressBar.classList.remove("error");
 
   try {
-    const res = await fetch("/api/ingest", { method: "POST", body: fd });
-    const data = await res.json().catch(() => ({}));
-    if (!res.ok) throw new Error(data.detail || `HTTP ${res.status}`);
-    ingestStatus.textContent = `完成：成功 ${data.ok}，失败 ${data.fail}`;
-    appendMessage("system", `灌库完成：成功 ${data.ok} 个文件，失败 ${data.fail} 个。`);
-    pendingFiles = [];
+    const data = await streamIngest({
+      files: pendingFiles,
+      logEl: ingestLog,
+      progressEl: ingestProgress,
+      progressBarEl: ingestProgressBar,
+      progressLabelEl: ingestProgressLabel,
+      statusEl: ingestStatus,
+      onActiveChange: (active) => {
+        ingestBusy = active;
+        if (!active) ingestStopping = false;
+        updateIngestControls();
+      },
+    });
+    if (data.cancelled) {
+      ingestStatus.textContent = "已停止灌库并清空知识库";
+      appendMessage("system", "灌库已停止，知识库已清空。");
+      pendingFiles = [];
+    } else {
+      ingestStatus.textContent = `完成：成功 ${data.ok}，失败 ${data.fail}`;
+      appendMessage("system", `灌库完成：成功 ${data.ok} 个文件，失败 ${data.fail} 个。`);
+      if (data.fail === 0) {
+        pendingFiles = [];
+      }
+    }
     renderFileList();
   } catch (err) {
     ingestStatus.textContent = `失败：${err.message || err}`;
     appendMessage("system", `灌库失败：${err.message || err}`);
+    appendIngestLog(ingestLog, `错误：${err.message || err}`);
   } finally {
-    btnIngest.disabled = pendingFiles.length === 0;
+    ingestBusy = false;
+    ingestStopping = false;
+    renderFileList();
+  }
+});
+
+btnStopIngest?.addEventListener("click", async () => {
+  if (!ingestBusy || ingestStopping) return;
+  ingestStopping = true;
+  updateIngestControls();
+  try {
+    await requestStopIngest({ logEl: ingestLog, statusEl: ingestStatus });
+  } catch (err) {
+    ingestStopping = false;
+    updateIngestControls();
+    appendIngestLog(ingestLog, `停止失败：${err.message || err}`);
+    ingestStatus.textContent = `停止失败：${err.message || err}`;
   }
 });
 

@@ -48,6 +48,9 @@
               <option value="naive">naive（仅向量）</option>
             </select>
           </label>
+          <p class="hint hidden" id="setup-link-wrap">
+            <a href="/setup" id="setup-link">打开安装向导</a>
+          </p>
         </section>
 
         <section class="panel">
@@ -63,9 +66,25 @@
             <span>点击或拖拽文件到此处</span>
           </label>
           <ul id="file-list" class="file-list"></ul>
-          <button type="button" class="btn secondary" id="btn-ingest" disabled>
-            开始灌库
-          </button>
+          <div class="file-list-toolbar hidden" id="file-list-toolbar">
+            <span id="file-list-count" class="file-list-count"></span>
+            <button type="button" class="btn-link" id="btn-clear-files">清空列表</button>
+          </div>
+          <div class="ingest-actions">
+            <button type="button" class="btn secondary" id="btn-ingest" disabled>
+              开始灌库
+            </button>
+            <button type="button" class="btn danger hidden" id="btn-stop-ingest">
+              停止灌库
+            </button>
+          </div>
+          <div class="ingest-progress hidden" id="ingest-progress">
+            <div class="ingest-progress-label" id="ingest-progress-label">灌库进行中…</div>
+            <div class="ingest-progress-track">
+              <div class="ingest-progress-bar" id="ingest-progress-bar"></div>
+            </div>
+          </div>
+          <pre class="ingest-log" id="ingest-log" aria-live="polite"></pre>
           <p id="ingest-status" class="hint"></p>
         </section>
       </aside>
@@ -95,6 +114,7 @@
     </div>
     <script src="/static/vendor/marked.min.js"></script>
     <script src="/static/vendor/purify.min.js"></script>
+    <script src="/static/ingest_ui.js"></script>
     <script src="/static/app.js"></script>
   </body>
 </html>

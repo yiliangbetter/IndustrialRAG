@@ -4238,6 +4238,7 @@ dependencies = [
     { name = "huggingface-hub" },
     { name = "lightrag-hku" },
     { name = "mineru", extra = ["core"] },
+    { name = "opencv-python-headless" },
     { name = "tqdm" },
 ]
 
@@ -4297,6 +4298,7 @@ requires-dist = [
     { name = "markdown", marker = "extra == 'all'", specifier = ">=3.4.0" },
     { name = "markdown", marker = "extra == 'markdown'", specifier = ">=3.4.0" },
     { name = "mineru", extras = ["core"] },
+    { name = "opencv-python-headless", specifier = ">=4.8.0" },
     { name = "paddleocr", marker = "extra == 'all'", specifier = ">=2.7.0" },
     { name = "paddleocr", marker = "extra == 'paddleocr'", specifier = ">=2.7.0" },
     { name = "pillow", marker = "extra == 'all'", specifier = ">=10.0.0" },

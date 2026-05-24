@@ -301,7 +301,9 @@ async def _ingest_folder(
     recursive: bool,
     limit: int,
     skip_multimodal: bool,
-) -> tuple[int, int]:
+    on_event=None,
+    should_cancel=None,
+) -> tuple[int, int, list[dict[str, str]], bool]:
     files = _collect_files(
         input_folder, config.supported_file_extensions, recursive
     )
@@ -314,14 +316,38 @@ async def _ingest_folder(
         files = files[:limit]
 
     ok = fail = 0
-    for fp in files:
+    errors: list[dict[str, str]] = []
+    total = len(files)
+    cancelled = False
+
+    async def _emit(ev: dict) -> None:
+        if on_event is not None:
+            await on_event(ev)
+
+    await _emit({"type": "ingest_start", "total": total})
+
+    for idx, fp in enumerate(files, start=1):
+        if should_cancel and should_cancel():
+            cancelled = True
+            await _emit({"type": "log", "message": "收到停止请求，正在终止灌库…"})
+            break
+        rel = str(fp.relative_to(input_folder))
+        await _emit(
+            {
+                "type": "file_start",
+                "file": rel,
+                "current": idx,
+                "total": total,
+                "message": f"正在处理 ({idx}/{total})：{rel}",
+            }
+        )
         try:
-            rel = str(fp.relative_to(input_folder))
             sub_out = parser_output_dir
             if fp.parent != input_folder:
                 sub_out = parser_output_dir / fp.parent.relative_to(input_folder)
             sub_out.mkdir(parents=True, exist_ok=True)
 
+            await _emit({"type": "log", "message": f"解析文档：{rel}"})
             content_list, doc_id = await rag.parse_document(
                 str(fp),
                 output_dir=str(sub_out),
@@ -329,6 +355,7 @@ async def _ingest_folder(
                 display_stats=config.display_content_stats,
                 **parse_extra,
             )
+            await _emit({"type": "log", "message": f"写入知识库：{rel}"})
             await rag.insert_content_list(
                 content_list,
                 file_path=rel,
@@ -337,12 +364,40 @@ async def _ingest_folder(
             )
             ok += 1
             logger.info(f"INGEST_FILE_OK::{rel}")
+            await _emit({"type": "file_ok", "file": rel, "current": idx, "total": total})
         except Exception as e:
+            err = str(e)
             logger.error(f"INGEST_FILE_FAIL::{fp}: {e}")
             fail += 1
+            errors.append({"file": rel, "error": err})
+            await _emit(
+                {
+                    "type": "file_fail",
+                    "file": rel,
+                    "error": err,
+                    "current": idx,
+                    "total": total,
+                }
+            )
+        if should_cancel and should_cancel():
+            cancelled = True
+            await _emit({"type": "log", "message": "收到停止请求，正在终止灌库…"})
+            break
 
-    logger.info(f"INGEST_DONE::ok={ok}::fail={fail}")
-    return ok, fail
+    if cancelled:
+        logger.info(f"INGEST_CANCELLED::ok={ok}::fail={fail}")
+        await _emit(
+            {
+                "type": "ingest_cancelled",
+                "ok": ok,
+                "fail": fail,
+                "errors": errors,
+            }
+        )
+    else:
+        logger.info(f"INGEST_DONE::ok={ok}::fail={fail}")
+        await _emit({"type": "ingest_done", "ok": ok, "fail": fail, "errors": errors})
+    return ok, fail, errors, cancelled
 
 
 _QUIT_TOKENS = frozenset(

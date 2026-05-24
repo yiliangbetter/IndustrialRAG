@@ -20,7 +20,10 @@ dist/
 build/
 site/
 
-# Logs / Reports
+# Client runtime (portable package layout on client-dev)
+config/.env
+config/setup_complete.json
+data/
 *.log
 *.log.*
 *.logfire

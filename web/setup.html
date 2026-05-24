@@ -1,0 +1,119 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>南兴知识库 · 安装向导</title>
+    <link rel="stylesheet" href="/static/styles.css" />
+    <link rel="stylesheet" href="/static/setup.css" />
+  </head>
+  <body class="setup-body">
+    <div class="setup-app">
+      <header class="setup-header">
+        <img
+          class="brand-logo"
+          src="/static/images/nanxing-logo.png"
+          alt="南兴装备"
+          width="48"
+          height="48"
+        />
+        <div>
+          <h1>南兴知识库 · 安装向导</h1>
+          <p class="brand-sub">首次使用请按步骤完成配置与灌库</p>
+        </div>
+      </header>
+
+      <nav class="setup-steps" id="setup-steps" aria-label="安装步骤"></nav>
+
+      <main class="setup-main">
+        <section class="panel setup-panel" id="step-env">
+          <h2>1. 连接 LLM 服务</h2>
+          <p class="hint">向量与 Rerank 模型已随安装包内置；此处只需配置大模型 API。</p>
+          <form id="env-form" class="setup-form"></form>
+          <div class="setup-actions">
+            <button type="submit" form="env-form" class="btn primary" id="btn-save-env">
+              保存并加载引擎
+            </button>
+          </div>
+          <div class="ingest-progress hidden" id="env-load-progress">
+            <div class="ingest-progress-label" id="env-load-progress-label">准备中…</div>
+            <div class="ingest-progress-track">
+              <div class="ingest-progress-bar" id="env-load-progress-bar"></div>
+            </div>
+          </div>
+          <pre class="ingest-log" id="env-load-log" aria-live="polite"></pre>
+          <p id="env-status" class="hint"></p>
+        </section>
+
+        <section class="panel setup-panel" id="step-check">
+          <h2>2. 环境与内置模型</h2>
+          <div id="check-runtime" class="check-list"></div>
+          <div id="check-models" class="check-list"></div>
+          <p id="rag-status" class="hint"></p>
+          <div class="setup-actions">
+            <button type="button" class="btn secondary" id="btn-reload-rag">
+              重新加载 RAG 引擎
+            </button>
+          </div>
+          <div class="ingest-progress hidden" id="rag-load-progress">
+            <div class="ingest-progress-label" id="rag-load-progress-label">准备中…</div>
+            <div class="ingest-progress-track">
+              <div class="ingest-progress-bar" id="rag-load-progress-bar"></div>
+            </div>
+          </div>
+          <pre class="ingest-log" id="rag-load-log" aria-live="polite"></pre>
+        </section>
+
+        <section class="panel setup-panel" id="step-ingest">
+          <h2>3. 灌库</h2>
+          <p class="hint">上传 PDF / Office 等文档，写入本地知识库（耗时较长，请勿关闭窗口）。</p>
+          <label class="upload-zone" id="upload-zone">
+            <input
+              type="file"
+              id="file-input"
+              multiple
+              accept=".pdf,.doc,.docx,.ppt,.pptx,.xls,.xlsx,.txt,.md,.png,.jpg,.jpeg"
+            />
+            <span>点击或拖拽文件到此处</span>
+          </label>
+          <ul id="file-list" class="file-list"></ul>
+          <div class="file-list-toolbar hidden" id="file-list-toolbar">
+            <span id="file-list-count" class="file-list-count"></span>
+            <button type="button" class="btn-link" id="btn-clear-files">清空列表</button>
+          </div>
+          <p id="ingest-gate-hint" class="hint ingest-gate-hint"></p>
+          <div class="ingest-actions">
+            <button type="button" class="btn secondary" id="btn-ingest" disabled>
+              开始灌库
+            </button>
+            <button type="button" class="btn danger hidden" id="btn-stop-ingest">
+              停止灌库
+            </button>
+          </div>
+          <div class="ingest-progress hidden" id="ingest-progress">
+            <div class="ingest-progress-label" id="ingest-progress-label">灌库进行中…</div>
+            <div class="ingest-progress-track">
+              <div class="ingest-progress-bar" id="ingest-progress-bar"></div>
+            </div>
+          </div>
+          <pre class="ingest-log" id="ingest-log" aria-live="polite"></pre>
+          <p id="ingest-status" class="hint"></p>
+        </section>
+
+        <section class="panel setup-panel" id="step-finish">
+          <h2>4. 完成</h2>
+          <p class="hint">确认配置已保存、内置模型就绪且已完成灌库后，即可进入问答界面。</p>
+          <ul id="finish-checklist" class="finish-checklist"></ul>
+          <div class="setup-actions">
+            <button type="button" class="btn primary" id="btn-finish" disabled>
+              进入南兴知识库问答
+            </button>
+          </div>
+          <p id="finish-status" class="hint"></p>
+        </section>
+      </main>
+    </div>
+    <script src="/static/ingest_ui.js"></script>
+    <script src="/static/setup.js"></script>
+  </body>
+</html>
