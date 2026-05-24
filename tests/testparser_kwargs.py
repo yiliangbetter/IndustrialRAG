@@ -64,6 +64,45 @@ def test_mineru_env_propagation(
     assert kwargs["env"]["PATH"] == os.environ["PATH"]
 
 
+@patch("subprocess.Popen")
+@patch("pathlib.Path.exists")
+@patch("pathlib.Path.mkdir")
+def test_mineru_merges_loopback_hosts_into_no_proxy(
+    mock_mkdir, mock_exists, mock_popen, mineru_parser, dummy_path
+):
+    mock_exists.return_value = True
+    mock_process = MagicMock()
+    mock_process.poll.return_value = 0
+    mock_process.wait.return_value = 0
+    mock_process.stdout.readline.return_value = ""
+    mock_process.stderr.readline.return_value = ""
+    mock_popen.return_value = mock_process
+
+    custom_env = {
+        "HTTP_PROXY": "http://proxy.example:8080",
+        "NO_PROXY": "existing.host,localhost",
+        "no_proxy": "127.0.0.1,other.host",
+    }
+
+    try:
+        mineru_parser._run_mineru_command(dummy_path, "out", env=custom_env)
+    except Exception:
+        pass
+
+    args, kwargs = mock_popen.call_args
+    no_proxy = kwargs["env"]["NO_PROXY"]
+    assert kwargs["env"]["no_proxy"] == no_proxy
+
+    hosts = no_proxy.split(",")
+    assert "existing.host" in hosts
+    assert "other.host" in hosts
+    assert "127.0.0.1" in hosts
+    assert "localhost" in hosts
+    assert "::1" in hosts
+    assert hosts.count("127.0.0.1") == 1
+    assert hosts.count("localhost") == 1
+
+
 @patch("subprocess.run")
 def test_docling_env_propagation(mock_run, docling_parser, dummy_path):
     mock_run.return_value = MagicMock(returncode=0, stdout="")
