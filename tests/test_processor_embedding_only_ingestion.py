@@ -67,6 +67,11 @@ def _make_processor(tmp_path):
     processor.lightrag = FakeLightRAG()
     processor.callback_manager = CallbackManager()
     processor.callback_manager.enable_event_log(True)
+
+    async def fake_ensure_lightrag_initialized():
+        return {"success": True}
+
+    processor._ensure_lightrag_initialized = fake_ensure_lightrag_initialized
     return processor
 
 
@@ -149,13 +154,9 @@ async def test_process_document_embedding_only_emits_completion_after_storage(tm
     input_path = tmp_path / "sample.pdf"
     input_path.write_bytes(b"%PDF-1.4\n")
 
-    async def fake_ensure_lightrag_initialized():
-        return {"success": True}
-
     async def fake_parse_document(*args, **kwargs):
         return ([{"type": "text", "text": "parsed body"}], "doc-content")
 
-    processor._ensure_lightrag_initialized = fake_ensure_lightrag_initialized
     processor.parse_document = fake_parse_document
 
     await processor.process_document_complete(
