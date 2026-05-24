@@ -8,7 +8,12 @@ from pathlib import Path
 from typing import Any
 
 from client_paths import get_env_example_path, get_env_path, is_client_mode
-from client_paths import get_models_dir, get_parser_output_dir, get_rag_storage_dir
+from client_paths import (
+    get_models_dir,
+    get_parser_output_dir,
+    get_rag_storage_dir,
+    get_tiktoken_cache_dir,
+)
 
 # Keys shown in setup UI (order matters).
 SETUP_FIELDS: list[dict[str, Any]] = [
@@ -75,11 +80,19 @@ SETUP_FIELDS: list[dict[str, Any]] = [
 CLIENT_AUTO_KEYS: dict[str, str] = {
     "EMBEDDING_BACKEND": "hf",
     "HF_EMBED_OFFLINE": "1",
+    "HF_HUB_OFFLINE": "1",
+    "TRANSFORMERS_OFFLINE": "1",
     "RERANK_BY_DEFAULT": "true",
     "RERANK_BINDING": "hf",
     "RAG_QUERY_DOC_FILTER": "true",
     "ENABLE_LLM_CACHE": "false",
+    "PARSER": "mineru",
+    "SUMMARY_LANGUAGE": "Chinese",
 }
+
+
+def _client_tiktoken_cache_dir() -> str:
+    return str(get_tiktoken_cache_dir())
 
 
 def _client_hf_home() -> str:
@@ -132,6 +145,7 @@ def load_env_dict() -> dict[str, str]:
         merged["HF_HOME"] = _client_hf_home()
         merged["RAG_WEB_WORKING_DIR"] = str(get_rag_storage_dir())
         merged["RAG_WEB_PARSER_OUTPUT_DIR"] = str(get_parser_output_dir())
+        merged["TIKTOKEN_CACHE_DIR"] = _client_tiktoken_cache_dir()
         merged.update(CLIENT_AUTO_KEYS)
     return merged
 
@@ -177,6 +191,7 @@ def save_env(payload: dict[str, str]) -> Path:
         merged["HF_HOME"] = _client_hf_home()
         merged["RAG_WEB_WORKING_DIR"] = str(get_rag_storage_dir())
         merged["RAG_WEB_PARSER_OUTPUT_DIR"] = str(get_parser_output_dir())
+        merged["TIKTOKEN_CACHE_DIR"] = _client_tiktoken_cache_dir()
         merged.update(CLIENT_AUTO_KEYS)
 
     # Preserve OPENAI_API_KEY alias if user only set LLM key
@@ -193,6 +208,7 @@ def save_env(payload: dict[str, str]) -> Path:
         "HF_HOME",
         "RAG_WEB_WORKING_DIR",
         "RAG_WEB_PARSER_OUTPUT_DIR",
+        "TIKTOKEN_CACHE_DIR",
         "OPENAI_API_KEY",
     ]
     written: set[str] = set()
@@ -225,6 +241,7 @@ def apply_env_to_process() -> None:
             os.environ["HF_HOME"] = str(get_models_dir())
         os.environ.setdefault("RAG_WEB_WORKING_DIR", str(get_rag_storage_dir()))
         os.environ.setdefault("RAG_WEB_PARSER_OUTPUT_DIR", str(get_parser_output_dir()))
+        os.environ.setdefault("TIKTOKEN_CACHE_DIR", _client_tiktoken_cache_dir())
         if (os.getenv("HF_EMBED_OFFLINE") or "").strip().lower() in ("1", "true", "yes"):
             os.environ["HF_HUB_OFFLINE"] = "1"
             os.environ.setdefault("TRANSFORMERS_OFFLINE", "1")

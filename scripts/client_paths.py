@@ -40,6 +40,13 @@ def get_logs_dir() -> Path:
     return d
 
 
+def get_tiktoken_cache_dir() -> Path:
+    """Local tiktoken cache for fully offline LightRAG tokenization."""
+    d = get_config_dir() / "tiktoken_cache"
+    d.mkdir(parents=True, exist_ok=True)
+    return d
+
+
 def get_models_dir() -> Path:
     """Bundled Hugging Face cache root (HF_HOME)."""
     d = get_data_dir() / "models"
@@ -125,6 +132,9 @@ def apply_client_env_defaults() -> None:
         os.environ["HF_HOME"] = str(get_models_dir())
     os.environ.setdefault("RAG_WEB_WORKING_DIR", str(get_rag_storage_dir()))
     os.environ.setdefault("RAG_WEB_PARSER_OUTPUT_DIR", str(get_parser_output_dir()))
+    os.environ.setdefault("TIKTOKEN_CACHE_DIR", str(get_tiktoken_cache_dir()))
     os.environ.setdefault("EMBEDDING_BACKEND", "hf")
     os.environ.setdefault("HF_EMBED_OFFLINE", "1")
+    os.environ.setdefault("HF_HUB_OFFLINE", "1")
+    os.environ.setdefault("TRANSFORMERS_OFFLINE", "1")
     os.environ.setdefault("RERANK_BINDING", "hf")
