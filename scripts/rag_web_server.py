@@ -22,6 +22,7 @@ Env (optional):
 from __future__ import annotations
 
 import asyncio
+import contextlib
 import importlib.util
 import inspect
 import json
@@ -56,9 +57,9 @@ from client_paths import (  # noqa: E402
 apply_client_env_defaults()
 load_dotenv(_ROOT / ".env", override=False)
 
-from client_env_manager import apply_env_to_process, get_form_values, save_env  # noqa: E402
+from client_env_manager import apply_env_to_process, get_form_values, patch_env_keys, save_env  # noqa: E402
 from client_paths import get_env_path  # noqa: E402
-from client_setup_service import get_setup_status  # noqa: E402
+from client_setup_service import get_setup_status, resolve_multimodal_enabled  # noqa: E402
 
 if get_env_path().is_file():
     apply_env_to_process()
@@ -105,6 +106,10 @@ class QueryBody(BaseModel):
 
 class SetupEnvBody(BaseModel):
     values: dict[str, str] = Field(default_factory=dict)
+
+
+class MultimodalBody(BaseModel):
+    enabled: bool = Field(..., description="Enable image/table/equation processing during ingest")
 
 
 def _sse(payload: dict[str, Any]) -> str:
@@ -242,12 +247,7 @@ async def _init_rag_engine() -> None:
     wd = _resolve_path("RAG_WEB_WORKING_DIR", "rag_storage_run")
     pod = _resolve_path("RAG_WEB_PARSER_OUTPUT_DIR", "output/pipeline_parse")
     pod.mkdir(parents=True, exist_ok=True)
-    skip_mm = (os.getenv("RAG_WEB_SKIP_MULTIMODAL", "true") or "true").strip().lower() in (
-        "1",
-        "true",
-        "yes",
-        "on",
-    )
+    skip_mm = not resolve_multimodal_enabled()
     state.working_dir = str(wd)
     state.parser_output_dir = str(pod)
     state.query_mode = (os.getenv("RAG_QUERY_MODE") or "mix").strip()
@@ -265,13 +265,24 @@ async def _init_rag_engine() -> None:
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
-    if is_client_mode() and not is_setup_complete():
-        yield
-        return
-    await _init_rag_engine()
+    """Start HTTP immediately; load RAG in background when appropriate."""
+    init_task: asyncio.Task | None = None
+
+    async def _startup_init() -> None:
+        if is_client_mode() and not is_setup_complete():
+            return
+        if get_env_path().is_file():
+            apply_env_to_process()
+            await _init_rag_engine()
+
+    init_task = asyncio.create_task(_startup_init())
     try:
         yield
     finally:
+        if init_task is not None and not init_task.done():
+            init_task.cancel()
+            with contextlib.suppress(asyncio.CancelledError):
+                await init_task
         await _shutdown_rag()
 
 
@@ -303,7 +314,10 @@ async def setup_page():
     setup = _WEB_DIR / "setup.html"
     if not setup.is_file():
         raise HTTPException(500, "web/setup.html missing")
-    return FileResponse(setup)
+    return FileResponse(
+        setup,
+        headers={"Cache-Control": "no-cache, no-store, must-revalidate"},
+    )
 
 
 @app.get("/api/setup/status")
@@ -356,6 +370,48 @@ async def api_setup_reload_rag():
     }
 
 
+@app.post("/api/setup/clear-knowledge-base")
+async def api_setup_clear_knowledge_base():
+    if state.ingest_active:
+        raise HTTPException(409, "灌库进行中，请先停止灌库。")
+    apply_env_to_process()
+    await _clear_knowledge_base()
+    status = get_setup_status()
+    return {
+        "ok": True,
+        "message": "知识库已清空，可重新灌库。",
+        "rag_ready": state.ready,
+        "rag_error": state.init_error,
+        **status,
+    }
+
+
+@app.post("/api/setup/multimodal")
+async def api_setup_multimodal(body: MultimodalBody):
+    if state.ingest_active:
+        raise HTTPException(409, "灌库进行中，无法切换多模态模式。")
+    enabled = body.enabled
+    patch_env_keys(
+        {
+            "RAG_WEB_ENABLE_MULTIMODAL": "1" if enabled else "0",
+            "RAG_WEB_SKIP_MULTIMODAL": "0" if enabled else "1",
+        }
+    )
+    apply_env_to_process()
+    await _shutdown_rag()
+    await _init_rag_engine()
+    status = get_setup_status()
+    return {
+        "ok": True,
+        "multimodal_enabled": enabled,
+        "skip_multimodal": not enabled,
+        "rag_ready": state.ready,
+        "rag_error": state.init_error,
+        "message": "已开启多模态灌库（图片/表格/公式）。" if enabled else "已关闭多模态，仅文本灌库。",
+        **status,
+    }
+
+
 @app.post("/api/setup/complete")
 async def api_setup_complete():
     status = get_setup_status()
@@ -371,6 +427,26 @@ async def api_setup_complete():
     return {"ok": True, "marker": marker, "redirect": "/"}
 
 
+@app.get("/api/media/image")
+async def api_media_image(token: str = ""):
+    """Serve extracted PDF images from the parser output directory (local client only)."""
+    if not token.strip():
+        raise HTTPException(400, "Missing token")
+    _scripts_dir = _ROOT / "scripts"
+    if str(_scripts_dir) not in sys.path:
+        sys.path.insert(0, str(_scripts_dir))
+    from image_query_refs import decode_media_token, resolve_media_path  # noqa: WPS433
+
+    media_root = Path(state.parser_output_dir).resolve()
+    path = decode_media_token(token.strip(), media_root)
+    if path is None:
+        raise HTTPException(404, "Image not found")
+    resolved = resolve_media_path(str(path), [media_root])
+    if resolved is None:
+        raise HTTPException(404, "Image not found")
+    return FileResponse(resolved)
+
+
 @app.get("/api/health")
 async def health():
     return {
@@ -380,6 +456,7 @@ async def health():
         "parser_output_dir": state.parser_output_dir,
         "query_mode": state.query_mode,
         "skip_multimodal": state.skip_multimodal,
+        "multimodal_enabled": not state.skip_multimodal,
         "client_mode": is_client_mode(),
         "setup_complete": is_setup_complete(),
     }
@@ -422,8 +499,12 @@ async def _query_stream_events(q: str, mode: str) -> AsyncIterator[str]:
     _scripts_dir = _ROOT / "scripts"
     if str(_scripts_dir) not in sys.path:
         sys.path.insert(0, str(_scripts_dir))
-    from query_progress_hooks import query_progress_hooks  # noqa: WPS433
+    from query_progress_hooks import query_progress_hooks, set_query_media_roots, set_query_text_for_images  # noqa: WPS433
     from stream_cot_parser import StreamCotParser  # noqa: WPS433
+
+    parser_root = Path(state.parser_output_dir).resolve()
+    set_query_media_roots([parser_root])
+    set_query_text_for_images(q)
 
     result_queue: asyncio.Queue[tuple[str, Any]] = asyncio.Queue(maxsize=1)
 
@@ -452,7 +533,7 @@ async def _query_stream_events(q: str, mode: str) -> AsyncIterator[str]:
                 if prog_task in done and not prog_task.cancelled():
                     try:
                         ev = prog_task.result()
-                        if ev.get("type") in ("status", "retrieval_scope"):
+                        if ev.get("type") in ("status", "retrieval_scope", "related_images"):
                             yield _sse(ev)
                     except Exception:
                         pass

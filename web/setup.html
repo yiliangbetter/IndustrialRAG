@@ -5,7 +5,7 @@
     <meta name="viewport" content="width=device-width, initial-scale=1" />
     <title>南兴知识库 · 安装向导</title>
     <link rel="stylesheet" href="/static/styles.css" />
-    <link rel="stylesheet" href="/static/setup.css" />
+    <link rel="stylesheet" href="/static/setup.css?v=20260526" />
   </head>
   <body class="setup-body">
     <div class="setup-app">
@@ -19,7 +19,7 @@
         />
         <div>
           <h1>南兴知识库 · 安装向导</h1>
-          <p class="brand-sub">首次使用请按步骤完成配置与灌库</p>
+          <p class="brand-sub" id="setup-subtitle">首次使用请按步骤完成配置与灌库</p>
         </div>
       </header>
 
@@ -28,7 +28,7 @@
       <main class="setup-main">
         <section class="panel setup-panel" id="step-env">
           <h2>1. 连接 LLM 服务</h2>
-          <p class="hint">向量与 Rerank 模型已随安装包内置；此处只需配置大模型 API。</p>
+          <p class="hint">向量与 Rerank 模型已随安装包内置。请配置文本大模型 API；若需多模态灌库，请同时选择视觉模型（无需手动编辑配置文件）。</p>
           <form id="env-form" class="setup-form"></form>
           <div class="setup-actions">
             <button type="submit" form="env-form" class="btn primary" id="btn-save-env">
@@ -49,6 +49,10 @@
           <h2>2. 环境与内置模型</h2>
           <div id="check-runtime" class="check-list"></div>
           <div id="check-models" class="check-list"></div>
+          <h3 class="setup-subheading">灌库语言</h3>
+          <div id="check-language" class="check-list">
+            <li><span class="check-icon">…</span>加载中…</li>
+          </div>
           <p id="rag-status" class="hint"></p>
           <div class="setup-actions">
             <button type="button" class="btn secondary" id="btn-reload-rag">
@@ -66,7 +70,17 @@
 
         <section class="panel setup-panel" id="step-ingest">
           <h2>3. 灌库</h2>
-          <p class="hint">上传 PDF / Office 等文档，写入本地知识库（耗时较长，请勿关闭窗口）。</p>
+          <p class="hint">上传 PDF / Office 等文档，写入本地知识库（耗时较长，请勿关闭窗口）。未开启多模态时，PDF 图片会在问答时自动贴出供对照；开启多模态则额外用视觉模型解析图片内容。</p>
+          <div id="kb-summary" class="kb-summary" aria-live="polite">正在读取知识库状态…</div>
+          <label class="checkbox-row" id="multimodal-wrap">
+            <input type="checkbox" id="enable-multimodal" />
+            <span>启用多模态灌库（PDF 内图片、表格、公式经 LLM 解析并写入图谱；更慢，消耗更多 LLM 额度）</span>
+          </label>
+          <p class="hint" id="multimodal-hint"></p>
+          <label class="checkbox-row" id="clear-before-ingest-wrap">
+            <input type="checkbox" id="clear-before-ingest" checked />
+            <span>灌库前清空现有知识库（重新灌库时必选，否则会在旧数据上追加）</span>
+          </label>
           <label class="upload-zone" id="upload-zone">
             <input
               type="file"
@@ -85,6 +99,9 @@
           <div class="ingest-actions">
             <button type="button" class="btn secondary" id="btn-ingest" disabled>
               开始灌库
+            </button>
+            <button type="button" class="btn danger" id="btn-clear-kb">
+              清空知识库
             </button>
             <button type="button" class="btn danger hidden" id="btn-stop-ingest">
               停止灌库
@@ -113,7 +130,7 @@
         </section>
       </main>
     </div>
-    <script src="/static/ingest_ui.js"></script>
-    <script src="/static/setup.js"></script>
+    <script src="/static/ingest_ui.js?v=20260525"></script>
+    <script src="/static/setup.js?v=20260526"></script>
   </body>
 </html>

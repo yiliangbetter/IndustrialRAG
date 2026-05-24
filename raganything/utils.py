@@ -5,6 +5,7 @@ Contains helper functions for content separation, text insertion, and other util
 """
 
 import base64
+import math
 from typing import Dict, List, Any, Tuple
 from pathlib import Path
 from lightrag.utils import logger
@@ -54,6 +55,155 @@ def separate_content(
         logger.info(f"  - Multimodal type distribution: {modal_types}")
 
     return text_content, multimodal_items
+
+
+def _join_caption_field(value: Any) -> str:
+    if isinstance(value, list):
+        return " ".join(str(x) for x in value if x).strip()
+    return str(value or "").strip()
+
+
+def build_image_ref_block(
+    *,
+    img_path: str,
+    page_idx: int | None = None,
+    caption: str = "",
+    footnote: str = "",
+    context: str = "",
+) -> str:
+    """Format a lightweight image reference block for vector / KG indexing."""
+    lines = ["[图片]", f"图片路径：{img_path}"]
+    if page_idx is not None:
+        lines.append(f"页码：{page_idx}")
+    if caption:
+        lines.append(f"图注：{caption}")
+    if footnote:
+        lines.append(f"脚注：{footnote}")
+    if context:
+        lines.append(f"关联正文：{context[:800]}")
+    return "\n".join(lines)
+
+
+def _bbox_center(bbox: Any) -> tuple[float, float] | None:
+    if not isinstance(bbox, (list, tuple)) or len(bbox) < 4:
+        return None
+    try:
+        x0, y0, x1, y1 = (float(bbox[0]), float(bbox[1]), float(bbox[2]), float(bbox[3]))
+    except (TypeError, ValueError):
+        return None
+    return ((x0 + x1) / 2.0, (y0 + y1) / 2.0)
+
+
+def neighbor_context_text(items: List[Dict[str, Any]], index: int, window: int = 3) -> str:
+    """Collect nearby text blocks around an image for semantic association."""
+    parts: List[str] = []
+    lo = max(0, index - window)
+    hi = min(len(items), index + window + 1)
+    for j in range(lo, hi):
+        if j == index:
+            continue
+        item = items[j]
+        if not isinstance(item, dict):
+            continue
+        if item.get("type") == "text":
+            text = item.get("text")
+            if isinstance(text, str) and text.strip():
+                parts.append(text.strip())
+                continue
+        text = item.get("text")
+        if isinstance(text, str) and text.strip():
+            parts.append(text.strip())
+    return " ".join(parts).strip()
+
+
+def _text_image_layout_distance(
+    img_center: tuple[float, float], text_center: tuple[float, float], text_bbox: Any
+) -> float:
+    """Prefer left-column text when the image sits in the right column (manual layout)."""
+    if img_center[0] > 500 and text_center[0] < 520:
+        return abs(text_center[1] - img_center[1])
+    return math.hypot(text_center[0] - img_center[0], text_center[1] - img_center[1])
+
+
+def context_text_for_image(
+    items: List[Dict[str, Any]], index: int, window: int = 3, max_chars: int = 800
+) -> str:
+    """Associate image with text via same-page bbox proximity, then local window."""
+    if index < 0 or index >= len(items):
+        return ""
+    item = items[index]
+    if not isinstance(item, dict):
+        return neighbor_context_text(items, index, window)
+
+    page_idx = item.get("page_idx")
+    img_center = _bbox_center(item.get("bbox"))
+    ordered: List[str] = []
+    seen: set[str] = set()
+
+    def add_text(text: str) -> None:
+        cleaned = text.strip()
+        if cleaned and cleaned not in seen:
+            seen.add(cleaned)
+            ordered.append(cleaned)
+
+    if page_idx is not None and img_center is not None:
+        ranked: List[tuple[float, str]] = []
+        for j, other in enumerate(items):
+            if j == index or not isinstance(other, dict):
+                continue
+            if other.get("page_idx") != page_idx or other.get("type") != "text":
+                continue
+            text = other.get("text")
+            if not isinstance(text, str) or not text.strip():
+                continue
+            text_bbox = other.get("bbox")
+            text_center = _bbox_center(text_bbox)
+            if text_center is None:
+                continue
+            dist = _text_image_layout_distance(img_center, text_center, text_bbox)
+            ranked.append((dist, text.strip()))
+        ranked.sort(key=lambda pair: pair[0])
+        for _, text in ranked[:3]:
+            add_text(text)
+
+    if not ordered:
+        neighbor = neighbor_context_text(items, index, window)
+        if neighbor:
+            add_text(neighbor)
+
+    merged = " ".join(ordered).strip()
+    return merged[:max_chars] if merged else ""
+
+
+def flatten_image_refs_for_skip_multimodal(items: List[Dict[str, Any]]) -> str:
+    """Build indexable text for images when multimodal LLM processing is skipped."""
+    blocks: List[str] = []
+    for idx, item in enumerate(items):
+        if not isinstance(item, dict) or item.get("type") != "image":
+            continue
+        img_path = (item.get("img_path") or "").strip()
+        if not img_path:
+            continue
+        caption = _join_caption_field(
+            item.get("image_caption", item.get("img_caption", ""))
+        )
+        footnote = _join_caption_field(
+            item.get("image_footnote", item.get("img_footnote", ""))
+        )
+        page_idx = item.get("page_idx")
+        context = context_text_for_image(items, idx)
+        blocks.append(
+            build_image_ref_block(
+                img_path=img_path,
+                page_idx=page_idx if isinstance(page_idx, int) else None,
+                caption=caption,
+                footnote=footnote,
+                context=context,
+            )
+        )
+    if not blocks:
+        return ""
+    return "\n\n".join(blocks)
 
 
 def encode_image_to_base64(image_path: str) -> str:

@@ -15,9 +15,13 @@ from raganything.base import DocStatus
 from raganything.parser import MineruParser, MineruExecutionError, get_parser
 from raganything.utils import (
     separate_content,
+    build_image_ref_block,
+    context_text_for_image,
+    flatten_image_refs_for_skip_multimodal,
     insert_text_content,
     insert_text_content_with_multimodal_content,
     get_processor_for_type,
+    _join_caption_field,
 )
 import asyncio
 from lightrag.utils import compute_mdhash_id
@@ -240,6 +244,73 @@ class ProcessorMixin:
         if not parts:
             return ""
         return "\n\n".join(f"[Table]\n{t}" for t in parts)
+
+    def _table_text_from_item(self, item: Dict[str, Any]) -> str:
+        body = item.get("table_body")
+        if isinstance(body, str) and body.strip():
+            return body.strip()
+        content = item.get("content")
+        if isinstance(content, dict):
+            html = (content.get("html") or "").strip()
+            if html:
+                return html
+        return ""
+
+    def _build_text_with_inline_image_refs(self, items: List[Dict[str, Any]]) -> str:
+        """Walk content_list in document order; place image refs next to surrounding text."""
+        parts: List[str] = []
+        for idx, item in enumerate(items):
+            if not isinstance(item, dict):
+                continue
+            block_type = item.get("type")
+
+            if block_type == "image":
+                img_path = (item.get("img_path") or "").strip()
+                if img_path:
+                    caption = _join_caption_field(
+                        item.get("image_caption", item.get("img_caption", ""))
+                    )
+                    footnote = _join_caption_field(
+                        item.get("image_footnote", item.get("img_footnote", ""))
+                    )
+                    page_idx = item.get("page_idx")
+                    context = context_text_for_image(items, idx)
+                    parts.append(
+                        build_image_ref_block(
+                            img_path=img_path,
+                            page_idx=page_idx if isinstance(page_idx, int) else None,
+                            caption=caption,
+                            footnote=footnote,
+                            context=context,
+                        )
+                    )
+                else:
+                    chunk = self._plaintext_from_mineru_blocks([item])
+                    if chunk.strip():
+                        parts.append(chunk.strip())
+                continue
+
+            if block_type == "table":
+                table_text = self._table_text_from_item(item)
+                if table_text:
+                    parts.append(f"[Table]\n{table_text}")
+                continue
+
+            if block_type == "equation":
+                eq = item.get("text") or item.get("equation_text") or ""
+                if isinstance(eq, str) and eq.strip():
+                    parts.append(eq.strip())
+                continue
+
+            chunk = self._plaintext_from_mineru_blocks([item])
+            if not chunk.strip() and block_type == "text":
+                text = item.get("text")
+                if isinstance(text, str):
+                    chunk = text.strip()
+            if chunk.strip():
+                parts.append(chunk.strip())
+
+        return "\n\n".join(parts)
 
     async def _insert_text_content_embedding_only(
         self, text_content: str, file_ref: str, doc_id: str
@@ -2185,29 +2256,57 @@ class ProcessorMixin:
         # Step 1: Separate text and multimodal content
         text_content, multimodal_items = separate_content(normalized_content_list)
 
-        if not text_content.strip():
-            text_content = self._plaintext_from_mineru_blocks(normalized_content_list)
-        if not text_content.strip():
-            text_parts = []
-            for item in normalized_content_list:
-                candidate = item.get("text")
-                if isinstance(candidate, str) and candidate.strip():
-                    text_parts.append(candidate.strip())
-            text_content = "\n\n".join(text_parts)
-
         if skip_multimodal_processing:
-            table_blob = self._flatten_table_text_for_skip_multimodal(
+            inline_text = self._build_text_with_inline_image_refs(
                 normalized_content_list
             )
-            if table_blob:
-                if text_content.strip():
-                    text_content = text_content.strip() + "\n\n" + table_blob
-                else:
-                    text_content = table_blob
-                self.logger.info(
-                    "skip_multimodal_processing: appended %d chars of table text for indexing",
-                    len(table_blob),
+            if inline_text.strip():
+                text_content = inline_text
+                img_count = inline_text.count("[图片]")
+                if img_count:
+                    self.logger.info(
+                        "skip_multimodal_processing: inline-indexed %d image ref(s) "
+                        "in document order",
+                        img_count,
+                    )
+            else:
+                if not text_content.strip():
+                    text_content = self._plaintext_from_mineru_blocks(
+                        normalized_content_list
+                    )
+                if not text_content.strip():
+                    text_parts = []
+                    for item in normalized_content_list:
+                        candidate = item.get("text")
+                        if isinstance(candidate, str) and candidate.strip():
+                            text_parts.append(candidate.strip())
+                    text_content = "\n\n".join(text_parts)
+                table_blob = self._flatten_table_text_for_skip_multimodal(
+                    normalized_content_list
                 )
+                if table_blob:
+                    if text_content.strip():
+                        text_content = text_content.strip() + "\n\n" + table_blob
+                    else:
+                        text_content = table_blob
+                image_blob = flatten_image_refs_for_skip_multimodal(
+                    normalized_content_list
+                )
+                if image_blob:
+                    if text_content.strip():
+                        text_content = text_content.strip() + "\n\n" + image_blob
+                    else:
+                        text_content = image_blob
+        else:
+            if not text_content.strip():
+                text_content = self._plaintext_from_mineru_blocks(normalized_content_list)
+            if not text_content.strip():
+                text_parts = []
+                for item in normalized_content_list:
+                    candidate = item.get("text")
+                    if isinstance(candidate, str) and candidate.strip():
+                        text_parts.append(candidate.strip())
+                text_content = "\n\n".join(text_parts)
 
         # Step 1.5: Set content source for context extraction in multimodal processing
         if hasattr(self, "set_content_source_for_context") and multimodal_items:

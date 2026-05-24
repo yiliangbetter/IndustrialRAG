@@ -32,6 +32,8 @@
             <dd id="meta-wd" class="mono">—</dd>
             <dt>查询模式</dt>
             <dd id="meta-mode">—</dd>
+            <dt>灌库模式</dt>
+            <dd id="meta-multimodal">—</dd>
           </dl>
           <p id="meta-error" class="error hidden"></p>
         </section>
@@ -56,6 +58,11 @@
         <section class="panel">
           <h2>上传灌库</h2>
           <p class="hint">解析并写入当前工作目录下的知识库（耗时较长，请勿关闭页面）。</p>
+          <label class="checkbox-row" id="multimodal-wrap">
+            <input type="checkbox" id="enable-multimodal" />
+            <span>启用多模态灌库（图片/表格/公式；更慢，消耗更多 LLM）</span>
+          </label>
+          <p class="hint" id="multimodal-hint"></p>
           <label class="upload-zone" id="upload-zone">
             <input
               type="file"
@@ -115,6 +122,6 @@
     <script src="/static/vendor/marked.min.js"></script>
     <script src="/static/vendor/purify.min.js"></script>
     <script src="/static/ingest_ui.js"></script>
-    <script src="/static/app.js"></script>
+    <script src="/static/app.js?v=20260527"></script>
   </body>
 </html>

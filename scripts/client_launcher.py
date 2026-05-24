@@ -20,6 +20,8 @@ import os
 import sys
 import threading
 import time
+import urllib.error
+import urllib.request
 import webbrowser
 from pathlib import Path
 
@@ -47,6 +49,20 @@ def _load_env() -> None:
         load_dotenv(_ROOT / ".env", override=False)
 
 
+def _wait_for_server(host: str, port: int, timeout: float = 120.0) -> bool:
+    """Poll until the web server accepts HTTP or timeout."""
+    deadline = time.monotonic() + timeout
+    health_url = f"http://{host}:{port}/api/health"
+    while time.monotonic() < deadline:
+        try:
+            with urllib.request.urlopen(health_url, timeout=1.5) as resp:
+                if resp.status == 200:
+                    return True
+        except (urllib.error.URLError, TimeoutError, OSError):
+            time.sleep(0.4)
+    return False
+
+
 def main() -> None:
     _load_env()
     host = (os.getenv("RAG_WEB_HOST") or "127.0.0.1").strip()
@@ -55,11 +71,16 @@ def main() -> None:
     url = f"http://{host}:{port}{path}"
 
     def _open_browser() -> None:
-        time.sleep(1.2)
-        try:
-            webbrowser.open(url)
-        except OSError:
-            pass
+        if _wait_for_server(host, port):
+            try:
+                webbrowser.open(url)
+            except OSError:
+                pass
+        else:
+            print(
+                f"Warning: server not ready after 120s — open {url} manually once startup finishes.",
+                flush=True,
+            )
 
     threading.Thread(target=_open_browser, daemon=True).start()
 

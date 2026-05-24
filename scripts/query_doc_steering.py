@@ -271,6 +271,41 @@ def consume_filter_report() -> dict[str, Any] | None:
     return report
 
 
+def build_answer_fidelity_user_prompt(query: str) -> str:
+    """When retrieval spans multiple manuals, keep each device's wording separate."""
+    if not _env_bool("RAG_QUERY_AUTO_STEERING", True):
+        return ""
+    qn = _normalize_query(query)
+    profile = resolve_machine_profile(query)
+
+    parts = [
+        "回答须忠实于检索到的各手册原文，不得自行归纳或重组：",
+        "若内容来自多份不同设备或手册，必须按设备或手册分别列出，"
+        "小节标题写明设备名称（如「双端封边机」「高速智能封边机」）或对应手册；",
+        "不得把不同手册的保养周期、润滑脂型号、操作步骤合并成"
+        "「常规检查与润滑」「深度清理与润滑」「日常保养」等自编分类；",
+        "保留原文的保养周期、润滑剂名称与型号（如润滑脂2#、长城润滑脂3#）"
+        "及步骤表述；引用标记与文末 References 须与正文实际引用一致。",
+    ]
+
+    if not profile and any(
+        marker in qn for marker in ("保养", "润滑", "维护", "检查", "更换", "清理")
+    ):
+        parts.append(
+            "用户未指定单一机型时：若检索到多台设备的同类保养条目，"
+            "须分别说明各设备对应方法，不要混为一谈或只给出一条「通用」流程。"
+        )
+
+    if "传动丝杆" in qn or ("传动" in qn and "丝杆" in qn):
+        parts.append(
+            "传动丝杆：不同手册的保养周期与润滑脂可能不同"
+            "（例如双端封边机每周长城润滑脂3#，高速智能封边机每年润滑脂2#），"
+            "须分设备说明，勿合并为同一保养流程。"
+        )
+
+    return " ".join(parts)
+
+
 def build_steering_user_prompt(query: str) -> str:
     """Per-query hint for the LLM (not per-machine ``.env`` entries)."""
     if not _env_bool("RAG_QUERY_KG_STEERING", True):
@@ -290,6 +325,18 @@ def build_steering_user_prompt(query: str) -> str:
             "勿写「每天加注长城导轨油68#」，除非 chunk 正文明确写出该条。"
         )
     return " ".join(parts)
+
+
+def build_user_prompt_for_query(query: str) -> str:
+    """Merge answer-fidelity rules and machine-specific steering for LightRAG."""
+    parts: list[str] = []
+    fidelity = build_answer_fidelity_user_prompt(query)
+    if fidelity:
+        parts.append(fidelity)
+    steer = build_steering_user_prompt(query)
+    if steer:
+        parts.append(steer)
+    return "\n\n".join(parts)
 
 
 def _line_is_chain_daily_oil_noise(line: str) -> bool:

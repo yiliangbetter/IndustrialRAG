@@ -19,10 +19,13 @@ const ingestProgress = $("#ingest-progress");
 const ingestProgressBar = $("#ingest-progress-bar");
 const ingestProgressLabel = $("#ingest-progress-label");
 const ingestLog = $("#ingest-log");
+const enableMultimodal = $("#enable-multimodal");
+const multimodalHint = $("#multimodal-hint");
 
 let pendingFiles = [];
 let ingestBusy = false;
 let ingestStopping = false;
+let multimodalSyncBusy = false;
 /** When false, user scrolled up — do not auto-jump to bottom on every token. */
 let scrollPinnedToBottom = true;
 let scrollRaf = 0;
@@ -167,6 +170,10 @@ function prepareAssistantStream(el) {
   scopeEl.className = "retrieval-scope";
   scopeEl.hidden = true;
 
+  const imagesEl = document.createElement(`d` + `iv`);
+  imagesEl.className = "related-images";
+  imagesEl.hidden = true;
+
   const answerLabel = document.createElement(`d` + `iv`);
   answerLabel.className = "answer-label";
   answerLabel.textContent = "回答";
@@ -175,7 +182,7 @@ function prepareAssistantStream(el) {
   const answerMd = document.createElement(`d` + `iv`);
   answerMd.className = "answer-md markdown-body";
 
-  bodyEl.append(thinkingBlock, scopeEl, answerLabel, answerMd);
+  bodyEl.append(thinkingBlock, scopeEl, imagesEl, answerLabel, answerMd);
   el.append(roleEl, bodyEl);
   pinMessagesEnd();
   scrollMessages(true);
@@ -185,6 +192,7 @@ function prepareAssistantStream(el) {
     thinkingBlock,
     thinkingText,
     scopeEl,
+    imagesEl,
     answerLabel,
     answerMd,
     thinkingRaw: "",
@@ -220,6 +228,29 @@ function showRetrievalScope(ui, ev) {
   scrollMessages();
 }
 
+function showRelatedImages(ui, ev) {
+  if (!ui?.imagesEl || !ev?.images?.length) return;
+  ui.imagesEl.hidden = false;
+  const cards = ev.images
+    .map((img) => {
+      const cap = img.caption ? escapeHtml(img.caption) : "相关图片";
+      const page =
+        img.page != null
+          ? `<span class="img-page">第 ${escapeHtml(String(img.page))} 页</span>`
+          : "";
+      const url = escapeHtml(img.url || "");
+      return `<figure class="related-img-card">
+        <a href="${url}" target="_blank" rel="noopener noreferrer">
+          <img src="${url}" alt="${cap}" loading="lazy" />
+        </a>
+        <figcaption>${cap}${page}</figcaption>
+      </figure>`;
+    })
+    .join("");
+  ui.imagesEl.innerHTML = `<div class="related-images-head">参考资料图片（来自文档原文，便于对照）</div><div class="related-images-grid">${cards}</div>`;
+  scrollMessages();
+}
+
 function appendThinkingDelta(ui, text) {
   if (!ui || !text) return;
   ui.thinkingRaw += text;
@@ -250,6 +281,19 @@ async function refreshStatus() {
     $("#meta-ready").className = h.ready ? "status-ok" : "status-bad";
     $("#meta-wd").textContent = h.working_dir || "—";
     $("#meta-mode").textContent = h.query_mode || "—";
+    if ($("#meta-multimodal")) {
+      $("#meta-multimodal").textContent = h.multimodal_enabled
+        ? "多模态（图/表/公式）"
+        : "仅文本";
+    }
+    if (enableMultimodal && !multimodalSyncBusy) {
+      enableMultimodal.checked = Boolean(h.multimodal_enabled);
+    }
+    if (multimodalHint) {
+      multimodalHint.textContent = h.multimodal_enabled
+        ? "多模态已开启；切换后会重新加载引擎。"
+        : "默认仅文本灌库；勾选以启用多模态。";
+    }
     if (h.query_mode) queryMode.value = h.query_mode;
     const errEl = $("#meta-error");
     if (h.init_error) {
@@ -325,6 +369,14 @@ async function streamQuery(query, loadingEl) {
         gotContent = true;
       }
       showRetrievalScope(ui, ev);
+      return;
+    }
+    if (ev.type === "related_images") {
+      if (!ui) {
+        ui = prepareAssistantStream(loadingEl);
+        gotContent = true;
+      }
+      showRelatedImages(ui, ev);
       return;
     }
     if (ev.type === "error") {
@@ -442,7 +494,10 @@ function updateIngestControls() {
   if (btnClearFiles) {
     btnClearFiles.disabled = !hasFiles || ingestBusy;
   }
-  btnIngest.disabled = !hasFiles || ingestBusy;
+  btnIngest.disabled = !hasFiles || ingestBusy || multimodalSyncBusy;
+  if (enableMultimodal) {
+    enableMultimodal.disabled = ingestBusy || multimodalSyncBusy;
+  }
   if (btnStopIngest) {
     btnStopIngest.classList.toggle("hidden", !ingestBusy);
     btnStopIngest.disabled = !ingestBusy || ingestStopping;
@@ -556,6 +611,31 @@ btnStopIngest?.addEventListener("click", async () => {
     updateIngestControls();
     appendIngestLog(ingestLog, `停止失败：${err.message || err}`);
     ingestStatus.textContent = `停止失败：${err.message || err}`;
+  }
+});
+
+enableMultimodal?.addEventListener("change", async () => {
+  if (multimodalSyncBusy || ingestBusy) return;
+  const enabled = enableMultimodal.checked;
+  multimodalSyncBusy = true;
+  updateIngestControls();
+  ingestStatus.textContent = enabled ? "正在开启多模态…" : "正在关闭多模态…";
+  try {
+    const res = await fetch("/api/setup/multimodal", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ enabled }),
+    });
+    const data = await res.json().catch(() => ({}));
+    if (!res.ok) throw new Error(data.detail || data.message || `HTTP ${res.status}`);
+    ingestStatus.textContent = data.message || (enabled ? "多模态已开启" : "多模态已关闭");
+    await refreshStatus();
+  } catch (err) {
+    enableMultimodal.checked = !enabled;
+    ingestStatus.textContent = `切换失败：${err.message || err}`;
+  } finally {
+    multimodalSyncBusy = false;
+    updateIngestControls();
   }
 });
 

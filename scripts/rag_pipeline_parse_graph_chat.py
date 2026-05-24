@@ -43,6 +43,10 @@ if (os.getenv("HF_EMBED_OFFLINE") or "").strip().lower() in ("1", "true", "yes")
     os.environ["HF_HUB_OFFLINE"] = "1"
     os.environ.setdefault("TRANSFORMERS_OFFLINE", "1")
 
+from raganything.prompt_manager import apply_prompt_language_from_env  # noqa: E402
+
+apply_prompt_language_from_env()
+
 
 def _ensure_venv_bin_on_path() -> None:
     venv_bin = _ROOT / ".venv" / "bin"
@@ -439,9 +443,9 @@ def _query_extras_from_env(query: str | None = None) -> dict:
         scripts_dir = Path(__file__).resolve().parent
         if str(scripts_dir) not in sys.path:
             sys.path.insert(0, str(scripts_dir))
-        from query_doc_steering import build_steering_user_prompt  # noqa: WPS433
+        from query_doc_steering import build_user_prompt_for_query  # noqa: WPS433
 
-        steer = build_steering_user_prompt(query)
+        steer = build_user_prompt_for_query(query)
         if steer:
             up = f"{up}\n{steer}".strip() if up else steer
     if up:

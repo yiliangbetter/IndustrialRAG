@@ -9,6 +9,14 @@ const envLoadProgressLabel = $("#env-load-progress-label");
 const envLoadLog = $("#env-load-log");
 const checkRuntime = $("#check-runtime");
 const checkModels = $("#check-models");
+const checkLanguage = $("#check-language");
+const setupSubtitle = $("#setup-subtitle");
+const kbSummary = $("#kb-summary");
+const clearBeforeIngestWrap = $("#clear-before-ingest-wrap");
+const clearBeforeIngest = $("#clear-before-ingest");
+const btnClearKb = $("#btn-clear-kb");
+const enableMultimodal = $("#enable-multimodal");
+const multimodalHint = $("#multimodal-hint");
 const ragStatus = $("#rag-status");
 const finishChecklist = $("#finish-checklist");
 const finishStatus = $("#finish-status");
@@ -40,6 +48,7 @@ let ingestBusy = false;
 let ingestStopping = false;
 let engineLoadBusy = false;
 let ragEnsurePromise = null;
+let multimodalSyncBusy = false;
 
 const ENV_SAVE_STEPS = [
   { label: "保存配置到本地…", log: "写入 config/.env", pct: 12 },
@@ -88,26 +97,43 @@ function renderCheckList(el, items) {
     .join("");
 }
 
+function optionValue(o) {
+  return typeof o === "object" && o !== null ? o.value : o;
+}
+
+function optionLabel(o) {
+  return typeof o === "object" && o !== null ? o.label || o.value : o;
+}
+
 function renderEnvForm(fields) {
   envForm.innerHTML = fields
     .map((f) => {
       const inputType = f.type === "password" ? "password" : "text";
       if (f.type === "select") {
         const opts = (f.options || [])
-          .map(
-            (o) =>
-              `<option value="${o}" ${o === f.value ? "selected" : ""}>${o}</option>`
-          )
+          .map((o) => {
+            const v = optionValue(o);
+            const lbl = optionLabel(o);
+            const selected = v === f.value ? "selected" : "";
+            return `<option value="${escapeAttr(v)}" ${selected}>${escapeAttr(lbl)}</option>`;
+          })
           .join("");
+        const customVisible = f.allow_custom && f.value === "__custom__";
+        const customHtml = f.allow_custom
+          ? `<input class="env-custom-input${customVisible ? "" : " hidden"}" name="${f.key}__custom"
+              type="text" value="${escapeAttr(f.custom_value || "")}"
+              placeholder="输入 API 网关支持的视觉模型名称" />`
+          : "";
         return `
-          <label>
+          <label class="env-field${f.allow_custom ? " env-field-custom" : ""}">
             <span class="label-text">${f.label}</span>
             <p class="field-hint">${f.hint || ""}</p>
             <select name="${f.key}" ${f.required ? "required" : ""}>${opts}</select>
+            ${customHtml}
           </label>`;
       }
       return `
-        <label>
+        <label class="env-field">
           <span class="label-text">${f.label}</span>
           <p class="field-hint">${f.hint || ""}</p>
           <input name="${f.key}" type="${inputType}" value="${escapeAttr(f.value || "")}"
@@ -115,6 +141,19 @@ function renderEnvForm(fields) {
         </label>`;
     })
     .join("");
+  bindEnvFormHandlers();
+}
+
+function bindEnvFormHandlers() {
+  envForm.querySelectorAll('select[name="VISION_MODEL"]').forEach((sel) => {
+    sel.addEventListener("change", () => {
+      const custom = envForm.querySelector('[name="VISION_MODEL__custom"]');
+      if (custom) {
+        custom.classList.toggle("hidden", sel.value !== "__custom__");
+        if (sel.value === "__custom__") custom.focus();
+      }
+    });
+  });
 }
 
 function escapeAttr(s) {
@@ -140,6 +179,71 @@ async function refreshStatus() {
 
   renderCheckList(checkRuntime, latestStatus.runtime_deps || []);
   renderCheckList(checkModels, latestStatus.bundled_models || []);
+
+  const langItems = [
+    {
+      ok: Boolean(latestStatus.chinese_ingest),
+      label: `灌库图谱语言：${latestStatus.ingest_language || "English"}（SUMMARY_LANGUAGE，控制实体/关系抽取与摘要）`,
+    },
+    {
+      ok: (latestStatus.prompt_language || "").toLowerCase().startsWith("zh"),
+      label: `多模态 Prompt：${latestStatus.prompt_language || "en"}（RAG_PROMPT_LANGUAGE）`,
+    },
+    {
+      ok: Boolean(latestStatus.vision_model),
+      label: latestStatus.vision_model
+        ? `视觉模型：${latestStatus.vision_model}（多模态灌库时使用）`
+        : "视觉模型：未配置（步骤 1 保存配置后自动写入）",
+    },
+    {
+      ok: Boolean(latestStatus.multimodal_enabled),
+      label: latestStatus.multimodal_enabled
+        ? "多模态灌库：已开启（图片/表格/公式）"
+        : "多模态灌库：关闭（仅文本，更快）",
+    },
+  ];
+  if (checkLanguage) renderCheckList(checkLanguage, langItems);
+
+  if (setupSubtitle) {
+    setupSubtitle.textContent = latestStatus.setup_complete
+      ? "已完成安装；重新灌库请从步骤 1 确认配置，步骤 3 清空后灌库"
+      : "首次使用请按步骤完成配置与灌库";
+  }
+
+  if (enableMultimodal && !multimodalSyncBusy) {
+    enableMultimodal.checked = Boolean(latestStatus.multimodal_enabled);
+  }
+  if (multimodalHint) {
+    const vision = latestStatus.vision_model ? `视觉模型 ${latestStatus.vision_model}` : "请先在步骤 1 选择视觉模型";
+    multimodalHint.textContent = latestStatus.multimodal_enabled
+      ? `当前引擎已启用图片/表格/公式处理（${vision}）；切换后会重新加载 RAG 引擎。`
+      : `默认仅文本灌库；勾选后将重新加载引擎并启用多模态处理（需已在步骤 1 配置 ${vision}）。`;
+  }
+
+  if (kbSummary) {
+    const kb = latestStatus.knowledge_base || {};
+    const hasKb = Boolean(latestStatus.knowledge_base_ok || latestStatus.kb_partial);
+    if (hasKb) {
+      kbSummary.className = "kb-summary warn";
+      kbSummary.innerHTML = `<strong>当前知识库：</strong>${kb.message || "已有数据"}。若需中文图谱，请先在步骤 1 点击「保存并加载引擎」，再勾选「灌库前清空」后重新灌库。`;
+    } else {
+      kbSummary.className = "kb-summary ok";
+      kbSummary.innerHTML = `<strong>当前知识库：</strong>空。保存配置后将按 <code>${escapeAttr(latestStatus.ingest_language || "Chinese")}</code> 生成图谱。`;
+    }
+  }
+
+  if (clearBeforeIngestWrap) {
+    const hasKb = Boolean(latestStatus.knowledge_base_ok || latestStatus.kb_partial);
+    clearBeforeIngestWrap.classList.toggle("dimmed", !hasKb);
+    if (clearBeforeIngest && !hasKb) {
+      clearBeforeIngest.checked = false;
+    }
+  }
+  if (btnClearKb) {
+    const hasKb = Boolean(latestStatus.knowledge_base_ok || latestStatus.kb_partial);
+    btnClearKb.disabled = ingestBusy || engineLoadBusy || !hasKb;
+    btnClearKb.title = hasKb ? "" : "当前知识库为空，无需清空";
+  }
 
   if (latestStatus.rag_ready) {
     ragStatus.textContent = `RAG 引擎已就绪 · 工作目录：${latestStatus.working_dir}`;
@@ -228,10 +332,19 @@ function updateIngestControls() {
     btnClearFiles.disabled = !hasFiles || ingestBusy;
   }
 
-  btnIngest.disabled = !hasFiles || !ragReady || ingestBusy || engineLoadBusy;
+  btnIngest.disabled = !hasFiles || !ragReady || ingestBusy || engineLoadBusy || multimodalSyncBusy;
+  if (btnClearKb) {
+    const hasKb = Boolean(latestStatus?.knowledge_base_ok || latestStatus?.kb_partial);
+    btnClearKb.disabled = ingestBusy || engineLoadBusy || multimodalSyncBusy || !hasKb;
+    btnClearKb.title = hasKb ? "" : "当前知识库为空，无需清空";
+  }
   if (btnStopIngest) {
     btnStopIngest.classList.toggle("hidden", !ingestBusy);
     btnStopIngest.disabled = !ingestBusy || ingestStopping;
+  }
+
+  if (enableMultimodal) {
+    enableMultimodal.disabled = ingestBusy || engineLoadBusy || multimodalSyncBusy;
   }
 
   if (!ingestGateHint) return;
@@ -391,6 +504,88 @@ uploadZone.addEventListener("drop", (e) => {
   if (e.dataTransfer?.files?.length) addFiles(e.dataTransfer.files);
 });
 
+async function applyMultimodalSetting(enabled) {
+  if (ingestBusy || engineLoadBusy || multimodalSyncBusy) return;
+  multimodalSyncBusy = true;
+  updateIngestControls();
+  if (multimodalHint) {
+    multimodalHint.textContent = enabled
+      ? "正在开启多模态并重新加载引擎…"
+      : "正在关闭多模态并重新加载引擎…";
+  }
+  try {
+    await runStagedProgressTask({
+      steps: RAG_RELOAD_STEPS,
+      progressEl: ragLoadProgress,
+      barEl: ragLoadProgressBar,
+      labelEl: ragLoadProgressLabel,
+      logEl: ragLoadLog,
+      buttons: [btnReloadRag, btnSaveEnv],
+      forms: [envForm],
+      task: async () => {
+        const res = await fetch("/api/setup/multimodal", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ enabled }),
+        });
+        const payload = await res.json().catch(() => ({}));
+        if (!res.ok) throw new Error(payload.detail || payload.message || `HTTP ${res.status}`);
+        return payload;
+      },
+    });
+    await refreshStatus();
+    if (multimodalHint) {
+      multimodalHint.textContent = enabled
+        ? "多模态已开启：灌库时将处理图片、表格与公式。"
+        : "多模态已关闭：仅文本灌库。";
+      multimodalHint.className = "hint status-ok";
+    }
+  } catch (err) {
+    if (enableMultimodal) enableMultimodal.checked = !enabled;
+    if (multimodalHint) {
+      multimodalHint.textContent = `切换多模态失败：${err.message || err}`;
+      multimodalHint.className = "hint error";
+    }
+  } finally {
+    multimodalSyncBusy = false;
+    updateIngestControls();
+  }
+}
+
+enableMultimodal?.addEventListener("change", () => {
+  void applyMultimodalSetting(enableMultimodal.checked);
+});
+
+async function clearKnowledgeBase({ logEl, statusEl } = {}) {
+  const res = await fetch("/api/setup/clear-knowledge-base", { method: "POST" });
+  const data = await res.json().catch(() => ({}));
+  if (!res.ok) throw new Error(data.detail || data.message || `HTTP ${res.status}`);
+  if (logEl) appendIngestLog(logEl, data.message || "知识库已清空");
+  if (statusEl) statusEl.textContent = data.message || "知识库已清空";
+  await refreshStatus();
+  return data;
+}
+
+btnClearKb?.addEventListener("click", async () => {
+  if (ingestBusy || engineLoadBusy) return;
+  if (!window.confirm("确定清空现有知识库？此操作不可恢复，清空后需重新上传文档灌库。")) {
+    return;
+  }
+  ingestStatus.textContent = "正在清空知识库…";
+  ingestStatus.className = "hint";
+  try {
+    btnClearKb.disabled = true;
+    await clearKnowledgeBase({ logEl: ingestLog, statusEl: ingestStatus });
+    ingestStatus.textContent = "知识库已清空，请上传文档后重新灌库。";
+    ingestStatus.className = "hint status-ok";
+  } catch (err) {
+    ingestStatus.textContent = `清空失败：${err.message || err}`;
+    ingestStatus.className = "hint error";
+  } finally {
+    updateIngestControls();
+  }
+});
+
 btnIngest.addEventListener("click", async () => {
   if (!pendingFiles.length || ingestBusy) return;
   if (!latestStatus?.rag_ready) {
@@ -404,6 +599,15 @@ btnIngest.addEventListener("click", async () => {
   ingestStatus.textContent = "灌库进行中，请稍候…";
   if (ingestProgressBar) ingestProgressBar.classList.remove("error");
   try {
+    const shouldClear =
+      clearBeforeIngest?.checked &&
+      (latestStatus?.knowledge_base_ok || latestStatus?.kb_partial);
+    if (shouldClear) {
+      ingestStatus.textContent = "正在清空旧知识库…";
+      appendIngestLog(ingestLog, "灌库前清空现有知识库…");
+      await clearKnowledgeBase();
+    }
+    ingestStatus.textContent = "灌库进行中，请稍候…";
     const data = await streamIngest({
       files: pendingFiles,
       logEl: ingestLog,

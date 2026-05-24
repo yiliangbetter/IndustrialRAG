@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import importlib.util
 import json
+import os
 import shutil
 import sys
 from pathlib import Path
@@ -41,6 +42,17 @@ BUNDLED_MODEL_SPECS: list[dict[str, Any]] = [
         "weight_files": ("README.md",),
     },
 ]
+
+
+def resolve_multimodal_enabled() -> bool:
+    """True when ingest should process images/tables/equations via LLM."""
+    enable = (os.getenv("RAG_WEB_ENABLE_MULTIMODAL") or "").strip().lower()
+    if enable in ("1", "true", "yes", "on"):
+        return True
+    if enable in ("0", "false", "no", "off"):
+        return False
+    skip = (os.getenv("RAG_WEB_SKIP_MULTIMODAL", "true") or "true").strip().lower()
+    return skip not in ("1", "true", "yes", "on")
 
 
 def _hub_model_ready(hub_root: Path, hub_dir: str, weight_names: tuple[str, ...]) -> bool:
@@ -197,6 +209,12 @@ def get_setup_status() -> dict[str, Any]:
 
     deps_ok = all(r["ok"] for r in deps)
     models_ok = all(r["ok"] for r in models)
+    env_data = load_env_dict()
+    summary_lang = (env_data.get("SUMMARY_LANGUAGE") or "English").strip()
+    prompt_lang = (env_data.get("RAG_PROMPT_LANGUAGE") or "").strip()
+    chinese_ingest = summary_lang.lower() in ("chinese", "zh", "cn", "中文")
+    multimodal_enabled = resolve_multimodal_enabled()
+    vision_model = (env_data.get("VISION_MODEL") or "").strip()
 
     return {
         "client_mode": is_client_mode(),
@@ -217,6 +235,13 @@ def get_setup_status() -> dict[str, Any]:
         "kb_doc_count": kb["doc_count"],
         "kb_chunk_count": kb["chunk_count"],
         "kb_partial": kb["partial"],
+        "ingest_language": summary_lang,
+        "prompt_language": prompt_lang or ("zh" if chinese_ingest else "en"),
+        "chinese_ingest": chinese_ingest,
+        "multimodal_enabled": multimodal_enabled,
+        "skip_multimodal": not multimodal_enabled,
+        "vision_model": vision_model or None,
+        "llm_model": (env_data.get("LLM_MODEL") or "").strip() or None,
         "python": sys.version.split()[0],
         "disk_free_gb": _disk_free_gb(get_app_root()),
         "can_enter_chat": env_status["ok"] and models_ok and deps_ok,

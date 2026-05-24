@@ -590,6 +590,52 @@ body {
   opacity: 0.9;
 }
 
+.related-images {
+  margin-top: 0.15rem;
+}
+
+.related-images-head {
+  font-size: 0.95rem;
+  font-weight: 600;
+  color: var(--text-muted);
+  margin-bottom: 0.45rem;
+}
+
+.related-images-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(160px, 1fr));
+  gap: 0.65rem;
+}
+
+.related-img-card {
+  margin: 0;
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  overflow: hidden;
+  background: var(--bg-elevated);
+}
+
+.related-img-card img {
+  display: block;
+  width: 100%;
+  max-height: 220px;
+  object-fit: contain;
+  background: #fff;
+}
+
+.related-img-card figcaption {
+  padding: 0.35rem 0.5rem;
+  font-size: 0.85rem;
+  color: var(--text-muted);
+  line-height: 1.35;
+}
+
+.related-img-card .img-page {
+  display: inline-block;
+  margin-left: 0.35rem;
+  opacity: 0.85;
+}
+
 .thinking-block {
   border: 1px solid var(--border);
   border-radius: 8px;

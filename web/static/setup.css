@@ -69,6 +69,13 @@
   letter-spacing: 0;
 }
 
+.setup-subheading {
+  margin: 1rem 0 0.35rem;
+  font-size: 0.95rem;
+  font-weight: 600;
+  color: var(--text);
+}
+
 .setup-form {
   display: flex;
   flex-direction: column;
@@ -103,6 +110,14 @@
   font-size: 1rem;
   font-family: inherit;
   color: var(--text);
+}
+
+.setup-form .env-custom-input {
+  margin-top: 0.35rem;
+}
+
+.setup-form .env-custom-input.hidden {
+  display: none;
 }
 
 .setup-actions {
@@ -219,4 +234,46 @@
 
 .ingest-log:empty {
   display: none;
+}
+
+.kb-summary {
+  margin: 0.75rem 0 1rem;
+  padding: 0.75rem 0.9rem;
+  border-radius: 8px;
+  font-size: 0.92rem;
+  line-height: 1.5;
+  background: var(--bg-elevated);
+  border: 1px solid var(--border);
+}
+
+.kb-summary.warn {
+  border-color: color-mix(in srgb, var(--danger) 35%, var(--border));
+  background: color-mix(in srgb, var(--danger) 6%, var(--bg-elevated));
+}
+
+.kb-summary.ok {
+  border-color: color-mix(in srgb, var(--accent) 35%, var(--border));
+}
+
+.kb-summary code {
+  font-size: 0.88em;
+}
+
+.checkbox-row {
+  display: flex;
+  gap: 0.55rem;
+  align-items: flex-start;
+  margin: 0 0 1rem;
+  font-size: 0.92rem;
+  line-height: 1.45;
+  cursor: pointer;
+}
+
+.checkbox-row input {
+  margin-top: 0.2rem;
+  flex-shrink: 0;
+}
+
+.checkbox-row.dimmed {
+  opacity: 0.55;
 }
