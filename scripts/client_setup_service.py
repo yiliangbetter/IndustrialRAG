@@ -165,21 +165,53 @@ def _rag_storage_has_data(wd: Path) -> bool:
 def _rag_storage_status(wd: Path) -> dict[str, Any]:
     doc_count = _json_kv_entry_count(wd / "kv_store_full_docs.json")
     chunk_count = _json_kv_entry_count(wd / "vdb_chunks.json")
+    unique_docs = _unique_doc_paths(wd / "kv_store_full_docs.json")
     ok = doc_count > 0 and chunk_count > 0
     partial = doc_count > 0 and chunk_count == 0
     if partial:
-        message = f"检测到 {doc_count} 篇文档残留，但未完成向量索引（请重新灌库）"
+        if unique_docs and unique_docs < doc_count:
+            message = (
+                f"检测到 {doc_count} 条文档记录（{unique_docs} 个不同 PDF），"
+                "但未完成向量索引（请清空后重新灌库）"
+            )
+        else:
+            message = f"检测到 {doc_count} 篇文档残留，但未完成向量索引（请重新灌库）"
     elif ok:
-        message = f"已灌库 {doc_count} 篇文档"
+        if unique_docs and unique_docs < doc_count:
+            message = f"已灌库 {unique_docs} 个 PDF（索引记录 {doc_count} 条，含重复灌库）"
+        else:
+            message = f"已灌库 {doc_count} 篇文档"
     else:
         message = "尚未灌库"
     return {
         "ok": ok,
         "partial": partial,
         "doc_count": doc_count,
+        "unique_doc_count": unique_docs,
         "chunk_count": chunk_count,
         "message": message,
     }
+
+
+def _unique_doc_paths(full_docs_path: Path) -> int:
+    if not full_docs_path.is_file():
+        return 0
+    try:
+        data = json.loads(full_docs_path.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError, UnicodeDecodeError):
+        return 0
+    if not isinstance(data, dict):
+        return 0
+    names: set[str] = set()
+    for item in data.values():
+        if not isinstance(item, dict):
+            continue
+        for key in ("file_path", "filepath", "source"):
+            val = item.get(key)
+            if isinstance(val, str) and val.strip():
+                names.add(val.replace("\\", "/").rsplit("/", 1)[-1])
+                break
+    return len(names)
 
 
 def check_env_config() -> dict[str, Any]:
@@ -233,6 +265,7 @@ def get_setup_status() -> dict[str, Any]:
         "knowledge_base_ok": kb_ok,
         "knowledge_base": kb,
         "kb_doc_count": kb["doc_count"],
+        "kb_unique_doc_count": kb.get("unique_doc_count", kb["doc_count"]),
         "kb_chunk_count": kb["chunk_count"],
         "kb_partial": kb["partial"],
         "ingest_language": summary_lang,

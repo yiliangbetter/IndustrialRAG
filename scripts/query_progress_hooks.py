@@ -26,7 +26,14 @@ _retrieval_context: ContextVar[str | None] = ContextVar("retrieval_context", def
 _retrieved_docs_text: ContextVar[str | None] = ContextVar("retrieved_docs_text", default=None)
 _media_roots: ContextVar[list[Path] | None] = ContextVar("media_roots", default=None)
 _query_text: ContextVar[str | None] = ContextVar("query_text", default=None)
+_retrieved_docs: ContextVar[list[dict] | None] = ContextVar("retrieved_docs", default=None)
 _images_emitted: ContextVar[bool] = ContextVar("images_emitted", default=False)
+
+
+def _latest_retrieved_docs(explicit: list[dict] | None) -> list[dict] | None:
+    if explicit is not None:
+        return explicit
+    return _retrieved_docs.get()
 
 
 def set_query_media_roots(roots: list[Path]) -> None:
@@ -67,6 +74,7 @@ async def _emit_related_images(retrieved_docs: list[dict] | None = None) -> None
             roots,
             query=_query_text.get(),
             extra_context=_retrieval_context.get(),
+            retrieved_docs=_latest_retrieved_docs(retrieved_docs),
             limit=4,
         )
         if images:
@@ -136,6 +144,7 @@ async def query_progress_hooks() -> AsyncIterator[asyncio.Queue[dict[str, str]]]
         docs = await orig_rerank(
             query, retrieved_docs, global_config, enable_rerank, top_n
         )
+        _retrieved_docs.set(docs)
         await _emit_related_images(docs)
         try:
             from query_doc_steering import filter_retrieved_docs_by_query  # noqa: WPS433
@@ -188,6 +197,7 @@ async def query_progress_hooks() -> AsyncIterator[asyncio.Queue[dict[str, str]]]
         _media_roots.set(None)
         _query_text.set(None)
         _images_emitted.set(False)
+        _retrieved_docs.set(None)
 
 
 def strip_think_tags(text: str) -> str:

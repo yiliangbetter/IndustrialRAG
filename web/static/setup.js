@@ -12,8 +12,6 @@ const checkModels = $("#check-models");
 const checkLanguage = $("#check-language");
 const setupSubtitle = $("#setup-subtitle");
 const kbSummary = $("#kb-summary");
-const clearBeforeIngestWrap = $("#clear-before-ingest-wrap");
-const clearBeforeIngest = $("#clear-before-ingest");
 const btnClearKb = $("#btn-clear-kb");
 const enableMultimodal = $("#enable-multimodal");
 const multimodalHint = $("#multimodal-hint");
@@ -27,6 +25,7 @@ const ragLoadProgressBar = $("#rag-load-progress-bar");
 const ragLoadProgressLabel = $("#rag-load-progress-label");
 const ragLoadLog = $("#rag-load-log");
 const btnIngest = $("#btn-ingest");
+const btnIngestAppend = $("#btn-ingest-append");
 const btnStopIngest = $("#btn-stop-ingest");
 const fileInput = $("#file-input");
 const uploadZone = $("#upload-zone");
@@ -46,6 +45,7 @@ let pendingFiles = [];
 let latestStatus = null;
 let ingestBusy = false;
 let ingestStopping = false;
+let statusPollTimer = null;
 let engineLoadBusy = false;
 let ragEnsurePromise = null;
 let multimodalSyncBusy = false;
@@ -175,6 +175,7 @@ async function refreshStatus() {
   const res = await fetch("/api/setup/status");
   if (!res.ok) throw new Error(`status ${res.status}`);
   latestStatus = await res.json();
+  syncIngestUiWithServer();
   renderSteps(latestStatus);
 
   renderCheckList(checkRuntime, latestStatus.runtime_deps || []);
@@ -206,7 +207,7 @@ async function refreshStatus() {
 
   if (setupSubtitle) {
     setupSubtitle.textContent = latestStatus.setup_complete
-      ? "已完成安装；重新灌库请从步骤 1 确认配置，步骤 3 清空后灌库"
+      ? "已完成安装；添加文档或整批重灌请从步骤 3 操作"
       : "首次使用请按步骤完成配置与灌库";
   }
 
@@ -225,24 +226,19 @@ async function refreshStatus() {
     const hasKb = Boolean(latestStatus.knowledge_base_ok || latestStatus.kb_partial);
     if (hasKb) {
       kbSummary.className = "kb-summary warn";
-      kbSummary.innerHTML = `<strong>当前知识库：</strong>${kb.message || "已有数据"}。若需中文图谱，请先在步骤 1 点击「保存并加载引擎」，再勾选「灌库前清空」后重新灌库。`;
+      kbSummary.innerHTML = `<strong>当前知识库：</strong>${kb.message || "已有数据"}。添加新文档请点「追加灌库」；整批重灌请点「重新灌库」。`;
     } else {
       kbSummary.className = "kb-summary ok";
       kbSummary.innerHTML = `<strong>当前知识库：</strong>空。保存配置后将按 <code>${escapeAttr(latestStatus.ingest_language || "Chinese")}</code> 生成图谱。`;
     }
   }
 
-  if (clearBeforeIngestWrap) {
-    const hasKb = Boolean(latestStatus.knowledge_base_ok || latestStatus.kb_partial);
-    clearBeforeIngestWrap.classList.toggle("dimmed", !hasKb);
-    if (clearBeforeIngest && !hasKb) {
-      clearBeforeIngest.checked = false;
-    }
-  }
   if (btnClearKb) {
     const hasKb = Boolean(latestStatus.knowledge_base_ok || latestStatus.kb_partial);
     btnClearKb.disabled = ingestBusy || engineLoadBusy || !hasKb;
-    btnClearKb.title = hasKb ? "" : "当前知识库为空，无需清空";
+    btnClearKb.title = hasKb
+      ? "仅清空知识库，不上传文件"
+      : "当前知识库为空，无需清空";
   }
 
   if (latestStatus.rag_ready) {
@@ -263,9 +259,9 @@ async function refreshStatus() {
     {
       ok: latestStatus.knowledge_base_ok,
       text: latestStatus.knowledge_base_ok
-        ? `知识库已灌库（${latestStatus.kb_doc_count || 0} 篇文档）`
+        ? formatKbFinishText(latestStatus)
         : latestStatus.kb_partial
-          ? `知识库未完成灌库（${latestStatus.kb_doc_count || 0} 篇残留，需重新灌库）`
+          ? formatKbPartialText(latestStatus)
           : "知识库未完成灌库",
     },
   ];
@@ -275,6 +271,46 @@ async function refreshStatus() {
 
   btnFinish.disabled = !latestStatus.can_finish_setup;
   updateIngestControls();
+}
+
+function formatKbFinishText(status) {
+  const unique = status.kb_unique_doc_count || status.kb_doc_count || 0;
+  const total = status.kb_doc_count || unique;
+  if (unique > 0 && total > unique) {
+    return `知识库已灌库（${unique} 个 PDF，索引记录 ${total} 条）`;
+  }
+  return `知识库已灌库（${unique} 篇文档）`;
+}
+
+function formatKbPartialText(status) {
+  const unique = status.kb_unique_doc_count || status.kb_doc_count || 0;
+  const total = status.kb_doc_count || unique;
+  if (unique > 0 && total > unique) {
+    return `知识库未完成灌库（${total} 条残留记录 / ${unique} 个 PDF，需清空后重灌）`;
+  }
+  return `知识库未完成灌库（${total} 篇残留，需重新灌库）`;
+}
+
+function syncIngestUiWithServer() {
+  const serverActive = Boolean(latestStatus?.ingest_active);
+  if (ingestBusy && !serverActive) {
+    ingestBusy = false;
+    ingestStopping = false;
+    if (ingestStatus && /进行中|正在停止|处理完成后/.test(ingestStatus.textContent || "")) {
+      ingestStatus.textContent = "灌库任务已结束（服务端）。如状态未更新，请查看下方日志。";
+      ingestStatus.className = "hint status-ok";
+    }
+  }
+  if (ingestBusy) {
+    if (!statusPollTimer) {
+      statusPollTimer = setInterval(() => {
+        refreshStatus().catch(() => {});
+      }, 2500);
+    }
+  } else if (statusPollTimer) {
+    clearInterval(statusPollTimer);
+    statusPollTimer = null;
+  }
 }
 
 async function ensureRagReady() {
@@ -317,10 +353,16 @@ async function ensureRagReady() {
   return ragEnsurePromise;
 }
 
+function knowledgeBaseHasData() {
+  return Boolean(latestStatus?.knowledge_base_ok || latestStatus?.kb_partial);
+}
+
 function updateIngestControls() {
   const hasFiles = pendingFiles.length > 0;
   const ragReady = Boolean(latestStatus?.rag_ready);
   const envOk = Boolean(latestStatus?.env?.ok);
+  const hasKb = knowledgeBaseHasData();
+  const ingestDisabled = !hasFiles || !ragReady || ingestBusy || engineLoadBusy || multimodalSyncBusy;
 
   if (fileListToolbar) {
     fileListToolbar.classList.toggle("hidden", !hasFiles);
@@ -332,11 +374,21 @@ function updateIngestControls() {
     btnClearFiles.disabled = !hasFiles || ingestBusy;
   }
 
-  btnIngest.disabled = !hasFiles || !ragReady || ingestBusy || engineLoadBusy || multimodalSyncBusy;
+  if (btnIngest) {
+    btnIngest.textContent = hasKb ? "重新灌库（清空后）" : "开始灌库";
+    btnIngest.classList.toggle("danger", hasKb);
+    btnIngest.classList.toggle("secondary", !hasKb);
+    btnIngest.disabled = ingestDisabled;
+  }
+  if (btnIngestAppend) {
+    btnIngestAppend.classList.toggle("hidden", !hasKb);
+    btnIngestAppend.disabled = ingestDisabled;
+  }
   if (btnClearKb) {
-    const hasKb = Boolean(latestStatus?.knowledge_base_ok || latestStatus?.kb_partial);
     btnClearKb.disabled = ingestBusy || engineLoadBusy || multimodalSyncBusy || !hasKb;
-    btnClearKb.title = hasKb ? "" : "当前知识库为空，无需清空";
+    btnClearKb.title = hasKb
+      ? "仅清空知识库，不上传文件"
+      : "当前知识库为空，无需清空";
   }
   if (btnStopIngest) {
     btnStopIngest.classList.toggle("hidden", !ingestBusy);
@@ -350,7 +402,9 @@ function updateIngestControls() {
   if (!ingestGateHint) return;
 
   if (ingestBusy) {
-    ingestGateHint.textContent = "灌库进行中，请勿关闭窗口…";
+    ingestGateHint.textContent = ingestStopping
+      ? "已请求停止；当前文件处理完成后将终止并清空知识库（解析阶段完成后才会写入，请稍候）…"
+      : "灌库进行中，请勿关闭窗口…";
     ingestGateHint.className = "hint ingest-gate-hint";
     return;
   }
@@ -370,6 +424,9 @@ function updateIngestControls() {
       ingestGateHint.textContent = "正在等待 RAG 引擎加载…";
     }
     ingestGateHint.className = "hint ingest-gate-hint error";
+  } else if (hasKb) {
+    ingestGateHint.textContent = "文件已就绪：追加新文档点「追加灌库」；整批重灌点「重新灌库（清空后）」。";
+    ingestGateHint.className = "hint ingest-gate-hint status-ok";
   } else {
     ingestGateHint.textContent = "文件已就绪，可以开始灌库。";
     ingestGateHint.className = "hint ingest-gate-hint status-ok";
@@ -385,7 +442,13 @@ async function loadEnvForm() {
 
 envForm.addEventListener("submit", async (e) => {
   e.preventDefault();
-  if (engineLoadBusy) return;
+  if (engineLoadBusy || ingestBusy) {
+    envStatus.textContent = ingestBusy
+      ? "灌库进行中，请等待结束或停止后再保存配置。"
+      : "正在加载引擎，请稍候…";
+    envStatus.className = "hint error";
+    return;
+  }
 
   engineLoadBusy = true;
   envStatus.textContent = "正在保存并加载引擎，请勿关闭窗口…";
@@ -425,7 +488,13 @@ envForm.addEventListener("submit", async (e) => {
 });
 
 btnReloadRag.addEventListener("click", async () => {
-  if (engineLoadBusy) return;
+  if (engineLoadBusy || ingestBusy) {
+    ragStatus.textContent = ingestBusy
+      ? "灌库进行中，请等待结束或停止后再重新加载引擎。"
+      : "正在加载引擎，请稍候…";
+    ragStatus.className = "hint error";
+    return;
+  }
 
   engineLoadBusy = true;
   ragStatus.textContent = "正在重新加载 RAG 引擎…";
@@ -586,11 +655,24 @@ btnClearKb?.addEventListener("click", async () => {
   }
 });
 
-btnIngest.addEventListener("click", async () => {
+async function startIngest({ clearFirst = false } = {}) {
   if (!pendingFiles.length || ingestBusy) return;
   if (!latestStatus?.rag_ready) {
     const ready = await ensureRagReady();
     if (!ready) return;
+  }
+
+  const hasKb = knowledgeBaseHasData();
+  if (clearFirst && hasKb) {
+    const ok = window.confirm(
+      "将清空现有知识库，再灌入您选择的文件。\n\n适合整批重灌；若只想添加新 PDF，请改用「追加灌库」。\n\n是否继续？"
+    );
+    if (!ok) return;
+  } else if (!clearFirst && hasKb) {
+    const ok = window.confirm(
+      "新文档将追加到现有知识库，不会删除已有内容。\n\n请勿重复上传已灌过的同一 PDF，否则会产生重复索引。\n\n是否继续？"
+    );
+    if (!ok) return;
   }
 
   ingestBusy = true;
@@ -599,13 +681,12 @@ btnIngest.addEventListener("click", async () => {
   ingestStatus.textContent = "灌库进行中，请稍候…";
   if (ingestProgressBar) ingestProgressBar.classList.remove("error");
   try {
-    const shouldClear =
-      clearBeforeIngest?.checked &&
-      (latestStatus?.knowledge_base_ok || latestStatus?.kb_partial);
-    if (shouldClear) {
+    if (clearFirst && hasKb) {
       ingestStatus.textContent = "正在清空旧知识库…";
-      appendIngestLog(ingestLog, "灌库前清空现有知识库…");
+      appendIngestLog(ingestLog, "重新灌库：先清空现有知识库…");
       await clearKnowledgeBase();
+    } else if (!clearFirst && hasKb) {
+      appendIngestLog(ingestLog, "追加灌库：保留现有知识库，写入新文件…");
     }
     ingestStatus.textContent = "灌库进行中，请稍候…";
     const data = await streamIngest({
@@ -639,6 +720,14 @@ btnIngest.addEventListener("click", async () => {
     ingestStopping = false;
     renderFileList();
   }
+}
+
+btnIngest.addEventListener("click", async () => {
+  await startIngest({ clearFirst: knowledgeBaseHasData() });
+});
+
+btnIngestAppend?.addEventListener("click", async () => {
+  await startIngest({ clearFirst: false });
 });
 
 btnStopIngest?.addEventListener("click", async () => {

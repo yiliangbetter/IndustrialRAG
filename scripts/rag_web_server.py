@@ -49,20 +49,17 @@ sys.path.insert(0, str(_SCRIPTS_DIR))
 
 from client_paths import (  # noqa: E402
     apply_client_env_defaults,
+    get_env_path,
     is_client_mode,
     is_setup_complete,
     write_setup_complete,
 )
+from client_env_manager import apply_env_to_process, get_form_values, patch_env_keys, save_env  # noqa: E402
+from client_setup_service import get_setup_status, resolve_multimodal_enabled  # noqa: E402
 
 apply_client_env_defaults()
 load_dotenv(_ROOT / ".env", override=False)
-
-from client_env_manager import apply_env_to_process, get_form_values, patch_env_keys, save_env  # noqa: E402
-from client_paths import get_env_path  # noqa: E402
-from client_setup_service import get_setup_status, resolve_multimodal_enabled  # noqa: E402
-
-if get_env_path().is_file():
-    apply_env_to_process()
+apply_env_to_process()
 
 if (os.getenv("HF_EMBED_OFFLINE") or "").strip().lower() in ("1", "true", "yes"):
     os.environ["HF_HUB_OFFLINE"] = "1"
@@ -116,7 +113,23 @@ def _sse(payload: dict[str, Any]) -> str:
     return f"data: {json.dumps(payload, ensure_ascii=False)}\n\n"
 
 
-async def _iter_llm_chunks(result: str | AsyncIterator[str]) -> AsyncIterator[str]:
+def _friendly_query_error(exc: BaseException) -> str:
+    text = str(exc)
+    lower = text.lower()
+    if "401" in text or "invalid_api_key" in lower or "invalid api-key" in lower:
+        return (
+            "LLM API Key 无效或与 API 地址不匹配（401）。"
+            "请在安装向导或 .env 中更新 LLM_BINDING_API_KEY，"
+            "并确认 LLM_BINDING_HOST 与 Key 属于同一平台；保存后重载 RAG 或重启服务。"
+        )
+    if "403" in text:
+        return "LLM 访问被拒绝（403），请检查 API Key 权限或模型是否已开通。"
+    return text or "查询失败"
+
+
+async def _iter_llm_chunks(result: str | AsyncIterator[str] | None) -> AsyncIterator[str]:
+    if result is None:
+        raise RuntimeError("LLM 未返回内容，请检查 API Key 与 LLM API 地址是否正确。")
     if isinstance(result, str):
         if result:
             yield result
@@ -329,11 +342,22 @@ async def api_setup_status():
         and not state.init_error
         and get_env_path().is_file()
         and status.get("env", {}).get("ok")
+        and not state.ingest_active
     ):
         await _init_rag_engine()
     status["rag_ready"] = state.ready
     status["rag_error"] = state.init_error
+    status["ingest_active"] = state.ingest_active
+    status["ingest_cancel_requested"] = state.ingest_cancel_requested
     return status
+
+
+def _reject_if_ingest_active(action: str) -> None:
+    if state.ingest_active:
+        raise HTTPException(
+            409,
+            f"灌库进行中，无法{action}。请先等待灌库结束，或停止灌库后再试。",
+        )
 
 
 @app.get("/api/setup/env")
@@ -343,6 +367,7 @@ async def api_setup_env_get():
 
 @app.post("/api/setup/env")
 async def api_setup_env_save(body: SetupEnvBody):
+    _reject_if_ingest_active("保存配置")
     try:
         path = save_env(body.values)
         apply_env_to_process()
@@ -360,6 +385,7 @@ async def api_setup_env_save(body: SetupEnvBody):
 
 @app.post("/api/setup/reload-rag")
 async def api_setup_reload_rag():
+    _reject_if_ingest_active("重新加载 RAG 引擎")
     apply_env_to_process()
     await _shutdown_rag()
     await _init_rag_engine()
@@ -541,10 +567,16 @@ async def _query_stream_events(q: str, mode: str) -> AsyncIterator[str]:
                 if res_task in done and not res_task.cancelled():
                     kind, payload = res_task.result()
                     if kind == "error":
-                        yield _sse({"type": "error", "message": str(payload)})
+                        yield _sse({"type": "error", "message": _friendly_query_error(payload)})
                         return
 
-                    async for chunk in _iter_llm_chunks(payload):
+                    try:
+                        chunk_iter = _iter_llm_chunks(payload)
+                    except Exception as exc:
+                        yield _sse({"type": "error", "message": _friendly_query_error(exc)})
+                        return
+
+                    async for chunk in chunk_iter:
                         for kind, piece in cot_parser.feed(chunk):
                             if not piece:
                                 continue
@@ -706,7 +738,23 @@ async def _ingest_stream_events(files: list[UploadFile]) -> AsyncIterator[str]:
                     }
                 )
         except Exception as exc:
-            await queue.put({"type": "error", "message": str(exc)})
+            if state.ingest_cancel_requested:
+                try:
+                    await _clear_knowledge_base()
+                except Exception:
+                    pass
+                await queue.put(
+                    {
+                        "type": "cancelled",
+                        "ok": 0,
+                        "fail": 0,
+                        "errors": [{"file": "", "error": str(exc)}],
+                        "message": "灌库已中断并清空知识库",
+                        "storage_cleared": True,
+                    }
+                )
+            else:
+                await queue.put({"type": "error", "message": str(exc)})
         finally:
             shutil.rmtree(tmp_root, ignore_errors=True)
             state.ingest_active = False

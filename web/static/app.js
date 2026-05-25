@@ -26,6 +26,7 @@ let pendingFiles = [];
 let ingestBusy = false;
 let ingestStopping = false;
 let multimodalSyncBusy = false;
+let latestSetupStatus = null;
 /** When false, user scrolled up — do not auto-jump to bottom on every token. */
 let scrollPinnedToBottom = true;
 let scrollRaf = 0;
@@ -274,9 +275,20 @@ async function fetchHealth() {
   return res.json();
 }
 
+async function fetchSetupStatus() {
+  const res = await fetch("/api/setup/status");
+  if (!res.ok) throw new Error(`setup status ${res.status}`);
+  return res.json();
+}
+
+function knowledgeBaseHasData() {
+  return Boolean(latestSetupStatus?.knowledge_base_ok || latestSetupStatus?.kb_partial);
+}
+
 async function refreshStatus() {
   try {
-    const h = await fetchHealth();
+    const [h, setup] = await Promise.all([fetchHealth(), fetchSetupStatus().catch(() => null)]);
+    latestSetupStatus = setup;
     $("#meta-ready").textContent = h.ready ? "是" : "否";
     $("#meta-ready").className = h.ready ? "status-ok" : "status-bad";
     $("#meta-wd").textContent = h.working_dir || "—";
@@ -307,6 +319,7 @@ async function refreshStatus() {
       setupLinkWrap.classList.remove("hidden");
     }
     btnSend.disabled = !h.ready;
+    updateIngestControls();
   } catch (e) {
     $("#meta-ready").textContent = "无法连接";
     $("#meta-error").textContent = String(e);
@@ -485,6 +498,7 @@ btnClear.addEventListener("click", () => {
 
 function updateIngestControls() {
   const hasFiles = pendingFiles.length > 0;
+  const hasKb = knowledgeBaseHasData();
   if (fileListToolbar) {
     fileListToolbar.classList.toggle("hidden", !hasFiles);
   }
@@ -493,6 +507,9 @@ function updateIngestControls() {
   }
   if (btnClearFiles) {
     btnClearFiles.disabled = !hasFiles || ingestBusy;
+  }
+  if (btnIngest) {
+    btnIngest.textContent = hasKb ? "追加灌库" : "开始灌库";
   }
   btnIngest.disabled = !hasFiles || ingestBusy || multimodalSyncBusy;
   if (enableMultimodal) {
@@ -556,6 +573,13 @@ uploadZone.addEventListener("drop", (e) => {
 
 btnIngest.addEventListener("click", async () => {
   if (!pendingFiles.length || ingestBusy) return;
+
+  if (knowledgeBaseHasData()) {
+    const ok = window.confirm(
+      "新文档将追加到现有知识库，不会删除已有内容。\n\n请勿重复上传已灌过的同一 PDF，否则会产生重复索引。\n\n是否继续？"
+    );
+    if (!ok) return;
+  }
 
   ingestBusy = true;
   ingestStopping = false;

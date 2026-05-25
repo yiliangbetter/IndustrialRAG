@@ -6,6 +6,7 @@ import base64
 import json
 import logging
 import math
+import os
 import re
 from pathlib import Path
 from typing import Any
@@ -23,6 +24,8 @@ __all__ = [
     "flatten_image_refs_for_skip_multimodal",
     "extract_image_refs_from_context",
     "images_for_api",
+    "query_wants_kb_images",
+    "retrieval_supports_images",
     "encode_media_token",
     "decode_media_token",
     "is_safe_media_path",
@@ -68,6 +71,198 @@ _NEG_FOR_TRANSMISSION_SCREW = (
 )
 
 _BBOX_MATCH_MAX_DIST = 900.0
+
+_CHITCHAT_ONLY_PATTERNS = (
+    r"你好啊?",
+    r"您好啊?",
+    r"嗨+",
+    r"hello+",
+    r"hi+",
+    r"hey+",
+    r"在吗",
+    r"在不在",
+    r"早上好",
+    r"下午好",
+    r"晚上好",
+    r"谢谢|感谢|多谢",
+    r"你是谁",
+    r"你是啥",
+    r"你叫什么",
+    r"介绍一下你自己",
+    r"介绍你自己",
+    r"自我介绍",
+    r"你能做什么",
+    r"你会什么",
+    r"你能帮我什么",
+    r"帮助",
+    r"怎么用你",
+    r"如何使用",
+)
+
+_QUERY_TERM_STOP = frozenset(
+    {
+        "什么",
+        "怎么",
+        "如何",
+        "为什么",
+        "为何",
+        "请问",
+        "是否",
+        "可以",
+        "有没有",
+        "哪些",
+        "那个",
+        "这个",
+        "一下",
+        "告诉",
+        "介绍",
+        "关于",
+        "问题",
+        "答案",
+        "多少",
+        "多久",
+        "需要",
+        "哪些",
+        "请问",
+        "一下",
+        "吗",
+        "呢",
+        "啊",
+        "呀",
+    }
+)
+
+
+def _normalize_query_for_match(query: str) -> str:
+    q = (query or "").strip()
+    q = re.sub(r"[\s!！?？。.，,~、；;：:""''\"']+", "", q, flags=re.I)
+    return q
+
+
+def _query_terms(query: str) -> list[str]:
+    terms: list[str] = []
+    seen: set[str] = set()
+
+    def add(term: str) -> None:
+        if len(term) < 2 or term in _QUERY_TERM_STOP or term in seen:
+            return
+        seen.add(term)
+        terms.append(term)
+
+    for run in re.findall(r"[\u4e00-\u9fff]+", query or ""):
+        if 2 <= len(run) <= 12:
+            add(run)
+        for i in range(len(run) - 1):
+            add(run[i : i + 2])
+        for i in range(len(run) - 2):
+            add(run[i : i + 3])
+
+    for term in re.findall(r"[a-zA-Z0-9]{3,}", (query or "").lower()):
+        add(term)
+    return terms
+
+
+def query_wants_kb_images(query: str | None) -> bool:
+    """False for greetings/chitchat that should never trigger doc images."""
+    q = (query or "").strip()
+    if not q:
+        return False
+    qn = _normalize_query_for_match(q)
+    if not qn:
+        return False
+    for pat in _CHITCHAT_ONLY_PATTERNS:
+        if re.fullmatch(pat, qn, re.I):
+            return False
+    if len(qn) <= 2 and not _query_terms(q):
+        return False
+    return True
+
+
+def _max_rerank_score(retrieved_docs: list[dict[str, Any]] | None) -> float | None:
+    scores: list[float] = []
+    for doc in retrieved_docs or []:
+        raw = doc.get("rerank_score")
+        if raw is None:
+            continue
+        try:
+            scores.append(float(raw))
+        except (TypeError, ValueError):
+            continue
+    return max(scores) if scores else None
+
+
+def _term_overlap_ratio(query: str, text: str) -> float:
+    terms = _query_terms(query)
+    if not terms or not text.strip():
+        return 0.0
+    hits = sum(1 for term in terms if term in text)
+    return hits / len(terms)
+
+
+def _image_min_rerank_score() -> float:
+    raw = (
+        os.getenv("RAG_IMAGE_MIN_RERANK_SCORE")
+        or os.getenv("MIN_RERANK_SCORE")
+        or "0.28"
+    )
+    try:
+        return float(raw)
+    except ValueError:
+        return 0.28
+
+
+def _image_min_term_overlap() -> float:
+    raw = os.getenv("RAG_IMAGE_MIN_TERM_OVERLAP") or "0.34"
+    try:
+        return float(raw)
+    except ValueError:
+        return 0.34
+
+
+def retrieval_supports_images(
+    query: str | None,
+    *,
+    retrieved_docs: list[dict[str, Any]] | None = None,
+    context_text: str | None = None,
+) -> bool:
+    """True only when retrieval looks substantively relevant to the query."""
+    if not query_wants_kb_images(query):
+        logger.info("Skip related images: non-KB / chitchat query")
+        return False
+
+    q = (query or "").strip()
+    max_score = _max_rerank_score(retrieved_docs)
+    if max_score is not None:
+        threshold = _image_min_rerank_score()
+        if max_score < threshold:
+            logger.info(
+                "Skip related images: max rerank_score %.3f < %.3f",
+                max_score,
+                threshold,
+            )
+            return False
+        return True
+
+    text = (context_text or "").strip()
+    if not text:
+        logger.info("Skip related images: empty retrieval context")
+        return False
+
+    terms = _query_terms(q)
+    if not terms:
+        logger.info("Skip related images: no substantive query terms")
+        return False
+
+    overlap = _term_overlap_ratio(q, text)
+    min_overlap = _image_min_term_overlap()
+    if overlap < min_overlap:
+        logger.info(
+            "Skip related images: term overlap %.2f < %.2f",
+            overlap,
+            min_overlap,
+        )
+        return False
+    return True
 
 
 def normalize_context_for_image_parse(text: str) -> str:
@@ -473,10 +668,19 @@ def images_for_api(
     *,
     query: str | None = None,
     extra_context: str | None = None,
+    retrieved_docs: list[dict[str, Any]] | None = None,
     limit: int = 4,
 ) -> list[dict[str, Any]]:
     """Turn retrieved context into Web-safe image descriptors."""
     primary_text = context or ""
+    merged_for_gate = merge_context_for_images(primary_text, extra_context)
+    if not retrieval_supports_images(
+        query,
+        retrieved_docs=retrieved_docs,
+        context_text=merged_for_gate,
+    ):
+        return []
+
     anchor_phrases = _extract_maintenance_anchors(primary_text)
     if query:
         anchor_phrases = _merge_anchor_lists(
@@ -507,10 +711,6 @@ def images_for_api(
         for ref in refs
     ]
     selected = _select_scored_refs(scored, limit=limit)
-    if not selected and scored:
-        scored.sort(key=lambda pair: pair[0], reverse=True)
-        if scored[0][0] > 0:
-            selected = [scored[0][1]]
 
     out: list[dict[str, Any]] = []
     seen: set[str] = set()

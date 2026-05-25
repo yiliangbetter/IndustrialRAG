@@ -77,10 +77,9 @@
             <span>启用多模态灌库（PDF 内图片、表格、公式经 LLM 解析并写入图谱；更慢，消耗更多 LLM 额度）</span>
           </label>
           <p class="hint" id="multimodal-hint"></p>
-          <label class="checkbox-row" id="clear-before-ingest-wrap">
-            <input type="checkbox" id="clear-before-ingest" checked />
-            <span>灌库前清空现有知识库（重新灌库时必选，否则会在旧数据上追加）</span>
-          </label>
+          <p class="hint">
+            知识库为空时：选文件后点「开始灌库」。已有文档时：「追加灌库」用于添加新 PDF；「重新灌库」会先清空再写入（适合整批重灌）。仅需清空、暂不灌库时点「清空知识库」。
+          </p>
           <label class="upload-zone" id="upload-zone">
             <input
               type="file"
@@ -100,7 +99,15 @@
             <button type="button" class="btn secondary" id="btn-ingest" disabled>
               开始灌库
             </button>
-            <button type="button" class="btn danger" id="btn-clear-kb">
+            <button type="button" class="btn secondary hidden" id="btn-ingest-append" disabled>
+              追加灌库
+            </button>
+            <button
+              type="button"
+              class="btn danger"
+              id="btn-clear-kb"
+              title="仅清空知识库，不上传文件"
+            >
               清空知识库
             </button>
             <button type="button" class="btn danger hidden" id="btn-stop-ingest">
@@ -131,6 +138,6 @@
       </main>
     </div>
     <script src="/static/ingest_ui.js?v=20260525"></script>
-    <script src="/static/setup.js?v=20260526"></script>
+    <script src="/static/setup.js?v=20260527"></script>
   </body>
 </html>

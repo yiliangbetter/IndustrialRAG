@@ -121,8 +121,8 @@ async def _build_rag(
         return str(v).strip().lower() in ("1", "true", "yes", "on")
 
     llm_key = (
-        os.getenv("OPENAI_API_KEY", "").strip()
-        or os.getenv("LLM_BINDING_API_KEY", "").strip()
+        os.getenv("LLM_BINDING_API_KEY", "").strip()
+        or os.getenv("OPENAI_API_KEY", "").strip()
     )
     if not llm_key:
         raise SystemExit("Set OPENAI_API_KEY or LLM_BINDING_API_KEY.")
@@ -359,6 +359,10 @@ async def _ingest_folder(
                 display_stats=config.display_content_stats,
                 **parse_extra,
             )
+            if should_cancel and should_cancel():
+                cancelled = True
+                await _emit({"type": "log", "message": "收到停止请求，正在终止灌库…"})
+                break
             await _emit({"type": "log", "message": f"写入知识库：{rel}"})
             await rag.insert_content_list(
                 content_list,

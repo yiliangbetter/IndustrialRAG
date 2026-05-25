@@ -34,19 +34,13 @@ os.environ.setdefault("RAG_CLIENT_MODE", "1")
 os.environ.setdefault("RAG_CLIENT_APP_ROOT", str(_ROOT))
 
 from client_paths import apply_client_env_defaults, get_app_root, is_setup_complete  # noqa: E402
-from dotenv import load_dotenv  # noqa: E402
+from client_env_manager import apply_env_to_process  # noqa: E402
 
 apply_client_env_defaults()
 
 
 def _load_env() -> None:
-    from client_env_manager import apply_env_to_process
-    from client_paths import get_env_path
-
-    if get_env_path().is_file():
-        apply_env_to_process()
-    else:
-        load_dotenv(_ROOT / ".env", override=False)
+    apply_env_to_process()
 
 
 def _wait_for_server(host: str, port: int, timeout: float = 120.0) -> bool:

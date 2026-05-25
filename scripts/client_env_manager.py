@@ -120,14 +120,34 @@ CLIENT_WRITE_KEYS: frozenset[str] = frozenset(
         "RAG_WEB_HOST",
         "RAG_WEB_PORT",
         "RAG_WEB_ENABLE_MULTIMODAL",
-        "RAG_WEB_SKIP_MULTIMODAL",
-        "HF_HOME",
-        "RAG_WEB_WORKING_DIR",
-        "RAG_WEB_PARSER_OUTPUT_DIR",
-        "TIKTOKEN_CACHE_DIR",
-        "OPENAI_API_KEY",
+    "RAG_WEB_SKIP_MULTIMODAL",
+    "HF_HOME",
+    "RAG_WEB_WORKING_DIR",
+    "RAG_WEB_PARSER_OUTPUT_DIR",
+    "TIKTOKEN_CACHE_DIR",
+    "OPENAI_API_KEY",
     ]
 )
+
+# Shipped in config/env.example; preserved across wizard saves (not shown in setup form).
+CLIENT_TUNING_KEYS: frozenset[str] = frozenset(
+    {
+        "MIN_RERANK_SCORE",
+        "RAG_IMAGE_MIN_RERANK_SCORE",
+        "RAG_IMAGE_MIN_TERM_OVERLAP",
+        "TOP_K",
+        "CHUNK_TOP_K",
+        "COSINE_THRESHOLD",
+        "MAX_TOTAL_TOKENS",
+        "MAX_ENTITY_TOKENS",
+        "MAX_RELATION_TOKENS",
+        "LLM_TIMEOUT",
+        "RAG_QUERY_AUTO_STEERING",
+        "RAG_QUERY_KG_STEERING",
+    }
+)
+
+CLIENT_PERSIST_KEYS: frozenset[str] = CLIENT_WRITE_KEYS | CLIENT_TUNING_KEYS
 
 
 def _client_tiktoken_cache_dir() -> str:
@@ -262,15 +282,17 @@ def validate_form(payload: dict[str, str]) -> list[str]:
 
 def _write_env_dict(merged: dict[str, str]) -> Path:
     if is_client_mode():
-        merged = {k: v for k, v in merged.items() if k in CLIENT_WRITE_KEYS}
+        merged = {k: v for k, v in merged.items() if k in CLIENT_PERSIST_KEYS}
     lines: list[str] = [
         "### Generated / updated by Nanxing RAG client setup wizard",
+        "### 检索/配图等高级项来自 config/env.example，打包前由开发人员调好；用户一般无需修改。",
         "",
     ]
     priority = [
         *[f["key"] for f in SETUP_FIELDS],
         "VISION_MODEL",
         *CLIENT_AUTO_KEYS.keys(),
+        *sorted(CLIENT_TUNING_KEYS),
         "RAG_WEB_ENABLE_MULTIMODAL",
         "RAG_WEB_SKIP_MULTIMODAL",
         "HF_HOME",
@@ -348,10 +370,19 @@ def save_env(payload: dict[str, str]) -> Path:
 
 
 def apply_env_to_process() -> None:
-    """Reload saved .env into the current process."""
+    """Reload env.example defaults, then config/.env overrides, into the current process."""
     from dotenv import load_dotenv
 
-    load_dotenv(get_env_path(), override=True)
+    example = get_env_example_path()
+    if example.is_file():
+        load_dotenv(example, override=False)
+    env_path = get_env_path()
+    if env_path.is_file():
+        load_dotenv(env_path, override=True)
+    llm_key = (os.getenv("LLM_BINDING_API_KEY") or "").strip()
+    if llm_key:
+        os.environ["LLM_BINDING_API_KEY"] = llm_key
+        os.environ["OPENAI_API_KEY"] = llm_key
     if is_client_mode():
         try:
             from client_setup_service import resolve_hf_home_for_runtime  # noqa: WPS433

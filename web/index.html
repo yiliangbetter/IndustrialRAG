@@ -57,7 +57,10 @@
 
         <section class="panel">
           <h2>上传灌库</h2>
-          <p class="hint">解析并写入当前工作目录下的知识库（耗时较长，请勿关闭页面）。</p>
+          <p class="hint" id="ingest-hint">
+            将新文档追加到当前知识库（不会清空已有内容）。整批重灌或清空知识库请打开
+            <a href="/setup">安装向导</a>。
+          </p>
           <label class="checkbox-row" id="multimodal-wrap">
             <input type="checkbox" id="enable-multimodal" />
             <span>启用多模态灌库（图片/表格/公式；更慢，消耗更多 LLM）</span>
@@ -122,6 +125,6 @@
     <script src="/static/vendor/marked.min.js"></script>
     <script src="/static/vendor/purify.min.js"></script>
     <script src="/static/ingest_ui.js"></script>
-    <script src="/static/app.js?v=20260527"></script>
+    <script src="/static/app.js?v=20260528"></script>
   </body>
 </html>
