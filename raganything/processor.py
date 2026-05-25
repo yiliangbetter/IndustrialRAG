@@ -2237,6 +2237,11 @@ class ProcessorMixin:
                 )
             return
 
+        if not text_content.strip() and not multimodal_items:
+            raise ValueError(
+                f"No text or multimodal content extracted from content list: {file_path}"
+            )
+
         if text_content.strip():
             if callback_manager is not None:
                 callback_manager.dispatch(

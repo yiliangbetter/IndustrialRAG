@@ -150,6 +150,30 @@ async def test_lightrag_api_success_marks_pre_doc_processed(monkeypatch):
 
 
 @pytest.mark.asyncio
+async def test_lightrag_api_recovers_mineru_v2_paragraph_text(monkeypatch):
+    processor = _make_lightrag_api_processor(
+        monkeypatch,
+        [
+            {
+                "type": "paragraph",
+                "content": {
+                    "paragraph_content": [
+                        {"type": "text", "content": "Recovered MinerU v2 text"}
+                    ]
+                },
+            }
+        ],
+    )
+
+    result = await processor.process_document_complete_lightrag_api("sample.pdf")
+
+    assert result is True
+    assert processor.lightrag.ainsert_calls[0]["input"] == "Recovered MinerU v2 text"
+    doc_status = processor.lightrag.doc_status.records["doc-pre-sample.pdf"]
+    assert doc_status["status"] == DocStatus.PROCESSED
+
+
+@pytest.mark.asyncio
 async def test_lightrag_api_insert_failure_persists_failed_status(monkeypatch):
     processor = _make_lightrag_api_processor(
         monkeypatch,
@@ -202,4 +226,27 @@ async def test_embedding_only_empty_content_list_raises():
     processor._ensure_lightrag_initialized = fake_ensure_lightrag_initialized
 
     with pytest.raises(ValueError, match="No text content extracted"):
+        await processor.insert_content_list([], file_path="empty_content_list_v2.json")
+
+
+@pytest.mark.asyncio
+async def test_non_embedding_content_list_without_content_raises():
+    class DummyProcessor(ProcessorMixin):
+        pass
+
+    processor = DummyProcessor()
+    processor.logger = FakeLogger()
+    processor.config = SimpleNamespace(
+        use_full_path=False,
+        display_content_stats=False,
+        allow_embedding_only_ingestion=False,
+        content_format="mineru",
+    )
+
+    async def fake_ensure_lightrag_initialized():
+        return {"success": True}
+
+    processor._ensure_lightrag_initialized = fake_ensure_lightrag_initialized
+
+    with pytest.raises(ValueError, match="No text or multimodal content extracted"):
         await processor.insert_content_list([], file_path="empty_content_list_v2.json")
