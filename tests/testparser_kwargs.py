@@ -110,9 +110,10 @@ def test_mineru_timeout_kills_process(
     mock_process.stderr.readline.return_value = ""
     mock_popen.return_value = mock_process
 
-    with pytest.raises(TimeoutError, match="MinerU did not finish within 0.5s"):
+    with pytest.raises(RuntimeError, match="MinerU did not finish within 0.5s") as excinfo:
         mineru_parser._run_mineru_command(dummy_path, "out", timeout=0.5)
 
+    assert isinstance(excinfo.value.__cause__, TimeoutError)
     mock_process.kill.assert_called_once()
     mock_process.wait.assert_called()
 
