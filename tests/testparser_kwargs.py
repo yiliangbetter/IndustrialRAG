@@ -64,6 +64,59 @@ def test_mineru_env_propagation(
     assert kwargs["env"]["PATH"] == os.environ["PATH"]
 
 
+@patch("subprocess.Popen")
+def test_mineru_merges_loopback_hosts_into_no_proxy(
+    mock_popen, monkeypatch, mineru_parser, dummy_path
+):
+    monkeypatch.setenv("NO_PROXY", "corp.internal,localhost")
+    monkeypatch.delenv("no_proxy", raising=False)
+
+    mock_process = MagicMock()
+    mock_process.poll.return_value = 0
+    mock_process.wait.return_value = 0
+    mock_process.stdout.readline.return_value = ""
+    mock_process.stderr.readline.return_value = ""
+    mock_popen.return_value = mock_process
+
+    mineru_parser._run_mineru_command(
+        dummy_path, "out", env={"no_proxy": "legacy.internal"}
+    )
+
+    _, kwargs = mock_popen.call_args
+    no_proxy_parts = kwargs["env"]["NO_PROXY"].split(",")
+    assert kwargs["env"]["no_proxy"] == kwargs["env"]["NO_PROXY"]
+    assert "corp.internal" in no_proxy_parts
+    assert "legacy.internal" in no_proxy_parts
+    assert "127.0.0.1" in no_proxy_parts
+    assert "localhost" in no_proxy_parts
+    assert "::1" in no_proxy_parts
+    assert no_proxy_parts.count("localhost") == 1
+
+
+@patch("raganything.parser.time.sleep", return_value=None)
+@patch("raganything.parser.time.monotonic", side_effect=[0.0, 1.0])
+@patch("subprocess.Popen")
+def test_mineru_timeout_kills_process(
+    mock_popen,
+    mock_monotonic,
+    mock_sleep,
+    mineru_parser,
+    dummy_path,
+):
+    mock_process = MagicMock()
+    mock_process.poll.return_value = None
+    mock_process.wait.return_value = None
+    mock_process.stdout.readline.return_value = ""
+    mock_process.stderr.readline.return_value = ""
+    mock_popen.return_value = mock_process
+
+    with pytest.raises(TimeoutError, match="MinerU did not finish within 0.5s"):
+        mineru_parser._run_mineru_command(dummy_path, "out", timeout=0.5)
+
+    mock_process.kill.assert_called_once()
+    mock_process.wait.assert_called()
+
+
 @patch("subprocess.run")
 def test_docling_env_propagation(mock_run, docling_parser, dummy_path):
     mock_run.return_value = MagicMock(returncode=0, stdout="")
