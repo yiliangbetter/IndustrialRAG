@@ -217,10 +217,11 @@ async def insert_text_content_with_multimodal_content(
             scheme_name=scheme_name,
         )
     except Exception as e:
-        logger.info(f"Error: {e}")
-        logger.info(
+        logger.error(f"Error inserting text content into LightRAG: {e}")
+        logger.error(
             "If the error is caused by the ainsert function not having a multimodal content parameter, please update the raganything branch of lightrag"
         )
+        raise
 
     logger.info("Text content insertion complete")
 

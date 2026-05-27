@@ -176,6 +176,15 @@ class ProcessorMixin:
             lines.append(f"{prefix} {body}".strip() if prefix else body)
         return "\n".join(lines)
 
+    def _mineru_text_field(self, value: Any) -> str:
+        if isinstance(value, str):
+            return value.strip()
+        if isinstance(value, list):
+            return " ".join(
+                str(x).strip() for x in value if x is not None and str(x).strip()
+            ).strip()
+        return ""
+
     def _plaintext_from_mineru_blocks(self, items: List[Dict[str, Any]]) -> str:
         """Recover plaintext from MinerU v2 paragraph/title/list/table/image blocks."""
         parts: List[str] = []
@@ -192,6 +201,34 @@ class ProcessorMixin:
                 continue
 
             if not isinstance(content, dict):
+                if block_type == "image":
+                    s = " ".join(
+                        part
+                        for part in [
+                            self._mineru_text_field(item.get("image_caption")),
+                            self._mineru_text_field(item.get("image_footnote")),
+                        ]
+                        if part
+                    ).strip()
+                elif block_type == "table":
+                    s = "\n".join(
+                        part
+                        for part in [
+                            self._mineru_text_field(item.get("table_caption")),
+                            self._mineru_text_field(item.get("table_body")),
+                            self._mineru_text_field(item.get("table_footnote")),
+                        ]
+                        if part
+                    ).strip()
+                elif block_type == "equation":
+                    s = (
+                        self._mineru_text_field(item.get("text"))
+                        or self._mineru_text_field(item.get("latex"))
+                    )
+                else:
+                    s = self._mineru_text_field(item.get("text"))
+                if s:
+                    parts.append(s)
                 continue
 
             if block_type == "paragraph":
@@ -216,13 +253,32 @@ class ProcessorMixin:
 
         return "\n\n".join(parts)
 
+    def _separate_content_with_plaintext_recovery(
+        self, content_list: List[Dict[str, Any]]
+    ) -> Tuple[str, List[Dict[str, Any]]]:
+        text_content, multimodal_items = separate_content(content_list)
+        if text_content.strip():
+            return text_content, multimodal_items
+
+        text_content = self._plaintext_from_mineru_blocks(content_list)
+        if text_content.strip():
+            return text_content, multimodal_items
+
+        text_parts = []
+        for item in content_list:
+            if not isinstance(item, dict):
+                continue
+            candidate = item.get("text")
+            if isinstance(candidate, str) and candidate.strip():
+                text_parts.append(candidate.strip())
+        return "\n\n".join(text_parts), multimodal_items
+
     async def _insert_text_content_embedding_only(
         self, text_content: str, file_ref: str, doc_id: str
     ) -> None:
         """Insert text chunks directly into vector/text storages without LLM extraction."""
         if not text_content.strip():
-            await self._mark_multimodal_processing_complete(doc_id)
-            return
+            raise ValueError("No text content available for embedding-only ingestion")
 
         raw_chunks = [
             chunk.strip() for chunk in text_content.split("\n\n") if chunk.strip()
@@ -541,6 +597,16 @@ class ProcessorMixin:
                         output_dir=output_dir,
                         **kwargs,
                     )
+            elif ext in [".html", ".htm", ".xhtml"] and hasattr(
+                doc_parser, "parse_html"
+            ):
+                self.logger.info("Detected HTML document, using parser for HTML...")
+                content_list = await asyncio.to_thread(
+                    doc_parser.parse_html,
+                    html_path=file_path,
+                    output_dir=output_dir,
+                    **kwargs,
+                )
             elif ext in [
                 ".doc",
                 ".docx",
@@ -1717,7 +1783,9 @@ class ProcessorMixin:
                 doc_id = content_based_doc_id
 
             # Step 2: Separate text and multimodal content
-            text_content, multimodal_items = separate_content(content_list)
+            text_content, multimodal_items = self._separate_content_with_plaintext_recovery(
+                content_list
+            )
 
             if self.config.allow_embedding_only_ingestion:
                 if file_name is None:
@@ -1936,6 +2004,7 @@ class ProcessorMixin:
                         }
                     }
                 )
+                await self.lightrag.doc_status.index_done_callback()
                 current_doc_status = await self.lightrag.doc_status.get_by_id(
                     doc_pre_id
                 )
@@ -1962,6 +2031,7 @@ class ProcessorMixin:
                     }
                 }
             )
+            await self.lightrag.doc_status.index_done_callback()
 
             content_list = []
             content_based_doc_id = ""
@@ -1985,6 +2055,7 @@ class ProcessorMixin:
                         }
                     }
                 )
+                await self.lightrag.doc_status.index_done_callback()
                 self.logger.info(
                     f"Error processing document {file_path}: MineruExecutionError"
                 )
@@ -1999,6 +2070,7 @@ class ProcessorMixin:
                         }
                     }
                 )
+                await self.lightrag.doc_status.index_done_callback()
                 self.logger.info(f"Error processing document {file_path}: {str(e)}")
                 return False
 
@@ -2007,7 +2079,11 @@ class ProcessorMixin:
                 doc_id = content_based_doc_id
 
             # Step 2: Separate text and multimodal content
-            text_content, multimodal_items = separate_content(content_list)
+            text_content, multimodal_items = self._separate_content_with_plaintext_recovery(
+                content_list
+            )
+            if not text_content.strip():
+                raise ValueError("No text content available for LightRAG API ingestion")
 
             # Step 2.5: Set content source for context extraction in multimodal processing
             if hasattr(self, "set_content_source_for_context") and multimodal_items:
@@ -2174,17 +2250,9 @@ class ProcessorMixin:
                 self.logger.info(f"  - {block_type}: {count}")
 
         # Step 1: Separate text and multimodal content
-        text_content, multimodal_items = separate_content(normalized_content_list)
-
-        if not text_content.strip():
-            text_content = self._plaintext_from_mineru_blocks(normalized_content_list)
-        if not text_content.strip():
-            text_parts = []
-            for item in normalized_content_list:
-                candidate = item.get("text")
-                if isinstance(candidate, str) and candidate.strip():
-                    text_parts.append(candidate.strip())
-            text_content = "\n\n".join(text_parts)
+        text_content, multimodal_items = self._separate_content_with_plaintext_recovery(
+            normalized_content_list
+        )
 
         # Step 1.5: Set content source for context extraction in multimodal processing
         if hasattr(self, "set_content_source_for_context") and multimodal_items:
