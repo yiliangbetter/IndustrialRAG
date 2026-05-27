@@ -64,6 +64,43 @@ def test_mineru_env_propagation(
     assert kwargs["env"]["PATH"] == os.environ["PATH"]
 
 
+@patch("subprocess.Popen")
+@patch("pathlib.Path.exists")
+@patch("pathlib.Path.mkdir")
+def test_mineru_no_proxy_preserves_existing_entries_and_adds_loopback(
+    mock_mkdir, mock_exists, mock_popen, mineru_parser, dummy_path
+):
+    mock_exists.return_value = True
+    mock_process = MagicMock()
+    mock_process.poll.return_value = 0
+    mock_process.wait.return_value = 0
+    mock_process.stdout.readline.return_value = ""
+    mock_process.stderr.readline.return_value = ""
+    mock_popen.return_value = mock_process
+
+    custom_env = {
+        "HTTP_PROXY": "http://proxy.example",
+        "NO_PROXY": "metadata.google.internal,localhost",
+        "no_proxy": "internal.service",
+    }
+
+    try:
+        mineru_parser._run_mineru_command(dummy_path, "out", env=custom_env)
+    except Exception:
+        pass
+
+    _, kwargs = mock_popen.call_args
+    env = kwargs["env"]
+    no_proxy_entries = env["NO_PROXY"].split(",")
+    assert env["HTTP_PROXY"] == "http://proxy.example"
+    assert env["no_proxy"] == env["NO_PROXY"]
+    assert no_proxy_entries.count("localhost") == 1
+    assert "metadata.google.internal" in no_proxy_entries
+    assert "internal.service" in no_proxy_entries
+    assert "127.0.0.1" in no_proxy_entries
+    assert "::1" in no_proxy_entries
+
+
 @patch("subprocess.run")
 def test_docling_env_propagation(mock_run, docling_parser, dummy_path):
     mock_run.return_value = MagicMock(returncode=0, stdout="")
