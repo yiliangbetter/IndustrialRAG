@@ -83,6 +83,11 @@ def make_processor(allow_embedding_only_ingestion=False):
     )
     processor.lightrag = FakeLightRAG()
     processor.callback_manager = CallbackManager()
+
+    async def fake_ensure_lightrag_initialized():
+        return {"success": True}
+
+    processor._ensure_lightrag_initialized = fake_ensure_lightrag_initialized
     return processor
 
 
