@@ -50,6 +50,16 @@
               <option value="naive">naive（仅向量）</option>
             </select>
           </label>
+          <div class="dev-tools" id="dev-panel">
+            <p class="dev-tools-label">开发人员</p>
+            <label class="checkbox-row">
+              <input type="checkbox" id="query-debug-dump" />
+              <span>保存查询调试日志（JSON dump）</span>
+            </label>
+            <p class="hint" id="query-debug-hint">
+              开启后每次问答写入 logs/query_dumps/，便于排查检索与配图。
+            </p>
+          </div>
           <p class="hint hidden" id="setup-link-wrap">
             <a href="/setup" id="setup-link">打开安装向导</a>
           </p>
@@ -125,6 +135,6 @@
     <script src="/static/vendor/marked.min.js"></script>
     <script src="/static/vendor/purify.min.js"></script>
     <script src="/static/ingest_ui.js"></script>
-    <script src="/static/app.js?v=20260528"></script>
+    <script src="/static/app.js?v=20260529b"></script>
   </body>
 </html>

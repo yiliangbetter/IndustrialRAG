@@ -21,11 +21,14 @@ const ingestProgressLabel = $("#ingest-progress-label");
 const ingestLog = $("#ingest-log");
 const enableMultimodal = $("#enable-multimodal");
 const multimodalHint = $("#multimodal-hint");
+const queryDebugDump = $("#query-debug-dump");
+const queryDebugHint = $("#query-debug-hint");
 
 let pendingFiles = [];
 let ingestBusy = false;
 let ingestStopping = false;
 let multimodalSyncBusy = false;
+let queryDebugSyncBusy = false;
 let latestSetupStatus = null;
 /** When false, user scrolled up — do not auto-jump to bottom on every token. */
 let scrollPinnedToBottom = true;
@@ -269,6 +272,39 @@ function appendAnswerDelta(ui, text) {
   scrollMessages();
 }
 
+async function fetchQueryDebugStatus() {
+  const res = await fetch("/api/dev/query-debug");
+  if (!res.ok) throw new Error(`query debug ${res.status}`);
+  return res.json();
+}
+
+function renderQueryDebugHint(data) {
+  if (!queryDebugHint || !data) return;
+  const dir = data.dump_dir || "logs/query_dumps";
+  const recent = Array.isArray(data.recent) ? data.recent : [];
+  const recentLine = recent.length
+    ? `最近：${recent[0].name}`
+    : "尚无 dump 文件";
+  queryDebugHint.textContent = data.enabled
+    ? `已开启。目录：${dir}。${recentLine}`
+    : `关闭时不在磁盘写入。开启后每次问答会在 ${dir} 生成 JSON，便于排查检索与配图。`;
+}
+
+async function refreshQueryDebugPanel() {
+  if (!queryDebugDump) return;
+  try {
+    const data = await fetchQueryDebugStatus();
+    if (!queryDebugSyncBusy) {
+      queryDebugDump.checked = Boolean(data.enabled);
+    }
+    renderQueryDebugHint(data);
+  } catch {
+    if (queryDebugHint) {
+      queryDebugHint.textContent = "无法读取调试开关状态。";
+    }
+  }
+}
+
 async function fetchHealth() {
   const res = await fetch("/api/health");
   if (!res.ok) throw new Error(`health ${res.status}`);
@@ -320,6 +356,7 @@ async function refreshStatus() {
     }
     btnSend.disabled = !h.ready;
     updateIngestControls();
+    await refreshQueryDebugPanel();
   } catch (e) {
     $("#meta-ready").textContent = "无法连接";
     $("#meta-error").textContent = String(e);
@@ -426,6 +463,11 @@ async function streamQuery(query, loadingEl) {
         ui.thinkingBlock.open = false;
       }
       scrollMessages(true);
+    }
+    if (ev.type === "query_debug_saved") {
+      const name = ev.name || "query dump";
+      appendMessage("system", `已保存查询调试日志：${name}`);
+      refreshQueryDebugPanel();
     }
   };
 
@@ -663,8 +705,31 @@ enableMultimodal?.addEventListener("change", async () => {
   }
 });
 
+queryDebugDump?.addEventListener("change", async () => {
+  if (queryDebugSyncBusy) return;
+  const enabled = queryDebugDump.checked;
+  queryDebugSyncBusy = true;
+  try {
+    const res = await fetch("/api/dev/query-debug", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ enabled }),
+    });
+    const data = await res.json().catch(() => ({}));
+    if (!res.ok) throw new Error(data.detail || data.message || `HTTP ${res.status}`);
+    renderQueryDebugHint(data);
+    appendMessage("system", data.message || (enabled ? "已开启查询调试日志。" : "已关闭查询调试日志。"));
+  } catch (err) {
+    queryDebugDump.checked = !enabled;
+    appendMessage("system", `调试开关保存失败：${err.message || err}`);
+  } finally {
+    queryDebugSyncBusy = false;
+  }
+});
+
 appendMessage("system", "欢迎使用南兴知识库问答助手。左侧可查看工作目录与模式，下方输入问题开始对话。");
 initMessagesScroll();
 pinMessagesEnd();
 refreshStatus();
+refreshQueryDebugPanel();
 setInterval(refreshStatus, 15000);

@@ -1,11 +1,11 @@
 # 新增 PDF 与机型检索规则说明
 
-本文说明：向现有知识库**追加新 PDF** 时的灌库步骤，以及何时需要维护 **`scripts/query_doc_steering.py`** 中的机型过滤规则。
+本文说明：向现有知识库**追加新 PDF** 时的灌库步骤，以及何时需要维护 **机型检索 steering 配置**。
 
 相关脚本与配置：
 
 - 灌库 / 问答：[`scripts/rag_pipeline_parse_graph_chat.py`](../scripts/rag_pipeline_parse_graph_chat.py)
-- 机型过滤：[`scripts/query_doc_steering.py`](../scripts/query_doc_steering.py)
+- 机型过滤逻辑：[`scripts/query_doc_steering.py`](../scripts/query_doc_steering.py)（加载 [`config/query_steering_profiles.json`](../config/query_steering_profiles.json)）
 - 检索调试：[`scripts/dump_query_context.py`](../scripts/dump_query_context.py)
 - Web 灌库 / 问答：[`scripts/rag_web_server.py`](../scripts/rag_web_server.py)
 - 环境变量示例：[`env.example`](../env.example)
@@ -20,7 +20,7 @@
 |------|------|
 | 每次新增 PDF | **灌库到与查询相同的 `-w` 工作目录** |
 | 机型过滤开关 | `.env` 中 `RAG_QUERY_DOC_FILTER=true`（默认开启即可） |
-| 是否为每台机器配 `.env` | **不需要**；机型规则写在 `MACHINE_PROFILES` |
+| 是否为每台机器配 `.env` | **不需要**；机型规则写在 `config/query_steering_profiles.json` |
 | 何时改规则 | 仅当新手册代表**新机型**且会与旧手册在检索中「串台」时 |
 
 ---
@@ -71,12 +71,12 @@ uv run python scripts/dump_query_context.py -w rag_storage_run `
 
 ---
 
-## 二、什么时候要改 `query_doc_steering.py`？
+## 二、什么时候要改 steering 配置？
 
-**不是每加一本 PDF 都要改代码。**
+**不是每加一本 PDF 都要改配置。**
 
-| 情况 | 是否需要改 `MACHINE_PROFILES` |
-|------|------------------------------|
+| 情况 | 是否需要改 `query_steering_profiles.json` |
+|------|------------------------------------------|
 | 新 PDF 属于**已有型号**的补充说明 | 一般**不需要** |
 | 新 PDF 为**全新机型**，且与现有手册共用「输送链条」等通用词 | **需要**新增或调整一条 profile |
 | 新 PDF 为**通用资料**（报警、电气等），用户问题**不写机型** | **不需要**（未识别机型时不做过滤） |
@@ -92,7 +92,7 @@ uv run python scripts/dump_query_context.py -w rag_storage_run `
 
 ### 当前内置机型（节选）
 
-规则定义见 [`scripts/query_doc_steering.py`](../scripts/query_doc_steering.py) 中的 `MACHINE_PROFILES`，主要包括：
+规则定义见 [`config/query_steering_profiles.json`](../config/query_steering_profiles.json)，主要包括：
 
 - 高速智能封边机
 - 高速自动封边机
@@ -105,25 +105,24 @@ uv run python scripts/dump_query_context.py -w rag_storage_run `
 
 ## 三、新增机型时如何改规则
 
-在 `MACHINE_PROFILES` 列表末尾追加一项，例如：
+在 `config/query_steering_profiles.json` 数组末尾追加一项，例如：
 
-```python
+```json
 {
-    "id": "new_machine_x",
-    "label": "某某封边机",           # 界面「检索范围」显示用
-    "query_phrases": [              # 用户问题中出现即匹配（越长越优先）
-        "某某封边机",
-        "型号 ABC123",
-    ],
-    "query_exclude_if_contains": [  # 可选：避免与其它机型短语冲突
-        "高速智能",
-    ],
-    "deny_path_substrings": [        # 要排除的 PDF 文件名子串（与灌库后 file_path 一致）
-        "自动封边机维护保养手册",
-        "高速自动封边机维护保养手册",
-        # …其它不应混入的手册文件名关键词
-    ],
-},
+  "id": "new_machine_x",
+  "label": "某某设备",
+  "query_phrases": [
+    "某某设备",
+    "型号 ABC123"
+  ],
+  "query_exclude_if_contains": [
+    "其它机型短语"
+  ],
+  "deny_path_substrings": [
+    "不应混入的手册文件名子串"
+  ],
+  "steering_prompt": "可选：针对 KG 与 chunk 冲突时的额外 LLM 提示"
+}
 ```
 
 **同时**检查其它已有机型的 `deny_path_substrings`，必要时加入**新 PDF 文件名**中的可识别子串；否则用户问「高速智能」时仍可能召回新机型手册。
@@ -132,7 +131,9 @@ uv run python scripts/dump_query_context.py -w rag_storage_run `
 
 ### 不改代码的临时方式（运维）
 
-在 `.env` 中设置 `RAG_QUERY_DOC_FILTER_RULES_JSON`（JSON 数组，结构与 `MACHINE_PROFILES` 相同），见 [`env.example`](../env.example) 中 `### Pipeline script only: query steering` 段。适合试验；长期仍建议写入 `query_doc_steering.py` 便于版本管理。
+在 `.env` 中设置 `RAG_QUERY_DOC_FILTER_RULES_JSON`（JSON 数组，结构与 profile 相同），见 [`env.example`](../env.example) 中 `### Pipeline script only: query steering` 段。适合试验；长期仍建议写入 `query_steering_profiles.json` 便于版本管理。
+
+也可通过 `RAG_QUERY_STEERING_PROFILES` 指定其它 JSON 路径（客户端打包时会随 `config/` 下发）。
 
 可选：通过 `RAG_QUERY_DOC_DENY_SUBSTRINGS` 追加全局排除子串（英文逗号分隔）。
 
@@ -141,9 +142,9 @@ uv run python scripts/dump_query_context.py -w rag_storage_run `
 ## 四、推荐策略（按规模选择）
 
 ```
-少量 PDF、仍属封边机系列
+少量 PDF、仍属同一产品系列
   → 继续使用同一 rag_storage_run
-  → 新机型时再补 MACHINE_PROFILES
+  → 新机型时再补 query_steering_profiles.json
 
 全新产品线 / 与现有手册差异大
   → 新建 -w（例如 rag_storage_new_line）
@@ -167,7 +168,7 @@ uv run python scripts/dump_query_context.py -w rag_storage_run `
 
 ## 六、问答仍出现已排除内容（如「每天长城导轨油」）？
 
-1. **检索 chunk 已正确，但答案仍错**：`mix` 模式还会把**知识图谱**里跨手册合并的实体（如 `Conveyor Chain` 日润滑）送进 LLM。本项目在 `query_doc_steering.py` 中对「高速智能 + 输送链条」做了 **KG 上下文清洗** 与 **按问题注入 user_prompt**（无需写进 `.env`）。
+1. **检索 chunk 已正确，但答案仍错**：`mix` 模式还会把**知识图谱**里跨手册合并的实体描述送进 LLM。可在对应 profile 中设置 `steering_prompt` 注入按机型约束；通用逻辑见 `query_doc_steering.build_steering_user_prompt()`。
 2. **LLM 问答缓存**：若 `.env` 中 `ENABLE_LLM_CACHE=true`，可能直接返回旧答案。调试时建议 `ENABLE_LLM_CACHE=false`，并执行：
    ```powershell
    uv run python scripts/clear_query_llm_cache.py -w rag_storage_run
@@ -194,6 +195,7 @@ A：实现上若过滤后无 chunk 会回退到过滤前结果；若仍异常，
 
 | 变量 | 说明 |
 |------|------|
+| `RAG_QUERY_STEERING_PROFILES` | 机型规则 JSON 路径（默认 `config/query_steering_profiles.json`） |
 | `RAG_QUERY_DOC_FILTER` | `true`（默认）开启按机型过滤；`false` 关闭 |
 | `RAG_QUERY_DOC_FILTER_RULES_JSON` | 可选，追加 JSON 规则 |
 | `RAG_QUERY_DOC_DENY_SUBSTRINGS` | 可选，全局额外排除的 file_path 子串 |

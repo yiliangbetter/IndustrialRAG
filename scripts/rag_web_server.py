@@ -30,6 +30,7 @@ import os
 import shutil
 import sys
 import tempfile
+import time
 from collections.abc import AsyncIterator
 from contextlib import asynccontextmanager
 from pathlib import Path
@@ -109,6 +110,10 @@ class MultimodalBody(BaseModel):
     enabled: bool = Field(..., description="Enable image/table/equation processing during ingest")
 
 
+class QueryDebugBody(BaseModel):
+    enabled: bool = Field(..., description="Save structured JSON dumps under logs/query_dumps/")
+
+
 def _sse(payload: dict[str, Any]) -> str:
     return f"data: {json.dumps(payload, ensure_ascii=False)}\n\n"
 
@@ -156,6 +161,68 @@ async def _run_aquery(q: str, mode: str, *, stream: bool) -> str | AsyncIterator
         )
 
 
+def _persist_query_debug_dump(
+    *,
+    query: str,
+    mode: str,
+    parser_root: Path,
+    thinking: str | None = None,
+    answer: str | None = None,
+    error: str | None = None,
+    duration_ms: int | None = None,
+) -> Path | None:
+    from query_debug_dump import (  # noqa: WPS433
+        build_query_dump,
+        is_query_debug_enabled,
+        write_query_dump,
+    )
+    from image_query_refs import (  # noqa: WPS433
+        explain_query_images,
+        merge_context_for_images,
+        text_from_retrieved_docs,
+    )
+    from query_progress_hooks import get_query_debug_state  # noqa: WPS433
+
+    if not is_query_debug_enabled():
+        return None
+
+    hook_state = get_query_debug_state()
+    retrieved_docs = hook_state.get("retrieved_docs")
+    docs_text = hook_state.get("retrieved_docs_text")
+    if not docs_text and isinstance(retrieved_docs, list):
+        docs_text = text_from_retrieved_docs(retrieved_docs)
+    retrieval_context = hook_state.get("retrieval_context")
+    merged = merge_context_for_images(docs_text or "", retrieval_context or "")
+
+    images_debug = hook_state.get("images_debug")
+    if not isinstance(images_debug, dict) or not images_debug:
+        images_debug = explain_query_images(
+            docs_text or merged or "",
+            [parser_root],
+            query=query,
+            retrieved_docs=retrieved_docs if isinstance(retrieved_docs, list) else None,
+        )
+    payload = build_query_dump(
+        query=query,
+        mode=mode,
+        thinking=thinking,
+        answer=answer,
+        error=error,
+        duration_ms=duration_ms,
+        retrieval_context=retrieval_context if isinstance(retrieval_context, str) else None,
+        retrieved_docs=retrieved_docs if isinstance(retrieved_docs, list) else None,
+        retrieved_docs_text=docs_text if isinstance(docs_text, str) else None,
+        related_images=hook_state.get("related_images")
+        if isinstance(hook_state.get("related_images"), list)
+        else None,
+        images_debug=images_debug,
+        steering_report=hook_state.get("steering_report")
+        if isinstance(hook_state.get("steering_report"), dict)
+        else None,
+    )
+    return write_query_dump(payload)
+
+
 class AppState:
     rag: Any = None
     config: Any = None
@@ -173,14 +240,34 @@ class AppState:
 state = AppState()
 
 
+def _reset_lightrag_process_cache() -> None:
+    """Drop LightRAG in-process shared KV/doc_status caches.
+
+    JsonKVStorage keeps data in a process-wide shared dict. Deleting files on
+    disk alone is not enough: ``try_initialize_namespace`` returns False on the
+    second init, so storages skip reloading from disk and stale rows survive.
+    """
+    from lightrag.kg.shared_storage import finalize_share_data
+
+    finalize_share_data()
+
+
 def _wipe_directory(path: Path) -> None:
-    if not path.is_dir():
-        return
-    for child in path.iterdir():
-        if child.is_dir():
-            shutil.rmtree(child, ignore_errors=True)
-        else:
-            child.unlink(missing_ok=True)
+    """Remove a directory tree and recreate an empty folder."""
+    if path.is_dir():
+        shutil.rmtree(path, ignore_errors=True)
+    path.mkdir(parents=True, exist_ok=True)
+    leftover = list(path.iterdir())
+    if leftover:
+        time.sleep(0.25)
+        shutil.rmtree(path, ignore_errors=True)
+        path.mkdir(parents=True, exist_ok=True)
+        leftover = list(path.iterdir())
+    if leftover:
+        names = ", ".join(p.name for p in leftover[:8])
+        raise RuntimeError(
+            f"Failed to fully wipe {path}; leftover: {names}"
+        )
 
 
 async def _shutdown_priority_workers(func: Any) -> None:
@@ -212,7 +299,7 @@ async def _shutdown_priority_workers(func: Any) -> None:
     await _walk(func)
 
 
-async def _shutdown_rag_instance(rag: Any) -> None:
+async def _shutdown_rag_instance(rag: Any, *, persist: bool = True) -> None:
     if rag is None:
         return
     lightrag = getattr(rag, "lightrag", None)
@@ -223,21 +310,22 @@ async def _shutdown_rag_instance(rag: Any) -> None:
             await _shutdown_priority_workers(
                 getattr(embedding, "func", embedding)
             )
-    try:
-        await rag.finalize_storages()
-    except Exception:
-        pass
+    if persist:
+        try:
+            await rag.finalize_storages()
+        except Exception:
+            pass
     await asyncio.sleep(0)
 
 
-async def _shutdown_rag() -> None:
+async def _shutdown_rag(*, persist: bool = True) -> None:
     rag = state.rag
     state.rag = None
     state.config = None
     state.ready = False
     state.init_error = None
     if rag is not None:
-        await _shutdown_rag_instance(rag)
+        await _shutdown_rag_instance(rag, persist=persist)
 
 
 async def _clear_knowledge_base() -> None:
@@ -248,10 +336,10 @@ async def _clear_knowledge_base() -> None:
         "RAG_WEB_PARSER_OUTPUT_DIR", "output/pipeline_parse"
     )
     async with state.lock:
-        await _shutdown_rag()
+        await _shutdown_rag(persist=False)
+        _reset_lightrag_process_cache()
         _wipe_directory(wd)
         _wipe_directory(pod)
-        pod.mkdir(parents=True, exist_ok=True)
     await _init_rag_engine()
 
 
@@ -271,6 +359,17 @@ async def _init_rag_engine() -> None:
         state.config = config
         state.ready = True
         state.init_error = None
+        if (os.getenv("EMBEDDING_BACKEND") or "").strip().lower() == "hf":
+            try:
+                from raganything.local_hf_embedding import _resolve_embedding_device  # noqa: WPS433
+
+                print(
+                    f"[RAG] HF embedding device (auto): {_resolve_embedding_device()} "
+                    f"— full load log on first query/ingest",
+                    flush=True,
+                )
+            except Exception:
+                pass
     except Exception as exc:
         state.init_error = str(exc)
         state.ready = False
@@ -279,6 +378,14 @@ async def _init_rag_engine() -> None:
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     """Start HTTP immediately; load RAG in background when appropriate."""
+    import logging
+
+    for logger_name in (
+        "raganything.local_hf_embedding",
+        "raganything.pipeline_rerank",
+    ):
+        logging.getLogger(logger_name).setLevel(logging.INFO)
+
     init_task: asyncio.Task | None = None
 
     async def _startup_init() -> None:
@@ -319,7 +426,10 @@ async def index_page():
     index = _WEB_DIR / "index.html"
     if not index.is_file():
         raise HTTPException(500, "web/index.html missing")
-    return FileResponse(index)
+    return FileResponse(
+        index,
+        headers={"Cache-Control": "no-cache, no-store, must-revalidate"},
+    )
 
 
 @app.get("/setup")
@@ -475,6 +585,8 @@ async def api_media_image(token: str = ""):
 
 @app.get("/api/health")
 async def health():
+    from query_debug_dump import get_query_dump_dir, is_query_debug_enabled  # noqa: WPS433
+
     return {
         "ready": state.ready,
         "init_error": state.init_error,
@@ -485,6 +597,38 @@ async def health():
         "multimodal_enabled": not state.skip_multimodal,
         "client_mode": is_client_mode(),
         "setup_complete": is_setup_complete(),
+        "query_debug_enabled": is_query_debug_enabled(),
+        "query_dump_dir": str(get_query_dump_dir()),
+    }
+
+
+@app.get("/api/dev/query-debug")
+async def api_dev_query_debug_get():
+    from query_debug_dump import (  # noqa: WPS433
+        get_query_dump_dir,
+        is_query_debug_enabled,
+        list_recent_dumps,
+    )
+
+    return {
+        "enabled": is_query_debug_enabled(),
+        "dump_dir": str(get_query_dump_dir()),
+        "recent": list_recent_dumps(limit=12),
+    }
+
+
+@app.post("/api/dev/query-debug")
+async def api_dev_query_debug_set(body: QueryDebugBody):
+    patch_env_keys({"RAG_QUERY_DEBUG_DUMP": "1" if body.enabled else "0"})
+    apply_env_to_process()
+    from query_debug_dump import get_query_dump_dir, list_recent_dumps  # noqa: WPS433
+
+    return {
+        "ok": True,
+        "enabled": body.enabled,
+        "dump_dir": str(get_query_dump_dir()),
+        "recent": list_recent_dumps(limit=12),
+        "message": "已开启查询调试日志保存。" if body.enabled else "已关闭查询调试日志保存。",
     }
 
 
@@ -497,27 +641,60 @@ async def api_query(body: QueryBody):
         )
     mode = (body.mode or state.query_mode or "mix").strip()
     q = body.query.strip()
-    try:
-        answer = await _run_aquery(q, mode, stream=False)
-    except Exception as exc:
-        raise HTTPException(500, f"Query failed: {exc}") from exc
-    if not isinstance(answer, str):
-        parts: list[str] = []
-        async for chunk in _iter_llm_chunks(answer):
-            parts.append(chunk)
-        answer = "".join(parts)
+    parser_root = Path(state.parser_output_dir).resolve()
+    started = time.perf_counter()
+    thinking = ""
+    answer = ""
+    error: str | None = None
     _scripts_dir = _ROOT / "scripts"
     if str(_scripts_dir) not in sys.path:
         sys.path.insert(0, str(_scripts_dir))
+    from query_progress_hooks import (  # noqa: WPS433
+        query_progress_hooks,
+        set_query_media_roots,
+        set_query_text_for_images,
+    )
     from stream_cot_parser import parse_complete_cot  # noqa: WPS433
 
-    thinking, final_answer = parse_complete_cot(answer or "")
-    return {
+    set_query_media_roots([parser_root])
+    set_query_text_for_images(q)
+    try:
+        async with query_progress_hooks():
+            raw = await _run_aquery(q, mode, stream=False)
+    except Exception as exc:
+        error = _friendly_query_error(exc)
+        _persist_query_debug_dump(
+            query=q,
+            mode=mode,
+            parser_root=parser_root,
+            error=error,
+            duration_ms=int((time.perf_counter() - started) * 1000),
+        )
+        raise HTTPException(500, f"Query failed: {exc}") from exc
+
+    if not isinstance(raw, str):
+        parts: list[str] = []
+        async for chunk in _iter_llm_chunks(raw):
+            parts.append(chunk)
+        raw = "".join(parts)
+    thinking, answer = parse_complete_cot(raw or "")
+    dump_path = _persist_query_debug_dump(
+        query=q,
+        mode=mode,
+        parser_root=parser_root,
+        thinking=thinking,
+        answer=answer,
+        duration_ms=int((time.perf_counter() - started) * 1000),
+    )
+    payload: dict[str, Any] = {
         "thinking": thinking,
-        "answer": final_answer,
+        "answer": answer,
         "mode": mode,
         "query": q,
     }
+    if dump_path is not None:
+        payload["debug_dump"] = {"path": str(dump_path), "name": dump_path.name}
+    return payload
 
 
 async def _query_stream_events(q: str, mode: str) -> AsyncIterator[str]:
@@ -531,6 +708,10 @@ async def _query_stream_events(q: str, mode: str) -> AsyncIterator[str]:
     parser_root = Path(state.parser_output_dir).resolve()
     set_query_media_roots([parser_root])
     set_query_text_for_images(q)
+    started = time.perf_counter()
+    thinking_parts: list[str] = []
+    answer_parts: list[str] = []
+    stream_error: str | None = None
 
     result_queue: asyncio.Queue[tuple[str, Any]] = asyncio.Queue(maxsize=1)
 
@@ -567,30 +748,82 @@ async def _query_stream_events(q: str, mode: str) -> AsyncIterator[str]:
                 if res_task in done and not res_task.cancelled():
                     kind, payload = res_task.result()
                     if kind == "error":
-                        yield _sse({"type": "error", "message": _friendly_query_error(payload)})
+                        stream_error = _friendly_query_error(payload)
+                        dump_path = _persist_query_debug_dump(
+                            query=q,
+                            mode=mode,
+                            parser_root=parser_root,
+                            error=stream_error,
+                            duration_ms=int((time.perf_counter() - started) * 1000),
+                        )
+                        if dump_path is not None:
+                            yield _sse(
+                                {
+                                    "type": "query_debug_saved",
+                                    "path": str(dump_path),
+                                    "name": dump_path.name,
+                                }
+                            )
+                        yield _sse({"type": "error", "message": stream_error})
                         return
 
                     try:
                         chunk_iter = _iter_llm_chunks(payload)
                     except Exception as exc:
-                        yield _sse({"type": "error", "message": _friendly_query_error(exc)})
+                        stream_error = _friendly_query_error(exc)
+                        dump_path = _persist_query_debug_dump(
+                            query=q,
+                            mode=mode,
+                            parser_root=parser_root,
+                            error=stream_error,
+                            duration_ms=int((time.perf_counter() - started) * 1000),
+                        )
+                        if dump_path is not None:
+                            yield _sse(
+                                {
+                                    "type": "query_debug_saved",
+                                    "path": str(dump_path),
+                                    "name": dump_path.name,
+                                }
+                            )
+                        yield _sse({"type": "error", "message": stream_error})
                         return
 
                     async for chunk in chunk_iter:
-                        for kind, piece in cot_parser.feed(chunk):
+                        for ev_kind, piece in cot_parser.feed(chunk):
                             if not piece:
                                 continue
-                            if kind == "thinking":
+                            if ev_kind == "thinking":
+                                thinking_parts.append(piece)
                                 yield _sse({"type": "thinking_delta", "text": piece})
                             else:
+                                answer_parts.append(piece)
                                 yield _sse({"type": "answer_delta", "text": piece})
-                    for kind, piece in cot_parser.flush():
+                    for ev_kind, piece in cot_parser.flush():
                         if not piece:
                             continue
-                        if kind == "thinking":
+                        if ev_kind == "thinking":
+                            thinking_parts.append(piece)
                             yield _sse({"type": "thinking_delta", "text": piece})
                         else:
+                            answer_parts.append(piece)
                             yield _sse({"type": "answer_delta", "text": piece})
+                    dump_path = _persist_query_debug_dump(
+                        query=q,
+                        mode=mode,
+                        parser_root=parser_root,
+                        thinking="".join(thinking_parts).strip(),
+                        answer="".join(answer_parts).strip(),
+                        duration_ms=int((time.perf_counter() - started) * 1000),
+                    )
+                    if dump_path is not None:
+                        yield _sse(
+                            {
+                                "type": "query_debug_saved",
+                                "path": str(dump_path),
+                                "name": dump_path.name,
+                            }
+                        )
                     yield _sse({"type": "done", "mode": mode})
                     return
         finally:

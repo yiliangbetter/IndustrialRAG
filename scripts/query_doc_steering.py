@@ -1,8 +1,8 @@
-"""Scope retrieval to the machine type mentioned in the user query.
+"""Scope retrieval to document sources implied by the user query.
 
-Rules live in code (``MACHINE_PROFILES``), not per-machine ``.env`` entries.
-When a profile matches, unrelated manual PDFs are dropped after rerank and a
-report is exposed for the Web UI / logs.
+Steering profiles are loaded from ``config/query_steering_profiles.json`` (or
+``RAG_QUERY_STEERING_PROFILES``). When a profile matches, unrelated manual PDFs
+are dropped after rerank and a report is exposed for the Web UI / logs.
 """
 
 from __future__ import annotations
@@ -12,88 +12,12 @@ import os
 import re
 from contextvars import ContextVar
 from dataclasses import dataclass, field
+from functools import lru_cache
+from pathlib import Path
 from typing import Any
 
-# Order matters: longer / more specific query phrases first.
-MACHINE_PROFILES: list[dict[str, Any]] = [
-    {
-        "id": "high_speed_smart",
-        "label": "高速智能封边机",
-        "query_phrases": [
-            "高速智能封边机",
-            "高速智能",
-            "NB9-Smart",
-            "NB10-Smart",
-        ],
-        "deny_path_substrings": [
-            "自动封边机维护保养手册",
-            "高速自动封边机维护保养手册",
-            "双端封边机维护保养手册",
-            "数控六面钻",
-            "PC封边机电气",
-        ],
-    },
-    {
-        "id": "high_speed_auto",
-        "label": "高速自动封边机",
-        "query_phrases": [
-            "高速自动封边机",
-            "高速自动",
-            "NB6PG",
-            "NB7PCG",
-            "NB8PCHGM",
-        ],
-        "deny_path_substrings": [
-            "自动封边机维护保养手册",
-            "封边机连线项目维护保养手册",
-            "双端封边机维护保养手册",
-            "数控六面钻",
-        ],
-    },
-    {
-        "id": "double_end",
-        "label": "双端封边机",
-        "query_phrases": [
-            "双端封边机",
-            "双端",
-            "NB6S2",
-            "NB7HS2",
-            "NB8CS2",
-        ],
-        "deny_path_substrings": [
-            "自动封边机维护保养手册",
-            "封边机连线项目维护保养手册",
-            "高速自动封边机维护保养手册",
-            "数控六面钻",
-        ],
-    },
-    {
-        "id": "auto_edge",
-        "label": "自动封边机",
-        "query_phrases": [
-            "自动封边机",
-            "NBC332",
-            "NB5J",
-            "NB6J",
-            "NB6CJ",
-            "NB7CJ",
-            "NB7CJM",
-            "NB557D",
-        ],
-        "query_exclude_if_contains": [
-            "高速智能",
-            "高速自动",
-            "双端封边",
-            "连线项目",
-        ],
-        "deny_path_substrings": [
-            "封边机连线项目维护保养手册",
-            "高速自动封边机维护保养手册",
-            "双端封边机维护保养手册",
-            "数控六面钻",
-        ],
-    },
-]
+_ROOT = Path(__file__).resolve().parent.parent
+_DEFAULT_PROFILES_PATH = _ROOT / "config" / "query_steering_profiles.json"
 
 _last_filter_report: ContextVar[dict[str, Any] | None] = ContextVar(
     "last_filter_report", default=None
@@ -141,6 +65,30 @@ def _env_bool(name: str, default: bool) -> bool:
     return raw in ("1", "true", "yes", "on")
 
 
+def _profiles_path() -> Path:
+    raw = (os.getenv("RAG_QUERY_STEERING_PROFILES") or "").strip()
+    if raw:
+        return Path(raw).expanduser()
+    return _DEFAULT_PROFILES_PATH
+
+
+@lru_cache(maxsize=1)
+def _load_profiles_from_file() -> list[dict[str, Any]]:
+    path = _profiles_path()
+    if not path.is_file():
+        return []
+    try:
+        data = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError) as exc:
+        import logging
+
+        logging.getLogger(__name__).warning(
+            "Failed to load steering profiles from %s: %s", path, exc
+        )
+        return []
+    return data if isinstance(data, list) else []
+
+
 def _load_extra_profiles() -> list[dict[str, Any]]:
     raw = (os.getenv("RAG_QUERY_DOC_FILTER_RULES_JSON") or "").strip()
     if not raw:
@@ -152,16 +100,21 @@ def _load_extra_profiles() -> list[dict[str, Any]]:
         return []
 
 
+def load_steering_profiles() -> list[dict[str, Any]]:
+    """All active steering profiles (file + env JSON overlay)."""
+    return _load_profiles_from_file() + _load_extra_profiles()
+
+
 def _normalize_query(q: str) -> str:
     return re.sub(r"\s+", "", (q or "").strip())
 
 
 def resolve_machine_profile(query: str) -> dict[str, Any] | None:
-    """Pick the best-matching machine profile from the question text."""
+    """Pick the best-matching profile from the question text."""
     qn = _normalize_query(query)
     if not qn:
         return None
-    profiles = MACHINE_PROFILES + _load_extra_profiles()
+    profiles = load_steering_profiles()
     best: tuple[int, dict[str, Any]] | None = None
     for profile in profiles:
         if any(
@@ -272,63 +225,46 @@ def consume_filter_report() -> dict[str, Any] | None:
 
 
 def build_answer_fidelity_user_prompt(query: str) -> str:
-    """When retrieval spans multiple manuals, keep each device's wording separate."""
+    """When retrieval spans multiple manuals, keep each source's wording separate."""
     if not _env_bool("RAG_QUERY_AUTO_STEERING", True):
         return ""
-    qn = _normalize_query(query)
-    profile = resolve_machine_profile(query)
 
     parts = [
-        "回答须忠实于检索到的各手册原文，不得自行归纳或重组：",
-        "若内容来自多份不同设备或手册，必须按设备或手册分别列出，"
-        "小节标题写明设备名称（如「双端封边机」「高速智能封边机」）或对应手册；",
-        "不得把不同手册的保养周期、润滑脂型号、操作步骤合并成"
-        "「常规检查与润滑」「深度清理与润滑」「日常保养」等自编分类；",
-        "保留原文的保养周期、润滑剂名称与型号（如润滑脂2#、长城润滑脂3#）"
-        "及步骤表述；引用标记与文末 References 须与正文实际引用一致。",
+        "回答须忠实于检索到的各文档原文，不得自行归纳或重组：",
+        "若内容来自多份不同设备、产品或手册，必须按来源分别列出，"
+        "小节标题写明对应设备名称或文档标题；",
+        "不得把不同来源的周期、型号、操作步骤合并成自编分类或「通用流程」；",
+        "保留原文中的数值、型号与步骤表述；引用标记与文末 References 须与正文实际引用一致。",
+        "用户未指定单一来源时：若检索到多个来源的同类条目，须分别说明，不要混为一谈。",
     ]
-
-    if not profile and any(
-        marker in qn for marker in ("保养", "润滑", "维护", "检查", "更换", "清理")
-    ):
-        parts.append(
-            "用户未指定单一机型时：若检索到多台设备的同类保养条目，"
-            "须分别说明各设备对应方法，不要混为一谈或只给出一条「通用」流程。"
-        )
-
-    if "传动丝杆" in qn or ("传动" in qn and "丝杆" in qn):
-        parts.append(
-            "传动丝杆：不同手册的保养周期与润滑脂可能不同"
-            "（例如双端封边机每周长城润滑脂3#，高速智能封边机每年润滑脂2#），"
-            "须分设备说明，勿合并为同一保养流程。"
-        )
-
+    profile = resolve_machine_profile(query)
+    if profile:
+        label = str(profile.get("label") or "")
+        if label:
+            parts.append(f"用户问题已指向「{label}」；优先使用该来源对应 chunk 的原文表述。")
     return " ".join(parts)
 
 
 def build_steering_user_prompt(query: str) -> str:
-    """Per-query hint for the LLM (not per-machine ``.env`` entries)."""
+    """Per-query hint for the LLM when a steering profile matches."""
     if not _env_bool("RAG_QUERY_KG_STEERING", True):
         return ""
     profile = resolve_machine_profile(query)
     if not profile:
         return ""
     label = str(profile.get("label") or "")
+    extra = str(profile.get("steering_prompt") or "").strip()
     parts = [
-        f"用户问题针对「{label}」。只引用与该机型对应手册的正文 chunk；"
-        "若知识图谱实体描述与其它机型手册合并后冲突，以 chunk 正文为准。"
+        f"用户问题针对「{label}」。只引用与该来源对应手册的正文 chunk；"
+        "若知识图谱实体描述与其它文档合并后冲突，以 chunk 正文为准。"
     ]
-    qn = _normalize_query(query)
-    if profile.get("id") == "high_speed_smart" and "输送链条" in qn:
-        parts.append(
-            "输送链条保养以手册 3.1.2 及附表为准：季度/半年用手动黄油枪加注润滑脂2#；"
-            "勿写「每天加注长城导轨油68#」，除非 chunk 正文明确写出该条。"
-        )
+    if extra:
+        parts.append(extra)
     return " ".join(parts)
 
 
 def build_user_prompt_for_query(query: str) -> str:
-    """Merge answer-fidelity rules and machine-specific steering for LightRAG."""
+    """Merge answer-fidelity rules and profile steering for LightRAG."""
     parts: list[str] = []
     fidelity = build_answer_fidelity_user_prompt(query)
     if fidelity:
@@ -337,42 +273,6 @@ def build_user_prompt_for_query(query: str) -> str:
     if steer:
         parts.append(steer)
     return "\n\n".join(parts)
-
-
-def _line_is_chain_daily_oil_noise(line: str) -> bool:
-    lower = line.lower()
-    chain_related = (
-        "conveyor chain" in lower
-        or "输送链条" in line
-        or ("输送" in line and "链条" in line)
-    )
-    if not chain_related:
-        return False
-    oil_markers = (
-        "长城导轨油",
-        "great wall guide",
-        "greatwall guide",
-        "centralized lubrication",
-        "每天",
-        "daily",
-    )
-    return any(m in lower or m in line for m in oil_markers)
-
-
-def scrub_kg_context(query: str, context: str) -> str:
-    """Remove KG lines that wrongly merge other manuals' chain lubrication."""
-    if not _env_bool("RAG_QUERY_KG_SCRUB", True):
-        return context
-    profile = resolve_machine_profile(query)
-    if not profile or profile.get("id") != "high_speed_smart":
-        return context
-    qn = _normalize_query(query)
-    if "输送链条" not in qn:
-        return context
-    if not context:
-        return context
-    kept = [ln for ln in context.split("\n") if not _line_is_chain_daily_oil_noise(ln)]
-    return "\n".join(kept)
 
 
 def install_doc_filter_on_rerank() -> None:
@@ -399,29 +299,6 @@ def install_doc_filter_on_rerank() -> None:
     ut.apply_rerank_if_enabled = _wrapped  # type: ignore[method-assign]
 
 
-def install_kg_context_scrub() -> None:
-    import lightrag.operate as op
-    from dataclasses import replace
-
-    orig = op._build_query_context
-    if getattr(orig, "_kg_scrub_wrapped", False):
-        return
-
-    async def _wrapped(*args: Any, **kwargs: Any):
-        result = await orig(*args, **kwargs)
-        if result is None:
-            return result
-        query = args[0] if args else str(kwargs.get("query") or "")
-        scrubbed = scrub_kg_context(query, result.context or "")
-        if scrubbed != result.context:
-            result = replace(result, context=scrubbed)
-        return result
-
-    _wrapped._kg_scrub_wrapped = True  # type: ignore[attr-defined]
-    op._build_query_context = _wrapped  # type: ignore[method-assign]
-
-
 def install_query_steering_hooks() -> None:
-    """Chunk file_path filter + KG context scrub (idempotent)."""
+    """Document path filter after rerank (idempotent)."""
     install_doc_filter_on_rerank()
-    install_kg_context_scrub()

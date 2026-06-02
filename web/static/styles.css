@@ -95,9 +95,10 @@ body {
 .panel h2 {
   margin: 0 0 0.65rem;
   font-size: 0.95rem;
-  letter-spacing: 0.04em;
+  font-weight: 650;
   color: var(--text-muted);
-  font-weight: 600;
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
 }
 
 .meta {
@@ -122,6 +123,40 @@ body {
   font-family: ui-monospace, Consolas, monospace;
   font-size: 0.88rem;
   word-break: break-all;
+}
+
+.panel-dev {
+  border: 1px dashed #c5ccd6;
+  background: #f6f8fa;
+}
+
+.dev-tools {
+  margin-top: 0.85rem;
+  padding-top: 0.75rem;
+  border-top: 1px dashed var(--border);
+}
+
+.dev-tools-label {
+  margin: 0 0 0.45rem;
+  font-size: 0.82rem;
+  font-weight: 650;
+  letter-spacing: 0.06em;
+  text-transform: uppercase;
+  color: #6b7280;
+}
+
+.checkbox-row {
+  display: flex;
+  gap: 0.55rem;
+  align-items: flex-start;
+  font-size: 0.95rem;
+  line-height: 1.45;
+  cursor: pointer;
+}
+
+.checkbox-row input {
+  margin-top: 0.2rem;
+  flex-shrink: 0;
 }
 
 .field {

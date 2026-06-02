@@ -135,6 +135,8 @@ CLIENT_TUNING_KEYS: frozenset[str] = frozenset(
         "MIN_RERANK_SCORE",
         "RAG_IMAGE_MIN_RERANK_SCORE",
         "RAG_IMAGE_MIN_TERM_OVERLAP",
+        "RAG_IMAGE_MIN_TERM_LEN",
+        "RAG_IMAGE_MIN_QUERY_CHARS",
         "TOP_K",
         "CHUNK_TOP_K",
         "COSINE_THRESHOLD",
@@ -144,10 +146,20 @@ CLIENT_TUNING_KEYS: frozenset[str] = frozenset(
         "LLM_TIMEOUT",
         "RAG_QUERY_AUTO_STEERING",
         "RAG_QUERY_KG_STEERING",
+        "RAG_QUERY_STEERING_PROFILES",
+        "RAG_IMAGE_MIN_REF_ALIGN",
     }
 )
 
-CLIENT_PERSIST_KEYS: frozenset[str] = CLIENT_WRITE_KEYS | CLIENT_TUNING_KEYS
+CLIENT_DEV_KEYS: frozenset[str] = frozenset(
+    {
+        "RAG_QUERY_DEBUG_DUMP",
+    }
+)
+
+CLIENT_PERSIST_KEYS: frozenset[str] = (
+    CLIENT_WRITE_KEYS | CLIENT_TUNING_KEYS | CLIENT_DEV_KEYS
+)
 
 
 def _client_tiktoken_cache_dir() -> str:
@@ -293,6 +305,7 @@ def _write_env_dict(merged: dict[str, str]) -> Path:
         "VISION_MODEL",
         *CLIENT_AUTO_KEYS.keys(),
         *sorted(CLIENT_TUNING_KEYS),
+        *sorted(CLIENT_DEV_KEYS),
         "RAG_WEB_ENABLE_MULTIMODAL",
         "RAG_WEB_SKIP_MULTIMODAL",
         "HF_HOME",

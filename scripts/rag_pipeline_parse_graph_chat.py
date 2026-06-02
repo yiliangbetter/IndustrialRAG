@@ -31,6 +31,7 @@ import subprocess
 import sys
 from functools import partial
 from pathlib import Path
+from typing import Any
 
 from dotenv import load_dotenv
 
@@ -86,6 +87,58 @@ def _collect_files(folder: Path, extensions: list[str], recursive: bool) -> list
         pattern = f"**/*{ext}" if recursive else f"*{ext}"
         files.extend(folder.glob(pattern))
     return sorted({p.resolve() for p in files if p.is_file()})
+
+
+def _doc_status_file_path(meta: Any) -> str | None:
+    if isinstance(meta, dict):
+        val = meta.get("file_path")
+    else:
+        val = getattr(meta, "file_path", None)
+    if isinstance(val, str) and val.strip():
+        return val.strip()
+    return None
+
+
+async def _remove_existing_docs_for_file(rag, rel: str) -> int:
+    """Replace prior index rows that share the same uploaded filename."""
+    lightrag = getattr(rag, "lightrag", None)
+    if lightrag is None:
+        return 0
+
+    doc_status = getattr(lightrag, "doc_status", None)
+    delete = getattr(lightrag, "adelete_by_doc_id", None)
+    if doc_status is None or delete is None:
+        return 0
+
+    target = Path(rel).name
+    matches: list[str] = []
+    page = 1
+    while True:
+        rows, total = await doc_status.get_docs_paginated(
+            page=page, page_size=200, sort_field="updated_at", sort_direction="desc"
+        )
+        if not rows:
+            break
+        for doc_id, meta in rows:
+            fp = _doc_status_file_path(meta)
+            if fp == rel or (fp and Path(fp).name == target):
+                matches.append(doc_id)
+        if page * 200 >= total:
+            break
+        page += 1
+
+    removed = 0
+    seen: set[str] = set()
+    for doc_id in matches:
+        if doc_id in seen:
+            continue
+        seen.add(doc_id)
+        try:
+            await delete(doc_id)
+            removed += 1
+        except Exception:
+            continue
+    return removed
 
 
 def _download_mineru_pipeline_models() -> None:
@@ -363,6 +416,15 @@ async def _ingest_folder(
                 cancelled = True
                 await _emit({"type": "log", "message": "收到停止请求，正在终止灌库…"})
                 break
+            replaced = await _remove_existing_docs_for_file(rag, rel)
+            if replaced:
+                await _emit(
+                    {
+                        "type": "log",
+                        "message": f"替换已有索引：{rel}（移除 {replaced} 条旧记录）",
+                    }
+                )
+                logger.info("INGEST_REPLACE::%s::removed=%d", rel, replaced)
             await _emit({"type": "log", "message": f"写入知识库：{rel}"})
             await rag.insert_content_list(
                 content_list,

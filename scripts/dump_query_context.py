@@ -5,11 +5,11 @@ Prints metadata, chunk list with previews, and optional substring hit checks.
 Examples::
 
   uv run python scripts/dump_query_context.py -w ./rag_storage_run \\
-    "四种封边机电控板保养周期分别是多久"
+    "你的测试问题"
 
   uv run python scripts/dump_query_context.py -w ./rag_storage_run \\
-    --markers "3.14.5,每季度,电控板,变频器" \\
-    "四种封边机电控板保养周期分别是多久"
+    --markers "关键词1,关键词2" \\
+    "你的测试问题"
 
 If QUERY is omitted, uses env ``DUMP_QUERY_DEFAULT`` when set; otherwise the script exits with an error.
 """

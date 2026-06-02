@@ -28,6 +28,45 @@ _media_roots: ContextVar[list[Path] | None] = ContextVar("media_roots", default=
 _query_text: ContextVar[str | None] = ContextVar("query_text", default=None)
 _retrieved_docs: ContextVar[list[dict] | None] = ContextVar("retrieved_docs", default=None)
 _images_emitted: ContextVar[bool] = ContextVar("images_emitted", default=False)
+_related_images_selected: ContextVar[list[dict[str, Any]] | None] = ContextVar(
+    "related_images_selected", default=None
+)
+_last_image_debug: ContextVar[dict[str, Any] | None] = ContextVar(
+    "last_image_debug", default=None
+)
+_steering_report: ContextVar[dict[str, Any] | None] = ContextVar(
+    "steering_report", default=None
+)
+# Worker tasks copy ContextVar; parent dump reads this shared snapshot instead.
+_query_debug_snapshot: dict[str, Any] = {}
+
+
+def _sync_query_debug_snapshot() -> None:
+    _query_debug_snapshot.clear()
+    _query_debug_snapshot.update(
+        {
+            "retrieval_context": _retrieval_context.get(),
+            "retrieved_docs_text": _retrieved_docs_text.get(),
+            "retrieved_docs": _retrieved_docs.get(),
+            "related_images": list(_related_images_selected.get() or []),
+            "steering_report": dict(_steering_report.get() or {}),
+            "images_debug": dict(_last_image_debug.get() or {}),
+        }
+    )
+
+
+def get_query_debug_state() -> dict[str, Any]:
+    """Snapshot hook state for query debug dumps."""
+    if _query_debug_snapshot:
+        return dict(_query_debug_snapshot)
+    return {
+        "retrieval_context": _retrieval_context.get(),
+        "retrieved_docs_text": _retrieved_docs_text.get(),
+        "retrieved_docs": _retrieved_docs.get(),
+        "related_images": list(_related_images_selected.get() or []),
+        "steering_report": dict(_steering_report.get() or {}),
+        "images_debug": dict(_last_image_debug.get() or {}),
+    }
 
 
 def _latest_retrieved_docs(explicit: list[dict] | None) -> list[dict] | None:
@@ -57,29 +96,37 @@ async def _emit_related_images(retrieved_docs: list[dict] | None = None) -> None
         return
     try:
         from image_query_refs import (  # noqa: WPS433
+            explain_query_images,
             images_for_api,
             merge_context_for_images,
             text_from_retrieved_docs,
         )
 
-        docs_text = text_from_retrieved_docs(retrieved_docs)
-        if docs_text:
-            _retrieved_docs_text.set(docs_text)
-        merged = merge_context_for_images(
-            docs_text,
-            _retrieved_docs_text.get(),
+        docs = _latest_retrieved_docs(retrieved_docs) or []
+        docs_text = text_from_retrieved_docs(docs).strip()
+        if not docs_text:
+            return
+        _retrieved_docs_text.set(docs_text)
+        _last_image_debug.set(
+            explain_query_images(
+                docs_text,
+                roots,
+                query=_query_text.get(),
+                retrieved_docs=docs,
+            )
         )
         images = images_for_api(
-            merged,
+            docs_text,
             roots,
             query=_query_text.get(),
-            extra_context=_retrieval_context.get(),
-            retrieved_docs=_latest_retrieved_docs(retrieved_docs),
+            retrieved_docs=docs,
             limit=4,
         )
         if images:
             q.put_nowait({"type": "related_images", "images": images})
+            _related_images_selected.set(list(images))
             _images_emitted.set(True)
+        _sync_query_debug_snapshot()
     except Exception as exc:
         import logging
 
@@ -125,11 +172,7 @@ async def query_progress_hooks() -> AsyncIterator[asyncio.Queue[dict[str, str]]]
 
     async def _naive_query(*args: Any, **kwargs: Any):
         await _emit(PHASE_RETRIEVE)
-        result = await orig_naive_query(*args, **kwargs)
-        if isinstance(result, str):
-            _retrieval_context.set(result)
-            await _emit_related_images()
-        return result
+        return await orig_naive_query(*args, **kwargs)
 
     async def _apply_rerank_if_enabled(
         query: str,
@@ -144,23 +187,24 @@ async def query_progress_hooks() -> AsyncIterator[asyncio.Queue[dict[str, str]]]
         docs = await orig_rerank(
             query, retrieved_docs, global_config, enable_rerank, top_n
         )
-        _retrieved_docs.set(docs)
-        await _emit_related_images(docs)
         try:
             from query_doc_steering import filter_retrieved_docs_by_query  # noqa: WPS433
 
             filtered = filter_retrieved_docs_by_query(query, docs)
-            if filtered:
-                return filtered
-            # If filter removed everything, keep reranked set (avoid empty context).
-            return docs
+            final_docs = filtered if filtered else docs
         except Exception:
-            return docs
+            final_docs = docs
+        _retrieved_docs.set(final_docs)
+        await _emit_related_images(final_docs)
+        _sync_query_debug_snapshot()
+        return final_docs
 
     async def _process_chunks_unified(*args: Any, **kwargs: Any):
+        query = args[0] if args else kwargs.get("query", "")
+        if isinstance(query, str) and query.strip():
+            _query_text.set(query)
         chunks = await orig_process_chunks(*args, **kwargs)
         await _emit(PHASE_GENERATE)
-        await _emit_related_images()
         try:
             import sys
             from pathlib import Path
@@ -172,6 +216,7 @@ async def query_progress_hooks() -> AsyncIterator[asyncio.Queue[dict[str, str]]]
 
             report = consume_filter_report()
             if report and report.get("active"):
+                _steering_report.set(dict(report))
                 q = _progress_queue.get()
                 if q is not None:
                     q.put_nowait(report)
@@ -198,6 +243,10 @@ async def query_progress_hooks() -> AsyncIterator[asyncio.Queue[dict[str, str]]]
         _query_text.set(None)
         _images_emitted.set(False)
         _retrieved_docs.set(None)
+        _related_images_selected.set(None)
+        _steering_report.set(None)
+        _last_image_debug.set(None)
+        _query_debug_snapshot.clear()
 
 
 def strip_think_tags(text: str) -> str:

@@ -139,6 +139,10 @@ if (-not (Test-Path $envExampleSrc)) {
     $envExampleSrc = Join-Path $RepoRoot "env.example"
 }
 Copy-Item -LiteralPath $envExampleSrc -Destination (Join-Path $OutRoot "config/env.example")
+$steeringProfiles = Join-Path $RepoRoot "config/query_steering_profiles.json"
+if (Test-Path $steeringProfiles) {
+    Copy-Item -LiteralPath $steeringProfiles -Destination (Join-Path $OutRoot "config/query_steering_profiles.json")
+}
 
 if (-not $SkipModels) {
     Write-Step "Copying bundled models (this may take a while)"

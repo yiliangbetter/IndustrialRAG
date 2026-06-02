@@ -55,8 +55,12 @@ async def _async_main() -> None:
         type=Path,
         default=_ROOT / "docs" / "merged_pre_rerank_chunk_ids.txt",
     )
-    p.add_argument("query", nargs="?", default="四种封边机的电控板的保养周期分别是多久")
+    p.add_argument("query", nargs="?", default=None)
     args = p.parse_args()
+
+    query = (args.query or os.getenv("DUMP_QUERY_DEFAULT") or "").strip()
+    if not query:
+        p.error("QUERY is required (or set env DUMP_QUERY_DEFAULT)")
 
     _install_merge_hook(args.out.expanduser().resolve())
 
@@ -74,7 +78,7 @@ async def _async_main() -> None:
     pod.mkdir(parents=True, exist_ok=True)
 
     rag, _, _ = await rpc._build_rag(wd, pod)
-    await rag.lightrag.aquery_data(args.query.strip(), QueryParam(mode="mix"))
+    await rag.lightrag.aquery_data(query, QueryParam(mode="mix"))
     await rag.finalize_storages()
 
     print(f"Wrote merged pre-rerank chunk ids to: {args.out.as_posix()}", flush=True)

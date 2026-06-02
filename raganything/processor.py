@@ -22,6 +22,8 @@ from raganything.utils import (
     insert_text_content_with_multimodal_content,
     get_processor_for_type,
     _join_caption_field,
+    resolve_image_caption,
+    resolve_image_footnote,
 )
 import asyncio
 from lightrag.utils import compute_mdhash_id
@@ -267,12 +269,8 @@ class ProcessorMixin:
             if block_type == "image":
                 img_path = (item.get("img_path") or "").strip()
                 if img_path:
-                    caption = _join_caption_field(
-                        item.get("image_caption", item.get("img_caption", ""))
-                    )
-                    footnote = _join_caption_field(
-                        item.get("image_footnote", item.get("img_footnote", ""))
-                    )
+                    caption = resolve_image_caption(items, idx)
+                    footnote = resolve_image_footnote(items, idx)
                     page_idx = item.get("page_idx")
                     context = context_text_for_image(items, idx)
                     parts.append(
