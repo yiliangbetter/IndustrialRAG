@@ -146,6 +146,142 @@ def resolve_machine_profile(query: str) -> dict[str, Any] | None:
     return best[1] if best else None
 
 
+_CATALOG_MODEL_MARKER = "本手册适用产品型号"
+_EDGE_BAND_CATALOG_PATH_HINTS = (
+    "封边机",
+    "自动封边机",
+    "双端封边机",
+    "高速自动",
+    "高速智能",
+    "连线项目",
+)
+
+
+def is_catalog_product_model_query(query: str) -> bool:
+    """Broad product-line / model-count questions (not single-machine maintenance)."""
+    if resolve_machine_profile(query):
+        return False
+    q = (query or "").strip()
+    if not q:
+        return False
+    if re.search(r"型号|机型|产品", q) and re.search(
+        r"哪些|多少|一共|总共|全部|有哪些|几种|列举|清单|概况|多少个",
+        q,
+    ):
+        return True
+    if re.search(r"一共有多少|多少种", q) and re.search(r"型号|封边机", q):
+        return True
+    return False
+
+
+def _default_min_rerank_score() -> float:
+    raw = os.getenv("MIN_RERANK_SCORE") or "0.28"
+    try:
+        return float(raw)
+    except ValueError:
+        return 0.28
+
+
+def catalog_query_min_rerank_score() -> float:
+    raw = os.getenv("RAG_CATALOG_QUERY_MIN_RERANK_SCORE") or "0.0"
+    try:
+        return max(0.0, float(raw))
+    except ValueError:
+        return 0.0
+
+
+def _catalog_path_allowed(path: str) -> bool:
+    if not path:
+        return False
+    if any(
+        token in path
+        for token in ("六面钻", "加工中心", "PC封边机电气", "电气报警")
+    ):
+        return False
+    return any(hint in path for hint in _EDGE_BAND_CATALOG_PATH_HINTS)
+
+
+def _chunk_has_catalog_marker(doc: dict) -> bool:
+    return _CATALOG_MODEL_MARKER in str(doc.get("content") or "")
+
+
+def _load_catalog_chunks_from_storage() -> list[dict]:
+    try:
+        from client_paths import get_rag_storage_dir  # noqa: WPS433
+
+        store = get_rag_storage_dir()
+    except Exception:
+        store = _ROOT / "data" / "rag_storage"
+    path = Path(store) / "kv_store_text_chunks.json"
+    if not path.is_file():
+        return []
+    try:
+        raw = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError):
+        return []
+    if not isinstance(raw, dict):
+        return []
+    out: list[dict] = []
+    for chunk_id, row in raw.items():
+        if not isinstance(row, dict):
+            continue
+        content = str(row.get("content") or "")
+        if _CATALOG_MODEL_MARKER not in content:
+            continue
+        doc = dict(row)
+        doc.setdefault("content", content)
+        doc.setdefault("id", chunk_id)
+        out.append(doc)
+    return out
+
+
+def supplement_catalog_product_model_chunks(
+    query: str,
+    docs: list[dict],
+    *,
+    rerank_pool: list[dict] | None = None,
+) -> list[dict]:
+    """Ensure each edge-band manual's 「本手册适用产品型号」 chunk is present."""
+    if not _env_bool("RAG_CATALOG_QUERY_BOOST", True):
+        return docs
+    if not is_catalog_product_model_query(query):
+        return docs
+
+    seen_paths: set[str] = set()
+    merged: list[dict] = []
+
+    def add_doc(doc: dict) -> None:
+        path = _doc_path(doc)
+        if not path or path in seen_paths:
+            return
+        if not _chunk_has_catalog_marker(doc) or not _catalog_path_allowed(path):
+            return
+        seen_paths.add(path)
+        boosted = dict(doc)
+        boosted["rerank_score"] = max(float(boosted.get("rerank_score") or 0), 0.99)
+        merged.append(boosted)
+
+    for doc in docs:
+        add_doc(doc)
+    for doc in rerank_pool or []:
+        add_doc(doc)
+    for doc in _load_catalog_chunks_from_storage():
+        add_doc(doc)
+
+    if not merged:
+        return docs
+    return merged + [d for d in docs if _doc_path(d) not in seen_paths]
+
+
+def _stash_catalog_boost_stats(count: int) -> None:
+    if count <= 0:
+        return
+    prev = _last_filter_report.get()
+    payload = dict(prev) if isinstance(prev, dict) else {}
+    payload["catalog_boost"] = {"chunks_added": count}
+    _last_filter_report.set(payload)
+
+
 def active_deny_substrings(query: str) -> tuple[list[str], dict[str, Any] | None]:
     if not _env_bool("RAG_QUERY_DOC_FILTER", True):
         return [], None
@@ -448,12 +584,26 @@ def build_steering_user_prompt(query: str) -> str:
     return " ".join(parts)
 
 
+def build_catalog_model_listing_prompt(query: str) -> str:
+    if not is_catalog_product_model_query(query):
+        return ""
+    return (
+        "用户询问封边机产品线型号总览：请按每本维护保养手册分别列出"
+        "「本手册适用产品型号」中的全部型号；须包含高速智能封边机（连线项目手册，"
+        "如 NB9-Smart、NB10-Smart）以及自动/双端/高速自动各册型号，"
+        "不得只汇总其中几本手册。"
+    )
+
+
 def build_user_prompt_for_query(query: str) -> str:
     """Merge answer-fidelity rules and profile steering for LightRAG."""
     parts: list[str] = []
     fidelity = build_answer_fidelity_user_prompt(query)
     if fidelity:
         parts.append(fidelity)
+    catalog = build_catalog_model_listing_prompt(query)
+    if catalog:
+        parts.append(catalog)
     steer = build_steering_user_prompt(query)
     if steer:
         parts.append(steer)
@@ -477,11 +627,58 @@ def install_doc_filter_on_rerank() -> None:
         docs = await orig(
             query, retrieved_docs, global_config, enable_rerank, top_n
         )
+        before = len(docs)
+        docs = supplement_catalog_product_model_chunks(
+            query, docs, rerank_pool=docs
+        )
+        if len(docs) > before:
+            _stash_catalog_boost_stats(len(docs) - before)
         kept, _report = filter_retrieved_docs_with_report(query, docs)
         return kept
 
     _wrapped._doc_filter_wrapped = True  # type: ignore[attr-defined]
     ut.apply_rerank_if_enabled = _wrapped  # type: ignore[method-assign]
+
+
+def install_catalog_rerank_threshold() -> None:
+    """Lower ``min_rerank_score`` for product-line catalog queries."""
+    import lightrag.utils as ut
+
+    orig = ut.process_chunks_unified
+    if getattr(orig, "_catalog_rerank_wrapped", False):
+        return
+
+    async def _wrapped(
+        query: str,
+        unique_chunks: list[dict],
+        query_param: Any,
+        global_config: dict,
+        source_type: str = "mixed",
+        chunk_token_limit: int | None = None,
+    ):
+        prev_min: float | None = None
+        if is_catalog_product_model_query(query) and _env_bool(
+            "RAG_CATALOG_QUERY_RERANK", True
+        ):
+            prev_min = float(
+                global_config.get("min_rerank_score", _default_min_rerank_score())
+            )
+            global_config["min_rerank_score"] = catalog_query_min_rerank_score()
+        try:
+            return await orig(
+                query,
+                unique_chunks,
+                query_param,
+                global_config,
+                source_type,
+                chunk_token_limit,
+            )
+        finally:
+            if prev_min is not None:
+                global_config["min_rerank_score"] = prev_min
+
+    _wrapped._catalog_rerank_wrapped = True  # type: ignore[attr-defined]
+    ut.process_chunks_unified = _wrapped  # type: ignore[method-assign]
 
 
 def install_kg_file_path_filter() -> None:
@@ -517,4 +714,5 @@ def install_kg_file_path_filter() -> None:
 def install_query_steering_hooks() -> None:
     """Chunk + KG file_path filters for steered queries (idempotent)."""
     install_doc_filter_on_rerank()
+    install_catalog_rerank_threshold()
     install_kg_file_path_filter()
