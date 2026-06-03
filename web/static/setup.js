@@ -50,21 +50,34 @@ let engineLoadBusy = false;
 let ragEnsurePromise = null;
 let multimodalSyncBusy = false;
 
-const ENV_SAVE_STEPS = [
-  { label: "保存配置到本地…", log: "写入 config/.env", pct: 12 },
-  { label: "应用环境变量…", log: "设置 HF 模型路径与工作目录", pct: 28 },
-  { label: "加载向量模型 (bge-m3)…", log: "从本地缓存加载 embedding 模型（首次较慢）", pct: 52 },
-  { label: "加载 Rerank 模型…", log: "从本地缓存加载 reranker 模型", pct: 72 },
-  { label: "初始化 RAG 引擎…", log: "构建 LightRAG 实例并挂载存储", pct: 88 },
-];
+function envFieldValue(name, fallback = "") {
+  const el = envForm?.querySelector(`[name="${name}"]`);
+  return (el?.value || fallback).trim();
+}
 
-const RAG_RELOAD_STEPS = [
-  { label: "重新读取配置…", log: "加载 config/.env", pct: 18 },
-  { label: "卸载旧引擎实例…", log: "释放上一轮 RAG 资源", pct: 32 },
-  { label: "加载向量模型 (bge-m3)…", log: "从本地缓存加载 embedding 模型", pct: 55 },
-  { label: "加载 Rerank 模型…", log: "从本地缓存加载 reranker 模型", pct: 74 },
-  { label: "初始化 RAG 引擎…", log: "构建 LightRAG 实例", pct: 90 },
-];
+function buildEnvSaveSteps() {
+  const embed = latestStatus?.embedding_model || envFieldValue("EMBEDDING_MODEL", "BAAI/bge-m3");
+  const rerank = latestStatus?.rerank_model || envFieldValue("RERANK_MODEL", "BAAI/bge-reranker-base");
+  return [
+    { label: "保存配置到本地…", log: "写入 config/.env", pct: 12 },
+    { label: "应用环境变量…", log: "设置 HF 模型路径与工作目录", pct: 28 },
+    { label: `加载向量模型 (${embed})…`, log: "从本地缓存加载 embedding 模型（首次较慢）", pct: 52 },
+    { label: `加载 Rerank 模型 (${rerank})…`, log: "从本地缓存加载 reranker 模型", pct: 72 },
+    { label: "初始化 RAG 引擎…", log: "构建 LightRAG 实例并挂载存储", pct: 88 },
+  ];
+}
+
+function buildRagReloadSteps() {
+  const embed = latestStatus?.embedding_model || envFieldValue("EMBEDDING_MODEL", "BAAI/bge-m3");
+  const rerank = latestStatus?.rerank_model || envFieldValue("RERANK_MODEL", "BAAI/bge-reranker-base");
+  return [
+    { label: "重新读取配置…", log: "加载 config/.env", pct: 18 },
+    { label: "卸载旧引擎实例…", log: "释放上一轮 RAG 资源", pct: 32 },
+    { label: `加载向量模型 (${embed})…`, log: "从本地缓存加载 embedding 模型", pct: 55 },
+    { label: `加载 Rerank 模型 (${rerank})…`, log: "从本地缓存加载 reranker 模型", pct: 74 },
+    { label: "初始化 RAG 引擎…", log: "构建 LightRAG 实例", pct: 90 },
+  ];
+}
 
 const STEP_LABELS = [
   "LLM 配置",
@@ -181,6 +194,40 @@ async function refreshStatus() {
   renderCheckList(checkRuntime, latestStatus.runtime_deps || []);
   renderCheckList(checkModels, latestStatus.bundled_models || []);
 
+  const configItems = [
+    {
+      ok: Boolean(latestStatus.env?.ok),
+      label: latestStatus.env?.ok
+        ? "LLM 配置已保存"
+        : latestStatus.env?.message || "LLM 配置未保存",
+    },
+    {
+      ok: Boolean(latestStatus.llm_model),
+      label: latestStatus.llm_model
+        ? `文本 LLM：${latestStatus.llm_model}（LLM_MODEL）`
+        : "文本 LLM：未配置",
+    },
+    {
+      ok: Boolean(latestStatus.embedding_model),
+      label: latestStatus.embedding_model
+        ? `向量模型：${latestStatus.embedding_model}（EMBEDDING_MODEL / ${latestStatus.embedding_backend || "hf"}）`
+        : "向量模型：未配置",
+    },
+    {
+      ok: Boolean(latestStatus.rerank_model),
+      label: latestStatus.rerank_model
+        ? `Rerank：${latestStatus.rerank_model}（RERANK_MODEL / ${latestStatus.rerank_binding || "hf"}）`
+        : "Rerank：未配置",
+    },
+    {
+      ok: Boolean(latestStatus.rag_query_mode),
+      label: `默认 RAG 模式：${latestStatus.rag_query_mode || "mix"}（RAG_QUERY_MODE）`,
+    },
+    {
+      ok: Boolean(latestStatus.hf_home_effective),
+      label: `HF 模型缓存：${latestStatus.hf_home_effective || latestStatus.models_dir || "—"}`,
+    },
+  ];
   const langItems = [
     {
       ok: Boolean(latestStatus.chinese_ingest),
@@ -203,7 +250,7 @@ async function refreshStatus() {
         : "多模态灌库：关闭（仅文本，更快）",
     },
   ];
-  if (checkLanguage) renderCheckList(checkLanguage, langItems);
+  if (checkLanguage) renderCheckList(checkLanguage, [...configItems, ...langItems]);
 
   if (setupSubtitle) {
     setupSubtitle.textContent = latestStatus.setup_complete
@@ -223,10 +270,30 @@ async function refreshStatus() {
 
   if (kbSummary) {
     const kb = latestStatus.knowledge_base || {};
-    const hasKb = Boolean(latestStatus.knowledge_base_ok || latestStatus.kb_partial);
-    if (hasKb) {
+    const success = kb.success_count ?? latestStatus.kb_success_count ?? 0;
+    const failed = kb.failed_count ?? latestStatus.kb_failed_count ?? 0;
+    const hasUsableKb = Boolean(latestStatus.knowledge_base_ok);
+    const hasPartialKb = Boolean(latestStatus.kb_partial && success > 0);
+    const hasFailedOnly = failed > 0 && success === 0;
+
+    if (success > 0 && failed > 0) {
+      const failedNames = (kb.failed_docs || [])
+        .map((d) => d.name || d.file_path)
+        .filter(Boolean)
+        .join("、");
+      kbSummary.className = "kb-summary warn error";
+      kbSummary.innerHTML = `<strong>当前知识库：</strong>已成功 ${success} 篇，<strong>${failed} 篇失败</strong>。${
+        failedNames ? `失败文件：${escapeAttr(failedNames)}。` : ""
+      }请查看灌库日志后追加灌库重试失败文件。`;
+    } else if (hasFailedOnly) {
+      kbSummary.className = "kb-summary warn error";
+      kbSummary.innerHTML = `<strong>当前知识库：</strong>${kb.message || "灌库失败"}。请检查 LLM 配额或配置后重新灌库。`;
+    } else if (hasUsableKb || hasPartialKb) {
       kbSummary.className = "kb-summary warn";
       kbSummary.innerHTML = `<strong>当前知识库：</strong>${kb.message || "已有数据"}。添加新文档请点「追加灌库」；整批重灌请点「重新灌库」。`;
+    } else if (latestStatus.kb_partial) {
+      kbSummary.className = "kb-summary warn error";
+      kbSummary.innerHTML = `<strong>当前知识库：</strong>${kb.message || "索引未完成"}。请清空后重新灌库。`;
     } else {
       kbSummary.className = "kb-summary ok";
       kbSummary.innerHTML = `<strong>当前知识库：</strong>空。保存配置后将按 <code>${escapeAttr(latestStatus.ingest_language || "Chinese")}</code> 生成图谱。`;
@@ -234,7 +301,14 @@ async function refreshStatus() {
   }
 
   if (btnClearKb) {
-    const hasKb = Boolean(latestStatus.knowledge_base_ok || latestStatus.kb_partial);
+    const kb = latestStatus.knowledge_base || {};
+    const hasKb = Boolean(
+      latestStatus.knowledge_base_ok ||
+        latestStatus.kb_partial ||
+        (kb.success_count ?? 0) > 0 ||
+        (kb.failed_count ?? 0) > 0 ||
+        (kb.doc_count ?? 0) > 0
+    );
     btnClearKb.disabled = ingestBusy || engineLoadBusy || !hasKb;
     btnClearKb.title = hasKb
       ? "仅清空知识库，不上传文件"
@@ -274,21 +348,24 @@ async function refreshStatus() {
 }
 
 function formatKbFinishText(status) {
-  const unique = status.kb_unique_doc_count || status.kb_doc_count || 0;
-  const total = status.kb_doc_count || unique;
-  if (unique > 0 && total > unique) {
-    return `知识库已灌库（${unique} 个 PDF，索引记录 ${total} 条）`;
-  }
-  return `知识库已灌库（${unique} 篇文档）`;
+  const ok = status.kb_success_count ?? status.kb_unique_doc_count ?? status.kb_doc_count ?? 0;
+  return `知识库已灌库（${ok} 篇文档）`;
 }
 
 function formatKbPartialText(status) {
-  const unique = status.kb_unique_doc_count || status.kb_doc_count || 0;
-  const total = status.kb_doc_count || unique;
-  if (unique > 0 && total > unique) {
-    return `知识库未完成灌库（${total} 条残留记录 / ${unique} 个 PDF，需清空后重灌）`;
+  const ok = status.kb_success_count ?? 0;
+  const fail = status.kb_failed_count ?? 0;
+  if (ok > 0 && fail > 0) {
+    return `知识库部分完成（成功 ${ok} 篇，失败 ${fail} 篇，请查看灌库日志后追加重试）`;
   }
-  return `知识库未完成灌库（${total} 篇残留，需重新灌库）`;
+  if (fail > 0 && ok === 0) {
+    return `知识库灌库失败（${fail} 篇均未成功，请检查配置后重灌）`;
+  }
+  const total = status.kb_doc_count ?? ok;
+  if (ok > 0 && total > ok) {
+    return `知识库未完成灌库（${total} 条残留记录 / ${ok} 个 PDF，需清空后重灌）`;
+  }
+  return `知识库未完成灌库（请重新灌库）`;
 }
 
 function syncIngestUiWithServer() {
@@ -323,7 +400,7 @@ async function ensureRagReady() {
     updateIngestControls();
     try {
       const data = await runStagedProgressTask({
-        steps: RAG_RELOAD_STEPS,
+        steps: buildRagReloadSteps(),
         progressEl: ragLoadProgress,
         barEl: ragLoadProgressBar,
         labelEl: ragLoadProgressLabel,
@@ -354,7 +431,12 @@ async function ensureRagReady() {
 }
 
 function knowledgeBaseHasData() {
-  return Boolean(latestStatus?.knowledge_base_ok || latestStatus?.kb_partial);
+  const kb = latestStatus?.knowledge_base || {};
+  return Boolean(
+    latestStatus?.knowledge_base_ok ||
+      (kb.success_count > 0 && kb.chunk_count > 0) ||
+      latestStatus?.kb_partial
+  );
 }
 
 function updateIngestControls() {
@@ -456,7 +538,7 @@ envForm.addEventListener("submit", async (e) => {
 
   try {
     const data = await runStagedProgressTask({
-      steps: ENV_SAVE_STEPS,
+      steps: buildEnvSaveSteps(),
       progressEl: envLoadProgress,
       barEl: envLoadProgressBar,
       labelEl: envLoadProgressLabel,
@@ -502,7 +584,7 @@ btnReloadRag.addEventListener("click", async () => {
 
   try {
     await runStagedProgressTask({
-      steps: RAG_RELOAD_STEPS,
+      steps: buildRagReloadSteps(),
       progressEl: ragLoadProgress,
       barEl: ragLoadProgressBar,
       labelEl: ragLoadProgressLabel,
@@ -584,7 +666,7 @@ async function applyMultimodalSetting(enabled) {
   }
   try {
     await runStagedProgressTask({
-      steps: RAG_RELOAD_STEPS,
+      steps: buildRagReloadSteps(),
       progressEl: ragLoadProgress,
       barEl: ragLoadProgressBar,
       labelEl: ragLoadProgressLabel,
@@ -704,12 +786,19 @@ async function startIngest({ clearFirst = false } = {}) {
     });
     if (data.cancelled) {
       ingestStatus.textContent = "已停止灌库并清空知识库";
+      ingestStatus.className = "hint error";
       pendingFiles = [];
+    } else if (data.fail > 0) {
+      ingestStatus.className = "hint error";
+      ingestStatus.textContent =
+        data.ok > 0
+          ? `灌库完成：成功 ${data.ok} 篇，失败 ${data.fail} 篇（失败原因见下方日志）`
+          : `灌库失败：${data.fail} 篇均未成功（详见下方日志）`;
+      if (ingestProgressBar) ingestProgressBar.classList.add("error");
     } else {
-      ingestStatus.textContent = `完成：成功 ${data.ok}，失败 ${data.fail}`;
-      if (data.fail === 0) {
-        pendingFiles = [];
-      }
+      ingestStatus.className = "hint status-ok";
+      ingestStatus.textContent = `灌库完成：成功 ${data.ok} 篇`;
+      pendingFiles = [];
     }
     await refreshStatus();
   } catch (err) {

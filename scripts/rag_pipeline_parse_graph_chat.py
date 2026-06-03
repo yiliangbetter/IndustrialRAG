@@ -99,6 +99,87 @@ def _doc_status_file_path(meta: Any) -> str | None:
     return None
 
 
+_DOC_SUCCESS_STATUSES = frozenset({"processed", "completed", "done"})
+_DOC_FAILURE_STATUSES = frozenset({"failed", "error"})
+
+
+def _normalize_doc_status(raw: Any) -> str:
+    """LightRAG may return DocStatus enum; str() becomes ``docstatus.processed``."""
+    if raw is None:
+        return ""
+    val = getattr(raw, "value", None)
+    if isinstance(val, str) and val.strip():
+        return val.strip().lower()
+    text = str(raw).strip().lower()
+    if "." in text:
+        text = text.rsplit(".", 1)[-1]
+    return text
+
+
+async def _lookup_doc_status_meta(rag, rel: str, doc_id: str) -> Any | None:
+    lightrag = getattr(rag, "lightrag", None)
+    if lightrag is None:
+        return None
+    doc_status = getattr(lightrag, "doc_status", None)
+    if doc_status is None:
+        return None
+
+    meta = None
+    try:
+        meta = await doc_status.get_by_id(doc_id)
+    except Exception:
+        meta = None
+    if meta:
+        return meta
+
+    target = Path(rel).name
+    page = 1
+    while True:
+        rows, total = await doc_status.get_docs_paginated(
+            page=page, page_size=200, sort_field="updated_at", sort_direction="desc"
+        )
+        if not rows:
+            break
+        for did, row_meta in rows:
+            if did == doc_id:
+                return row_meta
+            fp = _doc_status_file_path(row_meta)
+            if fp == rel or (fp and Path(fp).name == target):
+                return row_meta
+        if page * 200 >= total:
+            break
+        page += 1
+    return None
+
+
+async def _verify_doc_ingest_outcome(rag, rel: str, doc_id: str) -> tuple[bool, str]:
+    """Confirm LightRAG finished indexing; insert may return before extract fails."""
+    meta = await _lookup_doc_status_meta(rag, rel, doc_id)
+    if meta is None:
+        return False, "灌库后未找到文档状态记录"
+
+    if isinstance(meta, dict):
+        status = _normalize_doc_status(meta.get("status"))
+        err = str(meta.get("error_msg") or meta.get("error") or "").strip()
+        chunks = int(meta.get("chunks_count") or 0)
+    else:
+        status = _normalize_doc_status(getattr(meta, "status", None))
+        err = str(
+            getattr(meta, "error_msg", None) or getattr(meta, "error", None) or ""
+        ).strip()
+        chunks = int(getattr(meta, "chunks_count", 0) or 0)
+
+    if status in _DOC_FAILURE_STATUSES:
+        return False, err or "知识图谱抽取失败（文档状态：failed）"
+    if status in _DOC_SUCCESS_STATUSES:
+        if chunks <= 0:
+            return False, err or "文档已标记完成但未生成任何分块"
+        return True, ""
+    if status in ("processing", "pending", "handling"):
+        return False, err or f"文档仍处于处理中（{status}），可能 LLM 配额不足或抽取中断"
+    return False, err or f"未知文档状态：{status or 'empty'}"
+
+
 async def _remove_existing_docs_for_file(rag, rel: str) -> int:
     """Replace prior index rows that share the same uploaded filename."""
     lightrag = getattr(rag, "lightrag", None)
@@ -432,6 +513,9 @@ async def _ingest_folder(
                 doc_id=doc_id,
                 skip_multimodal_processing=skip_multimodal,
             )
+            ingest_ok, ingest_err = await _verify_doc_ingest_outcome(rag, rel, doc_id)
+            if not ingest_ok:
+                raise RuntimeError(ingest_err or "灌库未完成")
             ok += 1
             logger.info(f"INGEST_FILE_OK::{rel}")
             await _emit({"type": "file_ok", "file": rel, "current": idx, "total": total})
@@ -440,6 +524,7 @@ async def _ingest_folder(
             logger.error(f"INGEST_FILE_FAIL::{fp}: {e}")
             fail += 1
             errors.append({"file": rel, "error": err})
+            await _emit({"type": "log", "message": f"✗ 灌库失败：{rel}\n  {err}"})
             await _emit(
                 {
                     "type": "file_fail",

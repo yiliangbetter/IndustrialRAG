@@ -645,14 +645,27 @@ btnIngest.addEventListener("click", async () => {
     });
     if (data.cancelled) {
       ingestStatus.textContent = "已停止灌库并清空知识库";
+      ingestStatus.className = "hint error";
       appendMessage("system", "灌库已停止，知识库已清空。");
       pendingFiles = [];
+    } else if (data.fail > 0) {
+      ingestStatus.className = "hint error";
+      ingestStatus.textContent =
+        data.ok > 0
+          ? `灌库完成：成功 ${data.ok} 篇，失败 ${data.fail} 篇（详见下方日志）`
+          : `灌库失败：${data.fail} 篇均未成功（详见下方日志）`;
+      if (ingestProgressBar) ingestProgressBar.classList.add("error");
+      appendMessage(
+        "system",
+        data.ok > 0
+          ? `灌库部分完成：成功 ${data.ok} 篇，失败 ${data.fail} 篇。`
+          : `灌库失败：${data.fail} 篇均未成功。`
+      );
     } else {
-      ingestStatus.textContent = `完成：成功 ${data.ok}，失败 ${data.fail}`;
-      appendMessage("system", `灌库完成：成功 ${data.ok} 个文件，失败 ${data.fail} 个。`);
-      if (data.fail === 0) {
-        pendingFiles = [];
-      }
+      ingestStatus.className = "hint status-ok";
+      ingestStatus.textContent = `灌库完成：成功 ${data.ok} 篇`;
+      appendMessage("system", `灌库完成：成功 ${data.ok} 篇。`);
+      pendingFiles = [];
     }
     renderFileList();
   } catch (err) {

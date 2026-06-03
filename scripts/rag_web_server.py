@@ -678,6 +678,9 @@ async def api_query(body: QueryBody):
             parts.append(chunk)
         raw = "".join(parts)
     thinking, answer = parse_complete_cot(raw or "")
+    from query_doc_steering import strip_manual_circled_step_markers  # noqa: WPS433
+
+    answer = strip_manual_circled_step_markers(answer)
     dump_path = _persist_query_debug_dump(
         query=q,
         mode=mode,
@@ -702,6 +705,7 @@ async def _query_stream_events(q: str, mode: str) -> AsyncIterator[str]:
     _scripts_dir = _ROOT / "scripts"
     if str(_scripts_dir) not in sys.path:
         sys.path.insert(0, str(_scripts_dir))
+    from query_doc_steering import strip_manual_circled_step_markers  # noqa: WPS433
     from query_progress_hooks import query_progress_hooks, set_query_media_roots, set_query_text_for_images  # noqa: WPS433
     from stream_cot_parser import StreamCotParser  # noqa: WPS433
 
@@ -806,14 +810,18 @@ async def _query_stream_events(q: str, mode: str) -> AsyncIterator[str]:
                             thinking_parts.append(piece)
                             yield _sse({"type": "thinking_delta", "text": piece})
                         else:
+                            piece = strip_manual_circled_step_markers(piece)
                             answer_parts.append(piece)
                             yield _sse({"type": "answer_delta", "text": piece})
+                    final_answer = strip_manual_circled_step_markers(
+                        "".join(answer_parts).strip()
+                    )
                     dump_path = _persist_query_debug_dump(
                         query=q,
                         mode=mode,
                         parser_root=parser_root,
                         thinking="".join(thinking_parts).strip(),
-                        answer="".join(answer_parts).strip(),
+                        answer=final_answer,
                         duration_ms=int((time.perf_counter() - started) * 1000),
                     )
                     if dump_path is not None:

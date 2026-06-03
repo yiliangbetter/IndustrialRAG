@@ -153,14 +153,20 @@ async function streamIngest(opts) {
         return;
       }
       if (ev.type === "file_fail") {
-        appendIngestLog(logEl, `✗ 失败：${ev.file}\n  ${ev.error || ""}`);
+        const errText = ev.error || "灌库失败";
+        appendIngestLog(logEl, `✗ 失败：${ev.file}\n  ${errText}`);
+        if (statusEl) {
+          statusEl.textContent = `✗ ${ev.file}：${errText}`;
+          statusEl.className = "hint error";
+        }
+        if (progressBarEl) progressBarEl.classList.add("error");
         setIngestProgress(
           progressEl,
           progressBarEl,
           progressLabelEl,
           ev.current || 0,
           ev.total || files.length,
-          `失败 ${ev.current}/${ev.total}`
+          `失败 ${ev.current}/${ev.total}：${ev.file}`
         );
         return;
       }
@@ -190,15 +196,34 @@ async function streamIngest(opts) {
       }
       if (ev.type === "done") {
         result = { ok: ev.ok ?? 0, fail: ev.fail ?? 0, errors: ev.errors || [], cancelled: false };
+        const label =
+          result.fail > 0
+            ? result.ok > 0
+              ? `完成：成功 ${result.ok} 篇，失败 ${result.fail} 篇`
+              : `灌库失败：${result.fail} 篇均未成功`
+            : `灌库完成：成功 ${result.ok} 篇`;
         setIngestProgress(
           progressEl,
           progressBarEl,
           progressLabelEl,
           files.length,
           files.length,
-          `完成：成功 ${result.ok}，失败 ${result.fail}`
+          label
         );
-        appendIngestLog(logEl, `—— 灌库结束：成功 ${result.ok}，失败 ${result.fail} ——`);
+        if (result.fail > 0) {
+          if (progressBarEl) progressBarEl.classList.add("error");
+          if (statusEl) {
+            statusEl.textContent =
+              result.ok > 0
+                ? `灌库完成：成功 ${result.ok} 篇，失败 ${result.fail} 篇（失败原因见下方日志）`
+                : `灌库失败：${result.fail} 篇均未成功（详见下方日志）`;
+            statusEl.className = "hint error";
+          }
+        } else if (statusEl) {
+          statusEl.textContent = `灌库完成：成功 ${result.ok} 篇`;
+          statusEl.className = "hint status-ok";
+        }
+        appendIngestLog(logEl, `—— ${label} ——`);
         if (result.errors?.length) {
           result.errors.forEach((e) => {
             appendIngestLog(logEl, `  ${e.file}: ${e.error}`);

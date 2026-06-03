@@ -251,6 +251,12 @@
   background: color-mix(in srgb, var(--danger) 6%, var(--bg-elevated));
 }
 
+.kb-summary.error {
+  border-color: color-mix(in srgb, var(--danger) 55%, var(--border));
+  background: color-mix(in srgb, var(--danger) 10%, var(--bg-elevated));
+  color: var(--danger, #c33);
+}
+
 .kb-summary.ok {
   border-color: color-mix(in srgb, var(--accent) 35%, var(--border));
 }

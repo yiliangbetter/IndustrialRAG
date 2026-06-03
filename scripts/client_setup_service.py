@@ -21,20 +21,8 @@ from client_paths import (
     read_setup_marker,
 )
 
-# Expected bundled HF hub folder names (under HF_HOME/hub/).
-BUNDLED_MODEL_SPECS: list[dict[str, Any]] = [
-    {
-        "id": "embedding",
-        "label": "向量模型 BAAI/bge-m3",
-        "hub_dir": "models--BAAI--bge-m3",
-        "weight_files": ("pytorch_model.bin", "model.safetensors"),
-    },
-    {
-        "id": "rerank",
-        "label": "Rerank 模型 BAAI/bge-reranker-base",
-        "hub_dir": "models--BAAI--bge-reranker-base",
-        "weight_files": ("pytorch_model.bin", "model.safetensors"),
-    },
+# Static bundled specs (MinerU). Embedding/rerank paths come from saved .env — see _bundled_model_specs().
+_STATIC_BUNDLED_SPECS: list[dict[str, Any]] = [
     {
         "id": "mineru",
         "label": "PDF 解析 MinerU (PDF-Extract-Kit-1.0)",
@@ -42,6 +30,92 @@ BUNDLED_MODEL_SPECS: list[dict[str, Any]] = [
         "weight_files": ("README.md",),
     },
 ]
+
+
+def _hf_hub_dir(repo_id: str) -> str:
+    """``BAAI/bge-m3`` → ``models--BAAI--bge-m3`` (HF hub cache folder name)."""
+    return "models--" + repo_id.strip().replace("/", "--")
+
+
+def _hub_cache_roots() -> list[Path]:
+    """HF hub cache directories to search (aligned with runtime HF_HOME resolution)."""
+    roots: list[Path] = []
+    seen: set[str] = set()
+
+    def add(path: Path | str | None) -> None:
+        if not path:
+            return
+        p = Path(path).expanduser()
+        try:
+            p = p.resolve()
+        except OSError:
+            p = p.absolute()
+        key = str(p)
+        if key in seen:
+            return
+        seen.add(key)
+        if p.is_dir():
+            roots.append(p)
+
+    data = load_env_dict()
+    hf_raw = (data.get("HF_HOME") or "").strip().strip('"').strip("'")
+    if hf_raw:
+        add(hf_raw)
+    add(resolve_hf_home_for_runtime())
+    add(get_models_dir())
+    dev_cache = get_app_root() / ".hf_cache"
+    if dev_cache.is_dir():
+        add(dev_cache)
+    return roots or [get_models_dir()]
+
+
+def _requires_local_hf_embedding() -> bool:
+    backend = (load_env_dict().get("EMBEDDING_BACKEND") or "hf").strip().lower()
+    return backend in ("hf", "local", "sentence_transformers")
+
+
+def _requires_local_hf_rerank() -> bool:
+    data = load_env_dict()
+    binding = (data.get("RERANK_BINDING") or "hf").strip().lower()
+    if binding in ("", "none", "off", "false", "0", "disabled"):
+        return False
+    return binding in ("hf", "local", "cross_encoder", "sentence_transformers")
+
+
+def _bundled_model_specs() -> list[dict[str, Any]]:
+    """Resolve embedding/rerank check targets from saved env (setup form values)."""
+    data = load_env_dict()
+    embedding = (data.get("EMBEDDING_MODEL") or "BAAI/bge-m3").strip()
+    rerank = (data.get("RERANK_MODEL") or "BAAI/bge-reranker-base").strip()
+    rerank_binding = (data.get("RERANK_BINDING") or "hf").strip().lower()
+    specs: list[dict[str, Any]] = [
+        {
+            "id": "embedding",
+            "label": f"向量模型 {embedding}",
+            "hub_dir": _hf_hub_dir(embedding),
+            "weight_files": ("pytorch_model.bin", "model.safetensors"),
+            "requires_local": _requires_local_hf_embedding(),
+            "remote_binding": (data.get("EMBEDDING_BACKEND") or "hf").strip().lower(),
+        },
+        {
+            "id": "rerank",
+            "label": f"Rerank 模型 {rerank}",
+            "hub_dir": _hf_hub_dir(rerank),
+            "weight_files": ("pytorch_model.bin", "model.safetensors"),
+            "requires_local": _requires_local_hf_rerank(),
+            "remote_binding": rerank_binding,
+        },
+        *_STATIC_BUNDLED_SPECS,
+    ]
+    for spec in specs:
+        if spec.get("requires_local") is not False:
+            continue
+        binding = spec.get("remote_binding") or "api"
+        if spec["id"] == "embedding":
+            spec["label"] = f"向量模型 {embedding}（{binding} API，无需本地缓存）"
+        elif spec["id"] == "rerank":
+            spec["label"] = f"Rerank 模型 {rerank}（{binding} API，无需本地缓存）"
+    return specs
 
 
 def resolve_multimodal_enabled() -> bool:
@@ -98,12 +172,20 @@ def check_runtime_deps() -> list[dict[str, Any]]:
 
 
 def check_bundled_models() -> list[dict[str, Any]]:
-    candidates = [get_models_dir()]
-    dev_cache = get_app_root() / ".hf_cache"
-    if dev_cache.is_dir() and dev_cache not in candidates:
-        candidates.append(dev_cache)
+    candidates = _hub_cache_roots()
     rows: list[dict[str, Any]] = []
-    for spec in BUNDLED_MODEL_SPECS:
+    for spec in _bundled_model_specs():
+        if spec.get("requires_local") is False:
+            rows.append(
+                {
+                    "id": spec["id"],
+                    "label": spec["label"],
+                    "ok": True,
+                    "path": "",
+                    "remote": True,
+                }
+            )
+            continue
         weight_files = tuple(spec.get("weight_files", ("pytorch_model.bin", "model.safetensors")))
         ok = False
         found_path = ""
@@ -112,12 +194,13 @@ def check_bundled_models() -> list[dict[str, Any]]:
                 ok = True
                 found_path = str(root / "hub" / spec["hub_dir"])
                 break
+        default_path = str(candidates[0] / "hub" / spec["hub_dir"])
         rows.append(
             {
                 "id": spec["id"],
                 "label": spec["label"],
                 "ok": ok,
-                "path": found_path or str(get_models_dir() / "hub" / spec["hub_dir"]),
+                "path": found_path or default_path,
             }
         )
     return rows
@@ -149,46 +232,126 @@ def _json_kv_entry_count(path: Path) -> int:
     return 0
 
 
-def _rag_storage_has_data(wd: Path) -> bool:
-    """True when KB has indexed chunks usable for retrieval.
+def _load_doc_status_map(wd: Path) -> dict[str, Any]:
+    path = wd / "kv_store_doc_status.json"
+    if not path.is_file() or path.stat().st_size <= 2:
+        return {}
+    try:
+        data = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError, UnicodeDecodeError):
+        return {}
+    return data if isinstance(data, dict) else {}
 
-    ``kv_store_full_docs.json`` alone may exist after partial / cancelled ingest;
-    require non-empty vector chunks as well.
-    """
-    if not wd.is_dir():
-        return False
-    doc_count = _json_kv_entry_count(wd / "kv_store_full_docs.json")
-    chunk_count = _json_kv_entry_count(wd / "vdb_chunks.json")
-    return doc_count > 0 and chunk_count > 0
+
+def _vector_chunk_count(wd: Path) -> int:
+    path = wd / "vdb_chunks.json"
+    if not path.is_file() or path.stat().st_size <= 2:
+        return 0
+    try:
+        data = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError, UnicodeDecodeError):
+        return 0
+    if isinstance(data, dict) and isinstance(data.get("data"), list):
+        return len(data["data"])
+    return _json_kv_entry_count(path)
+
+
+def _doc_status_display_name(meta: dict[str, Any], doc_id: str) -> str:
+    for key in ("file_path", "filepath", "source"):
+        val = meta.get(key)
+        if isinstance(val, str) and val.strip():
+            return val.replace("\\", "/").rsplit("/", 1)[-1]
+    return doc_id
+
+
+def _normalize_doc_status(raw: Any) -> str:
+    if raw is None:
+        return ""
+    val = getattr(raw, "value", None)
+    if isinstance(val, str) and val.strip():
+        return val.strip().lower()
+    text = str(raw).strip().lower()
+    if "." in text:
+        text = text.rsplit(".", 1)[-1]
+    return text
+
+
+def _rag_storage_has_data(wd: Path) -> bool:
+    """True when KB has successfully indexed chunks usable for retrieval."""
+    kb = _rag_storage_status(wd)
+    return kb["success_count"] > 0 and kb["chunk_count"] > 0
 
 
 def _rag_storage_status(wd: Path) -> dict[str, Any]:
-    doc_count = _json_kv_entry_count(wd / "kv_store_full_docs.json")
-    chunk_count = _json_kv_entry_count(wd / "vdb_chunks.json")
-    unique_docs = _unique_doc_paths(wd / "kv_store_full_docs.json")
-    ok = doc_count > 0 and chunk_count > 0
-    partial = doc_count > 0 and chunk_count == 0
-    if partial:
-        if unique_docs and unique_docs < doc_count:
-            message = (
-                f"检测到 {doc_count} 条文档记录（{unique_docs} 个不同 PDF），"
-                "但未完成向量索引（请清空后重新灌库）"
-            )
-        else:
-            message = f"检测到 {doc_count} 篇文档残留，但未完成向量索引（请重新灌库）"
+    doc_status = _load_doc_status_map(wd)
+    chunk_count = _vector_chunk_count(wd)
+    full_doc_count = _json_kv_entry_count(wd / "kv_store_full_docs.json")
+
+    success_docs: list[dict[str, str]] = []
+    failed_docs: list[dict[str, str]] = []
+    in_progress = 0
+
+    for doc_id, meta in doc_status.items():
+        if not isinstance(meta, dict):
+            continue
+        status = _normalize_doc_status(meta.get("status"))
+        name = _doc_status_display_name(meta, doc_id)
+        fp = meta.get("file_path") if isinstance(meta.get("file_path"), str) else ""
+        err = str(meta.get("error_msg") or meta.get("error") or "").strip()
+        entry = {"doc_id": doc_id, "name": name, "file_path": fp, "error": err}
+        if status in ("processed", "completed", "done"):
+            success_docs.append(entry)
+        elif status in ("failed", "error"):
+            failed_docs.append(entry)
+        elif status in ("processing", "pending", "handling"):
+            in_progress += 1
+
+    success_count = len(success_docs)
+    failed_count = len(failed_docs)
+    record_count = len(doc_status)
+
+    partial_index = full_doc_count > 0 and chunk_count == 0
+    has_failures = failed_count > 0 or in_progress > 0
+    ok = success_count > 0 and chunk_count > 0 and not has_failures
+    partial = partial_index or (success_count > 0 and has_failures) or (
+        success_count == 0 and (failed_count > 0 or in_progress > 0)
+    )
+
+    if success_count == 0 and failed_count == 0 and record_count == 0:
+        message = "尚未灌库"
+    elif partial_index and success_count == 0:
+        message = (
+            f"检测到 {full_doc_count} 条文档残留，但未完成向量索引（请清空后重新灌库）"
+        )
+    elif success_count > 0 and failed_count > 0:
+        message = (
+            f"已成功灌库 {success_count} 篇，{failed_count} 篇失败"
+            "（请查看灌库日志后追加灌库重试失败文件）"
+        )
+    elif failed_count > 0 and success_count == 0:
+        message = f"灌库失败 {failed_count} 篇（请检查 LLM 配额或配置后重试）"
+    elif in_progress > 0:
+        message = f"有 {in_progress} 篇文档仍在处理中，请稍候或查看日志"
     elif ok:
-        if unique_docs and unique_docs < doc_count:
-            message = f"已灌库 {unique_docs} 个 PDF（索引记录 {doc_count} 条，含重复灌库）"
-        else:
-            message = f"已灌库 {doc_count} 篇文档"
+        message = f"已成功灌库 {success_count} 篇文档"
+    elif success_count > 0 and chunk_count == 0:
+        message = f"已写入 {success_count} 篇文档记录，但向量索引未完成"
     else:
         message = "尚未灌库"
+
+    unique_success = len({d["name"] for d in success_docs if d.get("name")})
+
     return {
         "ok": ok,
         "partial": partial,
-        "doc_count": doc_count,
-        "unique_doc_count": unique_docs,
+        "success_count": success_count,
+        "failed_count": failed_count,
+        "in_progress_count": in_progress,
+        "doc_count": record_count or full_doc_count,
+        "unique_doc_count": unique_success or success_count,
         "chunk_count": chunk_count,
+        "success_docs": success_docs[:30],
+        "failed_docs": failed_docs[:30],
         "message": message,
     }
 
@@ -264,8 +427,10 @@ def get_setup_status() -> dict[str, Any]:
         "bundled_models_ok": models_ok,
         "knowledge_base_ok": kb_ok,
         "knowledge_base": kb,
-        "kb_doc_count": kb["doc_count"],
-        "kb_unique_doc_count": kb.get("unique_doc_count", kb["doc_count"]),
+        "kb_doc_count": kb["success_count"],
+        "kb_success_count": kb["success_count"],
+        "kb_failed_count": kb["failed_count"],
+        "kb_unique_doc_count": kb.get("unique_doc_count", kb["success_count"]),
         "kb_chunk_count": kb["chunk_count"],
         "kb_partial": kb["partial"],
         "ingest_language": summary_lang,
@@ -275,6 +440,11 @@ def get_setup_status() -> dict[str, Any]:
         "skip_multimodal": not multimodal_enabled,
         "vision_model": vision_model or None,
         "llm_model": (env_data.get("LLM_MODEL") or "").strip() or None,
+        "embedding_model": (env_data.get("EMBEDDING_MODEL") or "").strip() or None,
+        "embedding_backend": (env_data.get("EMBEDDING_BACKEND") or "").strip() or None,
+        "rerank_model": (env_data.get("RERANK_MODEL") or "").strip() or None,
+        "rerank_binding": (env_data.get("RERANK_BINDING") or "").strip() or None,
+        "rag_query_mode": (env_data.get("RAG_QUERY_MODE") or "").strip() or None,
         "python": sys.version.split()[0],
         "disk_free_gb": _disk_free_gb(get_app_root()),
         "can_enter_chat": env_status["ok"] and models_ok and deps_ok,

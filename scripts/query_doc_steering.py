@@ -22,6 +22,23 @@ _DEFAULT_PROFILES_PATH = _ROOT / "config" / "query_steering_profiles.json"
 _last_filter_report: ContextVar[dict[str, Any] | None] = ContextVar(
     "last_filter_report", default=None
 )
+_kg_filter_query: ContextVar[str | None] = ContextVar("kg_filter_query", default=None)
+
+_LIGHTRAG_SEP = "<SEP>"
+
+# Manual step markers (①②③ …) — strip in user-facing answers, keep wording.
+_CIRCLED_STEP_BEFORE_CJK = re.compile(
+    r"[①②③④⑤⑥⑦⑧⑨⑩⑪⑫⑬⑭⑮⑯⑰⑱⑲⑳"
+    r"❶❷❸❹❺❻❼❽❾❿"
+    r"](?=\s*[\u4e00-\u9fff])"
+)
+
+
+def strip_manual_circled_step_markers(text: str) -> str:
+    """Remove circled list prefixes (①…) before Chinese text in answers."""
+    if not text or not text.strip():
+        return text
+    return _CIRCLED_STEP_BEFORE_CJK.sub("", text)
 
 
 @dataclass
@@ -166,6 +183,147 @@ def _basename(path: str) -> str:
     return path.replace("\\", "/").rsplit("/", 1)[-1] if path else ""
 
 
+def _path_hits_deny(path: str, deny: list[str]) -> str | None:
+    if not path or not deny:
+        return None
+    hit = next((s for s in deny if s in path), None)
+    return hit
+
+
+def _split_sep_field(value: str) -> list[str]:
+    raw = (value or "").strip()
+    if not raw:
+        return []
+    if _LIGHTRAG_SEP in raw:
+        return [p.strip() for p in raw.split(_LIGHTRAG_SEP) if p.strip()]
+    return [raw]
+
+
+def _join_sep(parts: list[str]) -> str:
+    return _LIGHTRAG_SEP.join(p for p in parts if p)
+
+
+def _filter_sep_merged_kg_record(
+    record: dict[str, Any],
+    deny: list[str],
+    *,
+    path_key: str = "file_path",
+    text_key: str = "description",
+) -> dict[str, Any] | None:
+    """Keep only file_path / description segments that are not denied (LightRAG ``<SEP>`` merge)."""
+    paths = _split_sep_field(str(record.get(path_key) or ""))
+    texts = _split_sep_field(str(record.get(text_key) or ""))
+    if not paths:
+        return record
+
+    kept_paths: list[str] = []
+    kept_texts: list[str] = []
+    for i, path in enumerate(paths):
+        if _path_hits_deny(path, deny):
+            continue
+        kept_paths.append(path)
+        if i < len(texts):
+            kept_texts.append(texts[i])
+        elif len(texts) == 1:
+            kept_texts.append(texts[0])
+
+    if not kept_paths:
+        return None
+
+    out = dict(record)
+    out[path_key] = _join_sep(kept_paths)
+    if kept_texts:
+        out[text_key] = _join_sep(kept_texts)
+    elif texts:
+        out[text_key] = texts[0] if len(kept_paths) == 1 else _join_sep(texts[: len(kept_paths)])
+    return out
+
+
+def _relation_endpoints(relation: dict[str, Any]) -> tuple[str | None, str | None]:
+    if "src_tgt" in relation:
+        pair = relation.get("src_tgt") or (None, None)
+        return pair[0], pair[1]
+    return relation.get("src_id"), relation.get("tgt_id")
+
+
+def filter_kg_search_by_query(
+    query: str, search_result: dict[str, Any]
+) -> tuple[dict[str, Any], dict[str, Any] | None]:
+    """Drop or trim KG entities/relations from denied manuals when a steering profile matches."""
+    if not _env_bool("RAG_QUERY_KG_FILE_FILTER", True):
+        return search_result, None
+
+    deny, profile = active_deny_substrings(query)
+    if not deny or not profile:
+        return search_result, None
+
+    entities_in = list(search_result.get("final_entities") or [])
+    relations_in = list(search_result.get("final_relations") or [])
+
+    filtered_entities: list[dict[str, Any]] = []
+    dropped_entities: list[str] = []
+    trimmed_entities: list[str] = []
+
+    for ent in entities_in:
+        name = str(ent.get("entity_name") or "")
+        before = str(ent.get("description") or "")
+        kept = _filter_sep_merged_kg_record(ent, deny)
+        if kept is None:
+            if name:
+                dropped_entities.append(name)
+            continue
+        if kept.get("description") != before:
+            if name:
+                trimmed_entities.append(name)
+        filtered_entities.append(kept)
+
+    kept_names = {
+        str(e.get("entity_name") or "")
+        for e in filtered_entities
+        if e.get("entity_name")
+    }
+
+    filtered_relations: list[dict[str, Any]] = []
+    dropped_relations = 0
+    for rel in relations_in:
+        kept = _filter_sep_merged_kg_record(rel, deny)
+        if kept is None:
+            dropped_relations += 1
+            continue
+        e1, e2 = _relation_endpoints(kept)
+        if kept_names:
+            if (e1 and e1 not in kept_names) or (e2 and e2 not in kept_names):
+                dropped_relations += 1
+                continue
+        filtered_relations.append(kept)
+
+    out = dict(search_result)
+    out["final_entities"] = filtered_entities
+    out["final_relations"] = filtered_relations
+
+    stats = {
+        "active": True,
+        "machine_label": str(profile.get("label") or ""),
+        "entities_before": len(entities_in),
+        "entities_after": len(filtered_entities),
+        "relations_before": len(relations_in),
+        "relations_after": len(filtered_relations),
+        "dropped_entities": dropped_entities[:12],
+        "trimmed_entities": trimmed_entities[:12],
+        "dropped_relations": dropped_relations,
+    }
+    return out, stats
+
+
+def _stash_kg_filter_stats(stats: dict[str, Any] | None) -> None:
+    if not stats:
+        return
+    prev = _last_filter_report.get()
+    payload = dict(prev) if isinstance(prev, dict) else {}
+    payload["kg_filter"] = stats
+    _last_filter_report.set(payload)
+
+
 def filter_retrieved_docs_by_query(query: str, docs: list[dict]) -> list[dict]:
     kept, _report = filter_retrieved_docs_with_report(query, docs)
     return kept
@@ -214,7 +372,11 @@ def filter_retrieved_docs_with_report(
         kept_sources=[_basename(p) for p in kept_paths],
         removed_sources=removed,
     )
-    _last_filter_report.set(report.to_sse_payload())
+    payload = report.to_sse_payload()
+    prev = _last_filter_report.get()
+    if isinstance(prev, dict) and prev.get("kg_filter"):
+        payload["kg_filter"] = prev["kg_filter"]
+    _last_filter_report.set(payload)
     return kept, report
 
 
@@ -222,6 +384,22 @@ def consume_filter_report() -> dict[str, Any] | None:
     report = _last_filter_report.get()
     _last_filter_report.set(None)
     return report
+
+
+def build_maintenance_section_fidelity_prompt(query: str) -> str:
+    """When the user asks what to add/do for a named maintenance item, anchor on section body."""
+    if not _env_bool("RAG_QUERY_SECTION_FIDELITY", True):
+        return ""
+    q = (query or "").strip()
+    if not q or not re.search(r"保养|加注|润滑|清洁|步骤|周期", q):
+        return ""
+    return (
+        "用户问的是具体保养条目（如「输送链条保养」「3.1.x」等）。"
+        "只根据检索 chunk 中该条目下「保养周期」「保养内容」「保养步骤」作答；"
+        "勿把其它机型、其它部位、全书「润滑部位和周期」总表或知识图谱合并进来的说法并入；"
+        "不得自编「日常润滑」等正文未出现的周期名称。"
+        "若正文仅写「每季度一次、润滑脂2#」等，只答这些，不要补充正文未出现的油品型号。"
+    )
 
 
 def build_answer_fidelity_user_prompt(query: str) -> str:
@@ -236,7 +414,13 @@ def build_answer_fidelity_user_prompt(query: str) -> str:
         "不得把不同来源的周期、型号、操作步骤合并成自编分类或「通用流程」；",
         "保留原文中的数值、型号与步骤表述；引用标记与文末 References 须与正文实际引用一致。",
         "用户未指定单一来源时：若检索到多个来源的同类条目，须分别说明，不要混为一谈。",
+        "若 chunk 中同一条款（如带①②③的同一行或同一句）并列写出多项检查/操作，"
+        "须完整复述该条款的全部检查项，不得因用户只提及其中一项关键词而省略同句中的其它要求；"
+        "知识图谱实体描述若比 chunk 正文更短，以 chunk 正文为准；"
+        "图谱或附录表里出现、但该条目正文 chunk 未写明的油品/周期/方式，一律不得写入答案。",
+        "输出时勿保留手册中的圈号序号（①②③等），直接写出检查/操作内容即可。",
     ]
+    parts.append(build_maintenance_section_fidelity_prompt(query))
     profile = resolve_machine_profile(query)
     if profile:
         label = str(profile.get("label") or "")
@@ -256,7 +440,8 @@ def build_steering_user_prompt(query: str) -> str:
     extra = str(profile.get("steering_prompt") or "").strip()
     parts = [
         f"用户问题针对「{label}」。只引用与该来源对应手册的正文 chunk；"
-        "若知识图谱实体描述与其它文档合并后冲突，以 chunk 正文为准。"
+        "若知识图谱实体描述与其它文档合并后冲突，以 chunk 正文为准；"
+        "禁止把其它手册灌库进图谱的油品/周期（如未出现在该手册 chunk 的型号）写进答案。"
     ]
     if extra:
         parts.append(extra)
@@ -299,6 +484,37 @@ def install_doc_filter_on_rerank() -> None:
     ut.apply_rerank_if_enabled = _wrapped  # type: ignore[method-assign]
 
 
+def install_kg_file_path_filter() -> None:
+    """Filter mix/local/global KG context by ``file_path`` when a steering profile matches."""
+    import lightrag.operate as op
+
+    if getattr(op, "_kg_file_path_filter_installed", False):
+        return
+
+    orig_trunc = op._apply_token_truncation
+    orig_build_ctx = op._build_query_context
+
+    async def _apply_token_truncation(search_result, query_param, global_config):
+        q = (_kg_filter_query.get() or "").strip()
+        if q:
+            filtered, stats = filter_kg_search_by_query(q, search_result)
+            search_result = filtered
+            _stash_kg_filter_stats(stats)
+        return await orig_trunc(search_result, query_param, global_config)
+
+    async def _build_query_context(query, *args, **kwargs):
+        token = _kg_filter_query.set((query or "").strip())
+        try:
+            return await orig_build_ctx(query, *args, **kwargs)
+        finally:
+            _kg_filter_query.reset(token)
+
+    op._apply_token_truncation = _apply_token_truncation  # type: ignore[method-assign]
+    op._build_query_context = _build_query_context  # type: ignore[method-assign]
+    op._kg_file_path_filter_installed = True  # type: ignore[attr-defined]
+
+
 def install_query_steering_hooks() -> None:
-    """Document path filter after rerank (idempotent)."""
+    """Chunk + KG file_path filters for steered queries (idempotent)."""
     install_doc_filter_on_rerank()
+    install_kg_file_path_filter()
