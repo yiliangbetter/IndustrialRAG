@@ -15,16 +15,17 @@ Requirements:
 - RAG-Anything installed: pip install raganything
 
 Quick start:
-    ollama pull llama3.2          # or any chat model you prefer
-    ollama pull nomic-embed-text  # embedding model (768-dim)
+    ollama pull llama3.2                    # or any chat model you prefer
+    ollama pull quentinz/bge-large-zh-v1.5  # base weights for embedding model
+    ollama create bge-large-zh-v15-build -f examples/ollama_bge-large-zh-v15-build.Modelfile
     python examples/ollama_integration_example.py
 
 Environment Setup (optional — defaults shown below):
 Create a .env file with:
 OLLAMA_HOST=http://localhost:11434
 OLLAMA_LLM_MODEL=llama3.2
-OLLAMA_EMBEDDING_MODEL=nomic-embed-text
-OLLAMA_EMBEDDING_DIM=768
+OLLAMA_EMBEDDING_MODEL=bge-large-zh-v15-build
+OLLAMA_EMBEDDING_DIM=1024
 """
 
 import asyncio
@@ -32,19 +33,23 @@ import os
 import uuid
 from typing import Dict, List, Optional
 
+import numpy as np
+
 from dotenv import load_dotenv
 
 load_dotenv()
 
 # RAG-Anything imports
-from raganything import RAGAnything, RAGAnythingConfig
+from raganything import RAGAnything, RAGAnythingConfig 
 from lightrag.utils import EmbeddingFunc
 from lightrag.llm.openai import openai_complete_if_cache
 
 OLLAMA_HOST = os.getenv("OLLAMA_HOST", "http://localhost:11434")
 OLLAMA_LLM_MODEL = os.getenv("OLLAMA_LLM_MODEL", "llama3.2")
-OLLAMA_EMBEDDING_MODEL = os.getenv("OLLAMA_EMBEDDING_MODEL", "nomic-embed-text")
-OLLAMA_EMBEDDING_DIM = int(os.getenv("OLLAMA_EMBEDDING_DIM", "768"))
+OLLAMA_EMBEDDING_MODEL = os.getenv("OLLAMA_EMBEDDING_MODEL", "bge-large-zh-v15-build")
+OLLAMA_EMBEDDING_DIM = int(os.getenv("OLLAMA_EMBEDDING_DIM", "1024"))
+# bge-large-zh-v1.5 supports up to 512 tokens per input
+OLLAMA_EMBEDDING_MAX_TOKENS = int(os.getenv("OLLAMA_EMBEDDING_MAX_TOKENS", "512"))
 
 # Ollama exposes an OpenAI-compatible chat endpoint at /v1 — reuse the
 # existing helper for the LLM side.
@@ -70,18 +75,21 @@ async def ollama_llm_model_func(
     )
 
 
-async def ollama_embedding_async(texts: List[str]) -> List[List[float]]:
+async def ollama_embedding_async(texts: List[str]) -> np.ndarray:
     """Top-level embedding function using the native Ollama embed API.
 
     Unlike the OpenAI-compatible /v1/embeddings endpoint (which Ollama does
     not implement for all models), this calls /api/embed via the ``ollama``
     Python client so it works with any model pulled from the Ollama registry.
+
+    Returns a numpy array (one row per input text) as required by LightRAG's
+    EmbeddingFunc wrapper.
     """
     import ollama
 
     client = ollama.AsyncClient(host=OLLAMA_HOST)
     response = await client.embed(model=OLLAMA_EMBEDDING_MODEL, input=texts)
-    return response.embeddings
+    return np.array(response.embeddings, dtype=np.float32)
 
 
 class OllamaRAGIntegration:
@@ -139,15 +147,16 @@ class OllamaRAGIntegration:
         try:
             print(f"🔢 Testing embedding model: {self.embedding_model}")
             vectors = await ollama_embedding_async(["hello world"])
-            if vectors and len(vectors[0]) > 0:
+            dim = int(vectors.shape[-1]) if vectors.size > 0 else 0
+            if dim > 0:
                 print(
-                    f"✅ Embedding OK — dim={len(vectors[0])} "
+                    f"✅ Embedding OK — dim={dim} "
                     f"(configured: {self.embedding_dim})"
                 )
-                if len(vectors[0]) != self.embedding_dim:
+                if dim != self.embedding_dim:
                     print(
                         f"   ⚠️  Dimension mismatch!  Set "
-                        f"OLLAMA_EMBEDDING_DIM={len(vectors[0])} in your .env"
+                        f"OLLAMA_EMBEDDING_DIM={dim} in your .env"
                     )
                 return True
             print("❌ Embedding returned empty vector")
@@ -170,7 +179,7 @@ class OllamaRAGIntegration:
     def _make_embedding_func(self) -> EmbeddingFunc:
         return EmbeddingFunc(
             embedding_dim=self.embedding_dim,
-            max_token_size=8192,
+            max_token_size=OLLAMA_EMBEDDING_MAX_TOKENS,
             func=ollama_embedding_async,
         )
 
@@ -218,7 +227,9 @@ class OllamaRAGIntegration:
                     "- Ollama serves the LLM via an OpenAI-compatible /v1 endpoint\n"
                     "- Ollama serves embeddings via its native /api/embed endpoint\n"
                     "- RAG-Anything handles document parsing and knowledge-graph construction\n\n"
-                    "Popular embedding models: nomic-embed-text (768-dim), "
+                    "Recommended embedding model: bge-large-zh-v15-build "
+                    "(BAAI bge-large-zh-v1.5, 1024-dim, Chinese)\n"
+                    "Other options: nomic-embed-text (768-dim), "
                     "mxbai-embed-large (1024-dim), all-minilm (384-dim)\n"
                     "Popular chat models: llama3.2, mistral, gemma3, phi4"
                 ),
@@ -240,7 +251,10 @@ class OllamaRAGIntegration:
             "What embedding models are recommended for Ollama?",
             mode="hybrid",
         )
-        print(f"Answer: {result[:400]}")
+        if result:
+            print(f"Answer: {result[:400]}")
+        else:
+            print("Answer: (query returned no result — check logs above)")
 
 
 async def main():

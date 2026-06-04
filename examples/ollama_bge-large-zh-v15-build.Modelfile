@@ -1,0 +1,4 @@
+# Local alias for BAAI/bge-large-zh-v1.5 (1024-dim Chinese embeddings).
+# Base weights from the Ollama community library; pull before create:
+#   ollama pull quentinz/bge-large-zh-v1.5
+FROM quentinz/bge-large-zh-v1.5
