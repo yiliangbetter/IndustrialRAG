@@ -186,6 +186,8 @@ def _persist_query_debug_dump(
     if not is_query_debug_enabled():
         return None
 
+    from query_progress_hooks import finalize_related_images  # noqa: WPS433
+
     hook_state = get_query_debug_state()
     retrieved_docs = hook_state.get("retrieved_docs")
     docs_text = hook_state.get("retrieved_docs_text")
@@ -193,6 +195,10 @@ def _persist_query_debug_dump(
         docs_text = text_from_retrieved_docs(retrieved_docs)
     retrieval_context = hook_state.get("retrieval_context")
     merged = merge_context_for_images(docs_text or "", retrieval_context or "")
+
+    related_images = hook_state.get("related_images")
+    if not isinstance(related_images, list) or not related_images:
+        related_images = finalize_related_images()
 
     images_debug = hook_state.get("images_debug")
     if not isinstance(images_debug, dict) or not images_debug:
@@ -212,9 +218,7 @@ def _persist_query_debug_dump(
         retrieval_context=retrieval_context if isinstance(retrieval_context, str) else None,
         retrieved_docs=retrieved_docs if isinstance(retrieved_docs, list) else None,
         retrieved_docs_text=docs_text if isinstance(docs_text, str) else None,
-        related_images=hook_state.get("related_images")
-        if isinstance(hook_state.get("related_images"), list)
-        else None,
+        related_images=related_images if isinstance(related_images, list) else None,
         images_debug=images_debug,
         steering_report=hook_state.get("steering_report")
         if isinstance(hook_state.get("steering_report"), dict)
@@ -816,6 +820,11 @@ async def _query_stream_events(q: str, mode: str) -> AsyncIterator[str]:
                     final_answer = strip_manual_circled_step_markers(
                         "".join(answer_parts).strip()
                     )
+                    from query_progress_hooks import finalize_related_images  # noqa: WPS433
+
+                    related = finalize_related_images()
+                    if related:
+                        yield _sse({"type": "related_images", "images": related})
                     dump_path = _persist_query_debug_dump(
                         query=q,
                         mode=mode,

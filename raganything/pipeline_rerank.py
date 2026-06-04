@@ -14,7 +14,11 @@ from functools import partial
 from pathlib import Path
 from typing import Any, Callable
 
-__all__ = ["build_rerank_model_func_from_env"]
+__all__ = [
+    "build_rerank_model_func_from_env",
+    "lightrag_global_config",
+    "query_param_from_env",
+]
 
 logger = logging.getLogger(__name__)
 
@@ -136,6 +140,55 @@ async def hf_cross_encoder_rerank(
     return [
         {"index": i, "relevance_score": float(scores_list[i])} for i in order
     ]
+
+
+def lightrag_global_config(lightrag: Any) -> dict[str, Any]:
+    """Same config dict LightRAG passes to ``apply_rerank_if_enabled`` (``asdict(instance)``).
+
+    Do not use ``lightrag.global_config`` — that attribute is usually ``None``.
+    """
+    from dataclasses import asdict
+
+    return asdict(lightrag)
+
+
+def _env_bool(name: str, default: bool = True) -> bool:
+    raw = (os.getenv(name) or "").strip().lower()
+    if not raw:
+        return default
+    return raw in ("1", "true", "yes", "on")
+
+
+def _env_int(name: str, default: int | None = None) -> int | None:
+    raw = (os.getenv(name) or "").strip()
+    if not raw:
+        return default
+    try:
+        return int(raw)
+    except ValueError:
+        return default
+
+
+def query_param_from_env(*, mode: str | None = None) -> Any:
+    """``QueryParam`` aligned with ``.env`` (rerank, top_k, chunk_top_k, token limits)."""
+    from lightrag import QueryParam
+
+    m = (mode or os.getenv("RAG_QUERY_MODE") or "mix").strip()
+    kwargs: dict[str, Any] = {
+        "mode": m,
+        "enable_rerank": _env_bool("RERANK_BY_DEFAULT", True),
+    }
+    for field, env_name in (
+        ("top_k", "TOP_K"),
+        ("chunk_top_k", "CHUNK_TOP_K"),
+        ("max_entity_tokens", "MAX_ENTITY_TOKENS"),
+        ("max_relation_tokens", "MAX_RELATION_TOKENS"),
+        ("max_total_tokens", "MAX_TOTAL_TOKENS"),
+    ):
+        val = _env_int(env_name)
+        if val is not None:
+            kwargs[field] = val
+    return QueryParam(**kwargs)
 
 
 def build_rerank_model_func_from_env() -> Callable[..., Any] | None:

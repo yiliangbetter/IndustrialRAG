@@ -32,7 +32,9 @@ __all__ = [
     "build_image_ref_block",
     "flatten_image_refs_for_skip_multimodal",
     "extract_image_refs_from_context",
+    "focus_text_for_images",
     "images_for_api",
+    "resolve_query_images",
     "query_wants_kb_images",
     "retrieval_supports_images",
     "encode_media_token",
@@ -54,6 +56,13 @@ _FOOTNOTE_RE = re.compile(r"脚注[：:]\s*(.+?)(?:\n|$)", re.IGNORECASE)
 _CONTEXT_RE = re.compile(r"关联正文[：:]\s*(.+?)(?:\n\n|\Z)", re.IGNORECASE | re.DOTALL)
 _MAINT_TOPIC_RE = re.compile(r"保养内容[：:]\s*([^\n]{2,48})", re.IGNORECASE)
 _SECTION_HEADING_RE = re.compile(r"^[\d\.]+\s*\S")
+# Ingest / manual section templates (document structure, not product vocabulary).
+_GENERIC_CYCLE_LABEL_RE = re.compile(r"^保养周期[：:].+$")
+
+try:
+    from query_doc_steering import _CATALOG_MODEL_MARKER  # noqa: WPS433
+except ImportError:
+    _CATALOG_MODEL_MARKER = "本手册适用产品型号"
 
 _IMAGE_EXTS = frozenset({".png", ".jpg", ".jpeg", ".gif", ".webp", ".bmp", ".tif", ".tiff"})
 
@@ -90,29 +99,71 @@ def _query_terms(query: str) -> list[str]:
     return discriminative_terms(query, min_len=_min_substantive_term_len())
 
 
-def _is_metadata_or_inspection_query(query: str) -> bool:
-    """Catalog / spec / electrical-check questions should not emit procedure figures."""
-    q = (query or "").strip()
-    if not q:
-        return True
-    if re.search(r"型号|适用于哪些|哪些产品|适用范围|产品说明", q):
-        return True
-    if re.search(r"电源|开关", q) and re.search(r"检查|查电", q):
-        if not re.search(r"清洁|清理|保养|润滑|加注|残胶|内部|外部|床身", q):
-            return True
-    return False
+def _unique_retrieved_doc_count(retrieved_docs: list[dict[str, Any]] | None) -> int:
+    paths: set[str] = set()
+    for doc in retrieved_docs or []:
+        if not isinstance(doc, dict):
+            continue
+        fp = str(doc.get("file_path") or "").strip()
+        if fp:
+            paths.add(fp)
+    return len(paths)
 
 
-def _query_requests_multiple_figures(query: str) -> bool:
-    """Listing questions (e.g. which parts need maintenance) may need several figures."""
+def _is_multi_source_retrieval(retrieved_docs: list[dict[str, Any]] | None) -> bool:
+    return _unique_retrieved_doc_count(retrieved_docs) >= 2
+
+
+def _query_subject_needles(query: str) -> list[str]:
+    """Substantive query spans (discriminative_terms + subject clauses), no QA phrase lists."""
     q = (query or "").strip()
     if not q:
+        return []
+    needles: list[str] = []
+    seen: set[str] = set()
+
+    def add(span: str) -> None:
+        span = span.strip()
+        if len(span) < _min_substantive_term_len() or span in seen:
+            return
+        seen.add(span)
+        needles.append(span)
+
+    for term in _query_terms(q):
+        add(term)
+    for clause in _subject_action_clauses(q):
+        for term in _query_terms(q):
+            if len(term) >= _min_substantive_term_len() and term in clause:
+                add(term)
+        cjk = "".join(re.findall(r"[\u4e00-\u9fff]", clause))
+        if len(cjk) >= _min_substantive_term_len():
+            add(cjk[-min(8, len(cjk)) :])
+    return sorted(needles, key=len, reverse=True)[:12]
+
+
+def _line_has_query_subject_hit(query: str, line: str) -> bool:
+    """True when a substantive query span appears in a retrieval line."""
+    line = (line or "").strip()
+    if not line:
         return False
-    if re.search(r"哪些|有哪几种|包括哪些|哪几项|列举|分别有哪些", q):
-        return bool(
-            re.search(r"部件|零件|项目|保养|清洁|清理|润滑|加注|检查", q)
-        )
-    return False
+    return any(needle in line for needle in _query_subject_needles(query))
+
+
+def _retrieval_prefers_catalog_field(query: str, text: str) -> bool:
+    """Top retrieval lines are foreword catalog rows, not procedure ``保养内容`` topics."""
+    ranked = _ranked_retrieval_lines(query, text, limit=8)
+    if not ranked:
+        return False
+    catalog_best = 0.0
+    procedure_best = 0.0
+    for overlap, line in ranked:
+        if _CATALOG_MODEL_MARKER in line:
+            catalog_best = max(catalog_best, overlap)
+        if _MAINT_TOPIC_RE.search(line):
+            procedure_best = max(procedure_best, overlap)
+    if catalog_best <= 0:
+        return False
+    return catalog_best >= procedure_best
 
 
 def _multi_figure_image_limit() -> int:
@@ -131,13 +182,50 @@ def _figure_label_key(ref: dict[str, Any]) -> str:
     return _normalize_label_key(_ref_effective_label(ref))
 
 
+def _topic_overlaps_query(topic: str, query: str) -> bool:
+    """Topic relates to the query via multiple terms or substantive bigrams (no single 2-char hit)."""
+    topic = (topic or "").strip()
+    if not topic:
+        return False
+    short_terms = discriminative_terms(query, min_len=2)
+    if sum(1 for term in short_terms if term in topic) >= 2:
+        return True
+    if any(
+        len(term) >= 3 and term in topic
+        for term in discriminative_terms(query, min_len=3)
+    ):
+        return True
+    qb = substantive_bigrams(query)
+    tb = substantive_bigrams(topic)
+    return bool(qb and tb and len(qb & tb) >= 2)
+
+
+def _maintenance_topics_in_text(text: str, query: str) -> list[str]:
+    """All ``保养内容：`` topics in retrieval bodies (ingest template, not phrase lists)."""
+    topics: list[str] = []
+    seen: set[str] = set()
+    for match in _MAINT_TOPIC_RE.finditer(text or ""):
+        topic = match.group(1).strip()
+        topic = re.split(r"保养步骤|保养周期", topic, maxsplit=1)[0].strip()
+        topic = re.split(r"[。\n]", topic, maxsplit=1)[0].strip()[:32]
+        if len(topic) < 4:
+            continue
+        key = _normalize_label_key(topic)
+        if key in seen:
+            continue
+        if not _topic_overlaps_query(topic, query):
+            continue
+        seen.add(key)
+        topics.append(topic)
+    return topics
+
+
 def _listing_target_phrases(query: str, retrieved_text: str) -> list[str]:
     """Distinct maintenance phrases in retrieval that anchor separate figures."""
-    if not _query_requests_multiple_figures(query):
-        return []
     text = (retrieved_text or "").strip()
     if not text:
         return []
+    terms = _query_terms(query)
     phrases: list[str] = []
     seen: set[str] = set()
 
@@ -151,36 +239,125 @@ def _listing_target_phrases(query: str, retrieved_text: str) -> list[str]:
         seen.add(key)
         phrases.append(phrase)
 
-    q_has_glue = "残胶" in query or re.search(r"清理.*胶|胶.*清理", query)
+    for topic in _maintenance_topics_in_text(text, query):
+        add(topic)
+
     for line in re.split(r"[\n\r]+", text):
         line = line.strip()
         if len(line) < 4 or _is_image_metadata_line(line) or _is_toc_or_directory_line(line):
             continue
-        if q_has_glue:
-            if "残胶" not in line and not (
-                "清理" in line
-                and re.search(r"靠|压带|涂胶|胶轴|仿形", line)
-            ):
-                continue
-        elif not any(term in line for term in _query_terms(query)):
+        short_terms = discriminative_terms(query, min_len=2)
+        if short_terms and not any(term in line for term in short_terms):
             continue
         topic = _maintenance_topic_from_text(line)
-        if topic:
-            if not q_has_glue or (
-                "残胶" in topic
-                or re.search(r"压带轮|仿形|涂胶|胶轴", topic)
-            ):
-                add(topic)
-        for match in re.finditer(
-            r"[\u4e00-\u9fff]{2,24}(?:残胶清理|残胶|老化胶水)", line
-        ):
-            add(match.group(0))
-        if not q_has_glue:
-            for term in _query_terms(query):
-                if len(term) >= 4 and term in line:
-                    add(term)
+        if topic and _topic_overlaps_query(topic, query):
+            add(topic)
 
     return phrases[:12]
+
+
+def _listing_targets_anchored_in_text(
+    query: str,
+    source_text: str,
+    *,
+    anchor_text: str,
+) -> list[str]:
+    """Listing targets that also appear in focus / rerank bodies (not manual-wide labels)."""
+    targets = _listing_target_phrases(query, source_text)
+    anchor = (anchor_text or "").strip()
+    if len(targets) < 2 or not anchor:
+        return targets
+    lines = [line.strip() for line in re.split(r"[\n\r]+", anchor) if line.strip()]
+    return [
+        t
+        for t in targets
+        if any(
+            t in line or _label_matches_listing_target(line, t) for line in lines
+        )
+    ]
+
+
+def _focus_has_query_anchored_inline_figures(query: str, focus: str) -> bool:
+    """True when a ``[图片]`` block lies in the span of a high-overlap focus line."""
+    text = normalize_context_for_image_parse(focus).strip()
+    if not text:
+        return False
+    min_ov = _image_focus_min_overlap()
+    ranked = _ranked_retrieval_lines(query, text, limit=12)
+    if not ranked:
+        return bool(extract_image_refs_from_context(text))
+    tail = _image_focus_expand_tail_chars()
+    for overlap, line in ranked:
+        if overlap < min_ov:
+            continue
+        if not _line_has_specific_query_overlap(query, line, ""):
+            continue
+        idx = text.find(line)
+        if idx < 0:
+            continue
+        window = text[idx : min(len(text), idx + len(line) + tail)]
+        if "[图片]" not in window and not _IMAGE_PATH_RE.search(window):
+            continue
+        for ref in extract_image_refs_from_context(window):
+            label = _ref_effective_label(ref)
+            if _figure_label_matches_query(query, label) or _topic_overlaps_query(
+                label, query
+            ):
+                return True
+    return False
+
+
+def _focus_has_query_aligned_figure_refs(query: str, focus: str) -> bool:
+    """Focus body already includes a query-aligned ``[图片]`` caption (single-topic procedure)."""
+    text = normalize_context_for_image_parse(focus).strip()
+    if not text or "[图片]" not in text:
+        return False
+    for ref in extract_image_refs_from_context(text):
+        label = _ref_effective_label(ref)
+        if _figure_label_matches_query(query, label) or _topic_overlaps_query(
+            label, query
+        ):
+            return True
+    return False
+
+
+def _listing_targets_with_query_line_overlap(
+    query: str, full_text: str, focus: str
+) -> list[str]:
+    """Listing targets whose focus lines also share substantive query terms."""
+    targets = _listing_targets_anchored_in_text(query, full_text, anchor_text=focus)
+    if not targets:
+        return []
+    lines = [
+        line.strip()
+        for line in re.split(r"[\n\r]+", normalize_context_for_image_parse(focus))
+        if line.strip()
+    ]
+    return [
+        t
+        for t in targets
+        if any(
+            (t in line or _label_matches_listing_target(line, t))
+            and _line_has_specific_query_overlap(query, line, "")
+            for line in lines
+        )
+    ]
+
+
+def _focus_qualifies_for_image_lookup(
+    query: str, full_text: str, focus: str
+) -> bool:
+    """Multi-topic listing in focus, or inline figures adjacent to query-aligned lines."""
+    q = (query or "").strip()
+    full = (full_text or "").strip()
+    focus_norm = normalize_context_for_image_parse(focus).strip()
+    if not focus_norm:
+        return False
+    if len(_listing_targets_with_query_line_overlap(q, full, focus_norm)) >= 2:
+        return True
+    if _focus_has_query_aligned_figure_refs(q, focus_norm):
+        return True
+    return _focus_has_query_anchored_inline_figures(q, focus_norm)
 
 
 def _label_matches_listing_target(label: str, target: str) -> bool:
@@ -207,18 +384,136 @@ def _ref_aligns_for_multi_figure_listing(
     *,
     threshold: float,
     retrieved_text: str | None,
+    listing_source_text: str | None = None,
 ) -> bool:
     label = _ref_effective_label(ref)
     if len(label) < _min_substantive_term_len():
         return False
-    for target in _listing_target_phrases(query, retrieved_text or ""):
-        if _label_matches_listing_target(label, target):
+    source = (listing_source_text or retrieved_text or "").strip()
+    anchor = (retrieved_text or "").strip()
+    for target in _listing_targets_with_query_line_overlap(query, source, anchor):
+        if not _label_matches_listing_target(label, target):
+            continue
+        core = _strip_section_prefix(label) if _is_section_number_heading(label) else label
+        if _figure_label_matches_query(query, core) or _topic_overlaps_query(core, query):
             return True
-    if "残胶" in query and "残胶" in label:
-        return True
     return _ref_aligns_with_query_label(
         query, ref, threshold=threshold, retrieved_text=retrieved_text
     )
+
+
+def _ref_blob(ref: dict[str, Any]) -> str:
+    return " ".join(
+        str(ref.get(key) or "") for key in ("label", "caption", "context")
+    ).strip()
+
+
+def _is_generic_cycle_only_label(label: str) -> bool:
+    stripped = (label or "").strip()
+    return bool(stripped) and bool(_GENERIC_CYCLE_LABEL_RE.match(stripped))
+
+
+def _ref_matches_figure_focus(query: str, ref: dict[str, Any]) -> bool:
+    """Reject ingest ``保养周期：``-only captions unless the figure mentions query subjects."""
+    label = _ref_effective_label(ref)
+    if not _is_generic_cycle_only_label(label):
+        return True
+    needles = _query_subject_needles(query)
+    if not needles:
+        return False
+    blob = _ref_blob(ref)
+    if any(needle in blob for needle in needles):
+        return True
+    object_bgs = _subject_object_bigrams(query)
+    return bool(object_bgs and (object_bgs & substantive_bigrams(blob)))
+
+
+def _source_hints_from_retrieved_docs(
+    retrieved_docs: list[dict[str, Any]] | None,
+) -> set[str]:
+    hints: set[str] = set()
+    for doc in retrieved_docs or []:
+        if not isinstance(doc, dict):
+            continue
+        fp = str(doc.get("file_path") or "").strip()
+        if not fp:
+            continue
+        stem = Path(fp).stem[:80]
+        hints.add(stem)
+        compact = re.sub(r"\s+", "", stem)
+        if compact:
+            hints.add(compact[:80])
+    return hints
+
+
+def _merged_source_hints(
+    text: str,
+    retrieved_docs: list[dict[str, Any]] | None = None,
+) -> set[str]:
+    hints = _source_hints_from_text(text)
+    hints |= _source_hints_from_retrieved_docs(retrieved_docs)
+    return {h for h in hints if h and len(h) >= 4}
+
+
+def _ref_matches_source_hints(ref: dict[str, Any], hints: set[str]) -> bool:
+    if not hints:
+        return True
+    path = str(ref.get("path") or "")
+    return any(hint in path for hint in hints)
+
+
+def _ref_inline_in_retrieved_context(
+    ref: dict[str, Any], retrieved_text: str | None
+) -> bool:
+    """True when this figure is cited inside rerank-filtered chunk bodies."""
+    text = (retrieved_text or "").strip()
+    if not text:
+        return False
+    path_name = Path(str(ref.get("path") or "")).name
+    if path_name and path_name in text:
+        return True
+    label = _ref_effective_label(ref)
+    if label and len(label) >= _min_substantive_term_len() and label in text:
+        return True
+    ctx = str(ref.get("context") or "").strip()
+    if len(ctx) >= 12 and ctx in text:
+        return True
+    return False
+
+
+def _ref_inline_matches_query_subject(query: str, ref: dict[str, Any]) -> bool:
+    """Inline chunk figures must match query subject bigrams, not a shared verb alone."""
+    label = _ref_effective_label(ref)
+    if not label:
+        return False
+    object_bgs = _subject_object_bigrams(query)
+    label_bgs = substantive_bigrams(label)
+    if object_bgs and object_bgs & label_bgs:
+        return True
+    for term in _query_terms(query):
+        if len(term) >= 3 and term in label:
+            return True
+    return False
+
+
+def _ref_anchored_in_retrieved_text(
+    ref: dict[str, Any],
+    retrieved_text: str | None,
+    query: str,
+) -> bool:
+    """Figures must come from answer retrieval text, not manual-wide caption grep."""
+    text = (retrieved_text or "").strip()
+    if not text:
+        return True
+    if _ref_inline_in_retrieved_context(ref, text):
+        return True
+    ctx = str(ref.get("context") or "").strip()
+    if len(ctx) >= 8 and ctx in text:
+        return True
+    label = _ref_effective_label(ref)
+    if label and _ref_aligns_with_retrieval_focus(query, ref, text):
+        return True
+    return False
 
 
 def _ref_passes_image_align_gate(
@@ -226,11 +521,49 @@ def _ref_passes_image_align_gate(
     ref: dict[str, Any],
     *,
     retrieved_text: str | None,
+    source_hints: set[str] | None = None,
+    listing_source_text: str | None = None,
 ) -> bool:
+    if source_hints and not _ref_matches_source_hints(ref, source_hints):
+        return False
+    text = (retrieved_text or "").strip()
+    list_source = (listing_source_text or text).strip()
+    listing_targets = _listing_targets_with_query_line_overlap(
+        query, list_source, text
+    )
+    listing_label_ok = len(listing_targets) >= 2 and any(
+        _label_matches_listing_target(_ref_effective_label(ref), target)
+        and (
+            _figure_label_matches_query(query, _ref_effective_label(ref))
+            or _topic_overlaps_query(_ref_effective_label(ref), query)
+        )
+        for target in listing_targets
+    )
+    if retrieved_text and not listing_label_ok and not _ref_anchored_in_retrieved_text(
+        ref, retrieved_text, query
+    ):
+        return False
+    if not _ref_matches_figure_focus(query, ref):
+        return False
+    if text:
+        ranked = _ranked_retrieval_lines(query, text, limit=6)
+        if ranked and ranked[0][0] >= _image_retrieval_focus_min_overlap():
+            if len(listing_targets) >= 2:
+                pass
+            elif _ref_inline_in_retrieved_context(ref, text) and _ref_inline_matches_query_subject(
+                query, ref
+            ):
+                pass
+            elif not _ref_aligns_with_retrieval_focus(query, ref, text):
+                return False
     threshold = _image_min_ref_align()
-    if _query_requests_multiple_figures(query):
+    if len(listing_targets) >= 2:
         return _ref_aligns_for_multi_figure_listing(
-            query, ref, threshold=threshold, retrieved_text=retrieved_text
+            query,
+            ref,
+            threshold=threshold,
+            retrieved_text=retrieved_text,
+            listing_source_text=list_source,
         )
     return _ref_aligns_with_query_label(
         query, ref, threshold=threshold, retrieved_text=retrieved_text
@@ -340,14 +673,21 @@ def _is_cover_page_ref(ref: dict[str, Any]) -> bool:
 def _line_has_specific_query_overlap(
     query: str, line: str, ref_text: str
 ) -> bool:
-    """True when a substantive query term hits the answer line but not figure metadata."""
+    """True when substantive query terms hit the answer line but not figure metadata."""
     blob = ref_text or ""
-    for term in _query_terms(query):
-        if len(term) < 4:
-            continue
-        if term in line and term not in blob:
-            return True
-    return False
+    long_hits = [
+        term
+        for term in discriminative_terms(query, min_len=3)
+        if len(term) >= 3 and term in line and term not in blob
+    ]
+    if long_hits:
+        return True
+    short_hits = [
+        term
+        for term in discriminative_terms(query, min_len=2)
+        if len(term) == 2 and term in line and term not in blob
+    ]
+    return len(set(short_hits)) >= 2
 
 
 def _ref_label_aligns_with_line(ref: dict[str, Any], line: str) -> bool:
@@ -372,12 +712,180 @@ def _ranked_retrieval_lines(
             continue
         if _is_image_metadata_line(line) or _is_toc_or_directory_line(line):
             continue
+        if _PDF_NAME_RE.search(line) or ".jpg" in line.lower() or ".png" in line.lower():
+            continue
+        cjk = "".join(re.findall(r"[\u4e00-\u9fff]", line))
+        if len(cjk) < _min_substantive_term_len():
+            continue
         overlap = _term_overlap_ratio(query, line)
         if overlap <= 0:
             continue
         scored.append((overlap, line))
     scored.sort(key=lambda pair: pair[0], reverse=True)
     return scored[:limit]
+
+
+def _image_focus_min_overlap() -> float:
+    raw = (
+        os.getenv("RAG_IMAGE_FOCUS_MIN_OVERLAP")
+        or os.getenv("RAG_IMAGE_RETRIEVAL_FOCUS_MIN_OVERLAP")
+        or "0.12"
+    )
+    try:
+        return max(0.05, min(0.5, float(raw)))
+    except ValueError:
+        return 0.12
+
+
+def _image_focus_expand_tail_chars() -> int:
+    raw = os.getenv("RAG_IMAGE_FOCUS_EXPAND_TAIL") or "600"
+    try:
+        return max(120, min(2000, int(raw)))
+    except ValueError:
+        return 600
+
+
+def _image_focus_max_lines() -> int:
+    raw = os.getenv("RAG_IMAGE_FOCUS_MAX_LINES") or "10"
+    try:
+        return max(2, min(24, int(raw)))
+    except ValueError:
+        return 10
+
+
+def _image_focus_max_chars() -> int:
+    raw = os.getenv("RAG_IMAGE_FOCUS_MAX_CHARS") or "6000"
+    try:
+        return max(800, min(20000, int(raw)))
+    except ValueError:
+        return 6000
+
+
+def _build_focus_context_from_lines(full: str, focus_lines: list[str]) -> str:
+    """Merge spans around focus lines and keep adjacent ``[图片]`` blocks."""
+    if not focus_lines:
+        return ""
+    tail = _image_focus_expand_tail_chars()
+    spans: list[tuple[int, int]] = []
+
+    for fl in focus_lines:
+        start = 0
+        while True:
+            idx = full.find(fl, start)
+            if idx < 0:
+                break
+            span_start = full.rfind("\n\n", 0, idx)
+            span_start = 0 if span_start < 0 else span_start + 2
+            span_end = idx + len(fl)
+            search_from = span_end
+            for _ in range(4):
+                img = full.find("[图片]", search_from)
+                if img < 0 or img > span_end + tail:
+                    break
+                block_end = full.find("\n\n", img)
+                if block_end < 0:
+                    block_end = min(len(full), img + tail)
+                else:
+                    block_end = min(len(full), block_end + 2)
+                span_end = max(span_end, block_end)
+                search_from = span_end
+            next_break = full.find("\n\n", span_end)
+            if next_break > 0:
+                span_end = min(len(full), max(span_end, next_break + 2))
+            else:
+                span_end = min(len(full), span_end + 200)
+            spans.append((span_start, span_end))
+            start = idx + max(1, len(fl) // 2)
+
+    if not spans:
+        return "\n\n".join(focus_lines)
+
+    spans.sort()
+    merged: list[tuple[int, int]] = []
+    for s, e in spans:
+        if merged and s <= merged[-1][1]:
+            merged[-1] = (merged[-1][0], max(merged[-1][1], e))
+        else:
+            merged.append((s, e))
+    parts = [full[s:e].strip() for s, e in merged]
+    out = "\n\n".join(p for p in parts if p)
+    cap = _image_focus_max_chars()
+    if len(out) > cap:
+        return out[:cap]
+    return out
+
+
+def focus_text_for_images(query: str, full_text: str) -> str:
+    """Query-aligned retrieval lines (+ nearby ``[图片]`` blocks) used only for image lookup."""
+    full = normalize_context_for_image_parse(full_text).strip()
+    if not full:
+        return ""
+    q = (query or "").strip()
+    if not q:
+        return ""
+
+    min_ov = _image_focus_min_overlap()
+    max_lines = _image_focus_max_lines()
+    ranked = _ranked_retrieval_lines(q, full, limit=max_lines * 3)
+    focus_lines: list[str] = []
+    seen_line: set[str] = set()
+    catalog_mode = _retrieval_prefers_catalog_field(q, full)
+    top_overlap = ranked[0][0] if ranked else 0.0
+    sparse_overlap = top_overlap < min_ov
+    if sparse_overlap and top_overlap > 0:
+        # Long questions dilute term-overlap ratio; keep top relative lines with subject hits.
+        rel_floor = top_overlap * 0.85
+    else:
+        rel_floor = max(min_ov, top_overlap * 0.62)
+
+    def add_line(line: str) -> None:
+        line = line.strip()
+        if len(line) < _min_substantive_term_len():
+            return
+        if line in seen_line:
+            return
+        if catalog_mode and _CATALOG_MODEL_MARKER not in line:
+            return
+        if len(focus_lines) >= max_lines:
+            return
+        seen_line.add(line)
+        focus_lines.append(line)
+
+    if catalog_mode:
+        for overlap, line in ranked:
+            if overlap >= min_ov and _CATALOG_MODEL_MARKER in line:
+                add_line(line)
+    else:
+        for overlap, line in ranked:
+            if overlap < rel_floor:
+                continue
+            if sparse_overlap and not (
+                _line_has_query_subject_hit(q, line)
+                or _line_has_specific_query_overlap(q, line, "")
+            ):
+                continue
+            add_line(line)
+
+    targets = _listing_target_phrases(q, full)
+    listing_budget = max_lines * 2 if len(targets) >= 2 else max_lines
+    if len(targets) >= 2 and not catalog_mode:
+        for line in re.split(r"[\n\r]+", full):
+            line = line.strip()
+            if len(line) < 4 or len(focus_lines) >= listing_budget:
+                continue
+            if any(
+                target in line or _label_matches_listing_target(line, target)
+                for target in targets
+            ):
+                add_line(line)
+
+    if not focus_lines:
+        return ""
+
+    if catalog_mode:
+        return "\n\n".join(focus_lines)
+
+    return _build_focus_context_from_lines(full, focus_lines)
 
 
 def _image_retrieval_focus_min_overlap() -> float:
@@ -535,8 +1043,6 @@ def _ref_passes_focus_bigram_gate(
 ) -> bool:
     """Reject figures whose label only shares generic inspection bigrams with the query."""
     label = _ref_effective_label(ref)
-    if label and _figure_label_matches_query(query, label):
-        return True
     if not label:
         return False
     blob = label + str(ref.get("context") or "")
@@ -725,6 +1231,10 @@ def _ref_aligns_with_query_label(
         return False
 
     core_label = _strip_section_prefix(label) if _is_section_number_heading(label) else label
+    if _is_generic_cycle_only_label(core_label) and not _ref_matches_figure_focus(
+        query, ref
+    ):
+        return False
     label_ok = _figure_label_matches_query(query, core_label)
     if not label_ok and _text_alignment(query, core_label) >= threshold and any(
         len(term) >= 4 and term in core_label for term in _query_terms(query)
@@ -735,7 +1245,7 @@ def _ref_aligns_with_query_label(
         return False
     if not _ref_passes_focus_bigram_gate(query, ref, retrieved_text):
         return False
-    if _figure_label_matches_query(query, core_label):
+    if _ref_inline_in_retrieved_context(ref, retrieved_text):
         return True
     return _ref_aligns_with_retrieval_focus(query, ref, retrieved_text)
 
@@ -745,17 +1255,21 @@ def supplement_refs_for_listing_targets(
     media_roots: list[Path],
     *,
     query: str,
+    source_hints: set[str] | None = None,
+    listing_source_text: str | None = None,
 ) -> list[dict[str, Any]]:
     """Attach figures for each distinct listing target (same manual, multiple captions)."""
-    if not _query_requests_multiple_figures(query):
+    focus = (text or "").strip()
+    source = (listing_source_text or focus).strip()
+    targets = _listing_targets_with_query_line_overlap(query, source, focus)
+    if len(targets) < 2:
         return []
-    targets = _listing_target_phrases(query, text)
-    if not targets:
-        return []
+
+    from raganything.utils import image_label_for_item  # noqa: WPS433
 
     refs: list[dict[str, Any]] = []
     seen: set[str] = set()
-    source_hints = _source_hints_from_text(text)
+    hints = source_hints or _source_hints_from_text(focus)
 
     for root in media_roots:
         try:
@@ -770,7 +1284,7 @@ def supplement_refs_for_listing_targets(
             doc_hint = cl_path.stem.replace("_content_list", "").replace(
                 "_content_list_v2", ""
             )
-            if source_hints and not any(hint in doc_hint for hint in source_hints):
+            if hints and not any(hint in doc_hint for hint in hints):
                 continue
             for image_item in items:
                 if not isinstance(image_item, dict) or image_item.get("type") != "image":
@@ -798,14 +1312,32 @@ def _refs_from_retrieved_docs_text(
     media_roots: list[Path],
     *,
     query: str | None = None,
+    retrieved_docs: list[dict[str, Any]] | None = None,
+    full_context: str | None = None,
 ) -> list[dict[str, Any]]:
-    """Image refs parsed only from rerank-filtered chunk bodies (no global context bleed)."""
+    """Image refs parsed only from focus retrieval text (no whole-chunk bleed)."""
     q = (query or "").strip()
-    return _merge_refs(
-        extract_image_refs_from_context(context),
-        supplement_refs_from_content_lists(context, media_roots, query=query),
-        supplement_refs_for_listing_targets(context, media_roots, query=q) if q else [],
+    focus = (context or "").strip()
+    full = (full_context or focus).strip()
+    hints = _merged_source_hints(full, retrieved_docs)
+    refs = _merge_refs(
+        extract_image_refs_from_context(focus),
+        supplement_refs_from_content_lists(
+            focus, media_roots, query=query, source_hints=hints
+        ),
+        supplement_refs_for_listing_targets(
+            focus,
+            media_roots,
+            query=q,
+            source_hints=hints,
+            listing_source_text=full,
+        )
+        if q
+        else [],
     )
+    if hints:
+        refs = [ref for ref in refs if _ref_matches_source_hints(ref, hints)]
+    return refs
 
 
 def _candidate_align_lines(
@@ -902,15 +1434,53 @@ def _collect_figure_refs(
     media_roots: list[Path] | None = None,
     *,
     query: str | None = None,
+    retrieved_docs: list[dict[str, Any]] | None = None,
+    full_context: str | None = None,
 ) -> list[dict[str, Any]]:
-    """Inline chunk figures plus MinerU bbox supplements for text-only rerank slices."""
-    refs = _eligible_figure_refs(context)
+    """Inline chunk figures plus MinerU bbox supplements on focus retrieval text only."""
     if media_roots:
-        refs = _merge_refs(
-            refs,
-            supplement_refs_from_content_lists(context, media_roots, query=query),
+        return _refs_from_retrieved_docs_text(
+            context,
+            media_roots,
+            query=query,
+            retrieved_docs=retrieved_docs,
+            full_context=full_context,
         )
-    return [ref for ref in refs if not _is_cover_page_ref(ref)]
+    return _eligible_figure_refs(context)
+
+
+def _cross_manual_has_aligned_figures(
+    query: str,
+    focus_text: str,
+    *,
+    retrieved_docs: list[dict[str, Any]] | None,
+    media_roots: list[Path] | None,
+    full_text: str | None = None,
+) -> bool:
+    if not _is_multi_source_retrieval(retrieved_docs):
+        return False
+    focus = (focus_text or "").strip()
+    if not focus:
+        return False
+    full = (full_text or focus).strip()
+    hints = _merged_source_hints(full, retrieved_docs)
+    eligible = _collect_figure_refs(
+        focus,
+        media_roots,
+        query=query,
+        retrieved_docs=retrieved_docs,
+        full_context=full,
+    )
+    return any(
+        _ref_passes_image_align_gate(
+            query,
+            ref,
+            retrieved_text=focus,
+            source_hints=hints,
+            listing_source_text=full,
+        )
+        for ref in eligible
+    )
 
 
 def retrieval_supports_images(
@@ -919,15 +1489,38 @@ def retrieval_supports_images(
     retrieved_docs: list[dict[str, Any]] | None = None,
     context_text: str | None = None,
     media_roots: list[Path] | None = None,
+    focus_text: str | None = None,
 ) -> bool:
-    """True only when retrieval looks substantively relevant to the query."""
-    if _is_metadata_or_inspection_query(query or ""):
-        logger.info("Skip related images: metadata or inspection-only query")
-        return False
+    """True only when focus retrieval lines support query-aligned figures."""
     if not query_wants_kb_images(query):
         logger.info("Skip related images: non-KB / chitchat query")
         return False
-    text = (context_text or "").strip()
+
+    full = (context_text or "").strip()
+    q = (query or "").strip()
+    focus = (focus_text or "").strip()
+    if full and not focus:
+        focus = focus_text_for_images(q, full)
+    if not focus:
+        logger.info("Skip related images: empty focus context")
+        return False
+
+    if not _focus_qualifies_for_image_lookup(q, full, focus):
+        logger.info(
+            "Skip related images: focus has no query-anchored inline figures "
+            "and fewer than two listing topics"
+        )
+        return False
+
+    if _cross_manual_has_aligned_figures(
+        q,
+        focus,
+        retrieved_docs=retrieved_docs,
+        media_roots=media_roots,
+        full_text=full,
+    ):
+        return True
+
     max_score = _max_rerank_score(retrieved_docs)
     if max_score is not None:
         threshold = _image_min_rerank_score()
@@ -938,66 +1531,55 @@ def retrieval_supports_images(
                 threshold,
             )
             return False
-        if not text:
-            logger.info("Skip related images: empty retrieval context")
-            return False
-        eligible = _collect_figure_refs(text, media_roots, query=query)
-        if not eligible:
-            logger.info("Skip related images: no non-cover figures in retrieval")
-            return False
-        if not any(
-            _ref_passes_image_align_gate(
-                query or "", ref, retrieved_text=text
-            )
-            for ref in eligible
-        ):
-            logger.info(
-                "Skip related images: no figure label/heading matches query focus"
-            )
-            return False
+
+    hints = _merged_source_hints(full or focus, retrieved_docs)
+    eligible = _collect_figure_refs(
+        focus,
+        media_roots,
+        query=query,
+        retrieved_docs=retrieved_docs,
+        full_context=full or focus,
+    )
+    if not eligible:
+        logger.info("Skip related images: no non-cover figures in focus context")
+        return False
+    if any(
+        _ref_passes_image_align_gate(
+            q,
+            ref,
+            retrieved_text=focus,
+            source_hints=hints,
+            listing_source_text=full,
+        )
+        for ref in eligible
+    ):
         return True
 
-    text = (context_text or "").strip()
-    if not text:
-        logger.info("Skip related images: empty retrieval context")
-        return False
-
-    q = (query or "").strip()
     terms = _query_terms(q)
     if not terms:
         logger.info("Skip related images: no substantive query terms")
         return False
 
-    overlap = _term_overlap_ratio(q, text)
+    overlap = _term_overlap_ratio(q, focus)
     min_overlap = _image_min_term_overlap()
-    eligible = _collect_figure_refs(text, media_roots, query=query)
-    listing_ok = (
-        _query_requests_multiple_figures(q) and bool(_listing_target_phrases(q, text))
-    )
+    listing_ok = len(_listing_targets_with_query_line_overlap(q, full, focus)) >= 2
+    cross_ok = _is_multi_source_retrieval(retrieved_docs)
     near_miss = overlap + 0.051 >= min_overlap
-    if overlap < min_overlap and not listing_ok and not (
+    if overlap < min_overlap and not listing_ok and not cross_ok and not (
         near_miss
-        and eligible
         and any(
             _figure_label_matches_query(q, _ref_effective_label(ref))
             for ref in eligible
         )
     ):
         logger.info(
-            "Skip related images: term overlap %.2f < %.2f",
+            "Skip related images: focus term overlap %.2f < %.2f",
             overlap,
             min_overlap,
         )
         return False
-    if not eligible:
-        logger.info("Skip related images: no non-cover figures in retrieval")
-        return False
-    if not any(
-        _ref_passes_image_align_gate(q, ref, retrieved_text=text) for ref in eligible
-    ):
-        logger.info("Skip related images: no figure label/heading matches query focus")
-        return False
-    return True
+    logger.info("Skip related images: no figure label/heading matches query focus")
+    return False
 
 
 def normalize_context_for_image_parse(text: str) -> str:
@@ -1089,6 +1671,7 @@ def _extract_context_anchors(query: str | None, text: str) -> list[str]:
         anchors.append(phrase)
 
     q = (query or "").strip()
+    needles = _query_subject_needles(q)
     scored: list[tuple[float, str]] = []
     for run in re.findall(r"[\u4e00-\u9fff]+", q):
         if len(run) >= _min_substantive_term_len() and run in text:
@@ -1106,12 +1689,22 @@ def _extract_context_anchors(query: str | None, text: str) -> list[str]:
         if hits <= 0:
             continue
         overlap = hits / len(terms)
+        if _GENERIC_CYCLE_LABEL_RE.match(line) or re.fullmatch(
+            r"保养周期[：:].+", line
+        ):
+            if needles and not any(n in line for n in needles):
+                continue
         scored.append((overlap, line[:120]))
 
     scored.sort(key=lambda pair: pair[0], reverse=True)
     for overlap, line in scored:
         if overlap < scored[0][0] * 0.45:
             break
+        if _GENERIC_CYCLE_LABEL_RE.match(line) or re.fullmatch(
+            r"保养周期[：:].+", line
+        ):
+            if needles and not any(n in line for n in needles):
+                continue
         add(line)
 
     for clause in _subject_action_clauses(q):
@@ -1196,13 +1789,17 @@ def _score_ref_for_query(
     label = _ref_effective_label(ref)
     if _is_section_number_heading(str(ref.get("caption") or "")):
         score -= 45
+    if _is_generic_cycle_only_label(label) and not _ref_matches_figure_focus(q, ref):
+        score -= 120
     if label and _figure_label_matches_query(q, label):
         score += 40
-    if retrieved_text and _query_requests_multiple_figures(q):
-        for target in _listing_target_phrases(q, retrieved_text):
-            if _label_matches_listing_target(label, target):
-                score += 85
-                break
+    if retrieved_text:
+        targets = _listing_target_phrases(q, retrieved_text)
+        if len(targets) >= 2:
+            for target in targets:
+                if _label_matches_listing_target(label, target):
+                    score += 85
+                    break
     ctx = str(ref.get("context") or "")
     for term in _query_terms(q):
         if len(term) >= 3 and term in ctx:
@@ -1313,18 +1910,17 @@ def supplement_refs_from_content_lists(
     media_roots: list[Path],
     *,
     query: str | None = None,
+    source_hints: set[str] | None = None,
 ) -> list[dict[str, Any]]:
-    """Match query-linked phrases in retrieved text to same-page images via MinerU bbox."""
+    """BBox-link images only when an anchor phrase appears in rerank-filtered chunk text."""
     anchors = _extract_context_anchors(query, text)
     if not anchors:
-        anchors = [
-            t for t in _query_terms(query or "") if len(t) >= 4
-        ][:6]
+        anchors = [t for t in _query_terms(query or "") if len(t) >= 4][:6]
 
     refs: list[dict[str, Any]] = []
     seen: set[str] = set()
     q = (query or "").strip()
-    source_hints = _source_hints_from_text(text)
+    hints = source_hints or _source_hints_from_text(text)
 
     for root in media_roots:
         try:
@@ -1337,27 +1933,8 @@ def supplement_refs_from_content_lists(
                 continue
             auto_dir = cl_path.parent
             doc_hint = cl_path.stem.replace("_content_list", "").replace("_content_list_v2", "")
-            if source_hints and not any(hint in doc_hint for hint in source_hints):
+            if hints and not any(hint in doc_hint for hint in hints):
                 continue
-
-            if q and not _is_metadata_or_inspection_query(q):
-                from raganything.utils import image_label_for_item  # noqa: WPS433
-
-                for image_item in items:
-                    if not isinstance(image_item, dict) or image_item.get("type") != "image":
-                        continue
-                    label = image_label_for_item(items, image_item)
-                    topic = _maintenance_topic_from_text(label) or label
-                    if not topic or not _figure_label_matches_query(q, topic):
-                        continue
-                    _append_content_list_image_ref(
-                        refs,
-                        seen,
-                        items=items,
-                        image_item=image_item,
-                        auto_dir=auto_dir,
-                        caption=topic,
-                    )
 
             for anchor in anchors:
                 for text_idx, item in enumerate(items):
@@ -1503,6 +2080,28 @@ def _select_scored_refs_for_listing(
     )
 
 
+def _select_scored_refs_cross_manual(
+    scored: list[tuple[int, dict[str, Any]]],
+    *,
+    limit: int,
+    min_absolute: int = 12,
+) -> list[dict[str, Any]]:
+    """One on-topic figure per ingested manual for multi-handbook comparison answers."""
+    selected: list[dict[str, Any]] = []
+    used_sources: set[str] = set()
+    for score, ref in sorted(scored, key=lambda pair: pair[0], reverse=True):
+        if score < min_absolute:
+            continue
+        source = _source_key_from_path(str(ref.get("path") or ""))
+        if source in used_sources:
+            continue
+        used_sources.add(source)
+        selected.append(ref)
+        if len(selected) >= limit:
+            break
+    return selected
+
+
 def _select_scored_refs_by_label(
     scored: list[tuple[int, dict[str, Any]]],
     *,
@@ -1545,9 +2144,21 @@ def _select_scored_refs(
     if not scored:
         return []
 
-    if _query_requests_multiple_figures(query or ""):
+    distinct_sources = {
+        _source_key_from_path(str(ref.get("path") or ""))
+        for score, ref in scored
+        if score > 0
+    }
+    if len(distinct_sources) >= 2:
+        cap = min(limit, _multi_figure_image_limit())
+        return _select_scored_refs_cross_manual(
+            scored, limit=cap, min_absolute=min(12, min_absolute)
+        )
+
+    targets = _listing_target_phrases(query or "", retrieved_text or "")
+    if len(targets) >= 2:
         cap = _multi_figure_image_limit()
-        if retrieved_text and _listing_target_phrases(query or "", retrieved_text):
+        if retrieved_text:
             return _select_scored_refs_for_listing(
                 scored,
                 query=query or "",
@@ -1606,68 +2217,63 @@ def explain_retrieval_supports_images(
     retrieved_docs: list[dict[str, Any]] | None = None,
     context_text: str | None = None,
     media_roots: list[Path] | None = None,
+    focus_text: str | None = None,
 ) -> dict[str, Any]:
     """Explain image gate decisions for debug dumps."""
     q = (query or "").strip()
     if not query_wants_kb_images(query):
         return {"ok": False, "reason": "non_kb_query"}
 
-    text = (context_text or "").strip()
-    max_score = _max_rerank_score(retrieved_docs)
-    if max_score is not None:
-        threshold = _image_min_rerank_score()
-        if max_score < threshold:
-            return {
-                "ok": False,
-                "reason": "low_rerank_score",
-                "max_rerank_score": max_score,
-                "threshold": threshold,
-            }
-        if not text:
-            return {"ok": False, "reason": "empty_retrieval_context"}
-        eligible = _collect_figure_refs(text, media_roots, query=query)
-        if not eligible:
-            return {"ok": False, "reason": "no_non_cover_figures"}
-        if not any(
-            _ref_passes_image_align_gate(q, ref, retrieved_text=text)
-            for ref in eligible
-        ):
-            return {"ok": False, "reason": "no_query_label_match"}
-        return {"ok": True, "reason": "rerank_score_ok", "max_rerank_score": max_score}
-
-    text = (context_text or "").strip()
-    if not text:
+    full = (context_text or "").strip()
+    focus = (focus_text or "").strip()
+    if full and not focus:
+        focus = focus_text_for_images(q, full)
+    if not full:
         return {"ok": False, "reason": "empty_retrieval_context"}
-
-    terms = _query_terms(q)
-    if not terms:
-        return {"ok": False, "reason": "no_query_terms"}
-
-    overlap = _term_overlap_ratio(q, text)
-    min_overlap = _image_min_term_overlap()
-    eligible = _collect_figure_refs(text, media_roots, query=query)
-    listing_ok = (
-        _query_requests_multiple_figures(q) and bool(_listing_target_phrases(q, text))
-    )
-    near_miss = overlap + 0.051 >= min_overlap
-    if overlap < min_overlap and not listing_ok and not (
-        near_miss
-        and eligible
-        and any(_figure_label_matches_query(q, _ref_effective_label(ref)) for ref in eligible)
-    ):
+    if not focus:
+        return {"ok": False, "reason": "empty_focus_context"}
+    if not _focus_qualifies_for_image_lookup(q, full, focus):
         return {
             "ok": False,
-            "reason": "low_term_overlap",
-            "overlap": overlap,
-            "threshold": min_overlap,
+            "reason": "no_focus_figure_anchor",
+            "focus_chars": len(focus),
+            "listing_in_focus": len(
+                _listing_targets_with_query_line_overlap(q, full, focus)
+            ),
         }
-    if not eligible:
-        return {"ok": False, "reason": "no_non_cover_figures"}
-    if not any(
-        _ref_passes_image_align_gate(q, ref, retrieved_text=text) for ref in eligible
-    ):
-        return {"ok": False, "reason": "no_query_label_match"}
-    return {"ok": True, "reason": "term_overlap_ok", "overlap": overlap}
+
+    max_score = _max_rerank_score(retrieved_docs)
+    ok = retrieval_supports_images(
+        query,
+        retrieved_docs=retrieved_docs,
+        context_text=full,
+        media_roots=media_roots,
+        focus_text=focus,
+    )
+    if ok:
+        overlap = _term_overlap_ratio(q, focus)
+        reason = "rerank_score_ok" if max_score is not None else "aligned_figures_in_focus"
+        payload: dict[str, Any] = {"ok": True, "reason": reason, "focus_chars": len(focus)}
+        if max_score is not None:
+            payload["max_rerank_score"] = max_score
+        else:
+            payload["overlap"] = overlap
+        return payload
+
+    if max_score is not None and max_score < _image_min_rerank_score():
+        return {
+            "ok": False,
+            "reason": "low_rerank_score",
+            "max_rerank_score": max_score,
+            "threshold": _image_min_rerank_score(),
+        }
+    overlap = _term_overlap_ratio(q, focus)
+    return {
+        "ok": False,
+        "reason": "no_query_label_match",
+        "overlap": overlap,
+        "focus_chars": len(focus),
+    }
 
 
 def explain_query_images(
@@ -1681,14 +2287,17 @@ def explain_query_images(
 ) -> dict[str, Any]:
     """Full image pipeline trace for debug dumps (no side effects)."""
     primary_text = (context or "").strip()
+    focus_text = focus_text_for_images(query or "", primary_text)
     gate = explain_retrieval_supports_images(
         query,
         retrieved_docs=retrieved_docs,
         context_text=primary_text,
         media_roots=media_roots,
+        focus_text=focus_text,
     )
     debug: dict[str, Any] = {
         "gate": gate,
+        "focus_text_preview": _truncate_ref_text(focus_text, 600),
         "anchor_phrases": [],
         "top_retrieval_lines": [],
         "refs_from_context": 0,
@@ -1702,20 +2311,28 @@ def explain_query_images(
     if not gate.get("ok"):
         return debug
 
-    merged_context = primary_text
+    merged_context = focus_text
     anchor_phrases = _extract_context_anchors(query, merged_context)
     debug["anchor_phrases"] = anchor_phrases[:12]
     debug["top_retrieval_lines"] = [
         {"overlap": overlap, "line": line[:200]}
-        for overlap, line in _ranked_retrieval_lines(query or "", merged_context, limit=6)
+        for overlap, line in _ranked_retrieval_lines(query or "", primary_text, limit=6)
     ]
 
-    from_context = extract_image_refs_from_context(primary_text)
+    source_hints = _merged_source_hints(primary_text, retrieved_docs)
+    debug["source_hints"] = sorted(source_hints)[:8]
+    debug["query_subject_needles"] = _query_subject_needles(query or "")
+
+    from_context = extract_image_refs_from_context(focus_text)
     from_supplement = supplement_refs_from_content_lists(
-        primary_text, media_roots, query=query
+        focus_text, media_roots, query=query, source_hints=source_hints
     )
     from_listing = supplement_refs_for_listing_targets(
-        primary_text, media_roots, query=query or ""
+        focus_text,
+        media_roots,
+        query=query or "",
+        source_hints=source_hints,
+        listing_source_text=primary_text,
     )
     debug["refs_from_context"] = len(from_context)
     debug["refs_from_supplement"] = len(from_supplement)
@@ -1736,7 +2353,11 @@ def explain_query_images(
             dropped.append({**summary, "drop_reason": "cover_page"})
             continue
         if _ref_passes_image_align_gate(
-            query or "", ref, retrieved_text=merged_context
+            query or "",
+            ref,
+            retrieved_text=merged_context,
+            source_hints=source_hints,
+            listing_source_text=primary_text,
         ):
             aligned_refs.append(ref)
         else:
@@ -1748,7 +2369,12 @@ def explain_query_images(
         debug["gate"] = {"ok": False, "reason": "no_query_label_match"}
         return debug
 
-    source_hints = _source_hints_from_text(merged_context)
+    if source_hints:
+        aligned_refs = [
+            ref
+            for ref in aligned_refs
+            if _ref_matches_source_hints(ref, source_hints)
+        ]
     scored_pairs = [
         (
             _score_ref_for_query(
@@ -1781,9 +2407,23 @@ def images_for_api(
     retrieved_docs: list[dict[str, Any]] | None = None,
     limit: int = 4,
 ) -> list[dict[str, Any]]:
-    """Turn retrieved context into Web-safe image descriptors."""
+    """Turn focus retrieval context into Web-safe image descriptors."""
     primary_text = (context or "").strip()
     if not primary_text:
+        return []
+
+    focus_text = focus_text_for_images(query or "", primary_text)
+    if not focus_text.strip():
+        logger.info("Skip related images: no query-aligned focus lines")
+        return []
+
+    if not _focus_qualifies_for_image_lookup(
+        query or "", primary_text, focus_text
+    ):
+        logger.info(
+            "Skip related images: focus has no query-anchored inline figures "
+            "and fewer than two listing topics"
+        )
         return []
 
     if not retrieval_supports_images(
@@ -1791,25 +2431,34 @@ def images_for_api(
         retrieved_docs=retrieved_docs,
         context_text=primary_text,
         media_roots=media_roots,
+        focus_text=focus_text,
     ):
         return []
 
-    anchor_phrases = _extract_context_anchors(query, primary_text)
-    source_hints = _source_hints_from_text(primary_text)
+    anchor_phrases = _extract_context_anchors(query, focus_text)
+    source_hints = _merged_source_hints(primary_text, retrieved_docs)
 
     refs = _refs_from_retrieved_docs_text(
-        primary_text, media_roots, query=query
+        focus_text,
+        media_roots,
+        query=query,
+        retrieved_docs=retrieved_docs,
+        full_context=primary_text,
     )
     refs = [
         ref
         for ref in refs
         if not _is_cover_page_ref(ref)
         and _ref_passes_image_align_gate(
-            query or "", ref, retrieved_text=primary_text
+            query or "",
+            ref,
+            retrieved_text=focus_text,
+            source_hints=source_hints,
+            listing_source_text=primary_text,
         )
     ]
     if not refs:
-        logger.info("Skip related images: no figure aligns with retrieved lines")
+        logger.info("Skip related images: no figure aligns with focus lines")
         return []
 
     scored = [
@@ -1819,14 +2468,17 @@ def images_for_api(
                 query,
                 anchor_phrases=anchor_phrases,
                 source_hints=source_hints,
-                retrieved_text=primary_text,
+                retrieved_text=focus_text,
             ),
             ref,
         )
         for ref in refs
     ]
     selected = _select_scored_refs(
-        scored, limit=limit, query=query, retrieved_text=primary_text
+        scored,
+        limit=limit,
+        query=query,
+        retrieved_text=focus_text,
     )
 
     out: list[dict[str, Any]] = []
@@ -1873,3 +2525,35 @@ def images_for_api(
             len(refs),
         )
     return out
+
+
+def resolve_query_images(
+    context: str,
+    media_roots: list[Path],
+    *,
+    query: str | None = None,
+    extra_context: str | None = None,
+    retrieved_docs: list[dict[str, Any]] | None = None,
+    limit: int = 4,
+) -> tuple[list[dict[str, Any]], dict[str, Any]]:
+    """Authoritative query-time images + debug (Web finalize and batch test)."""
+    primary_text = (context or "").strip()
+    debug = explain_query_images(
+        primary_text,
+        media_roots,
+        query=query,
+        extra_context=extra_context,
+        retrieved_docs=retrieved_docs,
+        limit=limit,
+    )
+    if not (debug.get("gate") or {}).get("ok"):
+        return [], debug
+    images = images_for_api(
+        primary_text,
+        media_roots,
+        query=query,
+        extra_context=extra_context,
+        retrieved_docs=retrieved_docs,
+        limit=limit,
+    )
+    return images, debug

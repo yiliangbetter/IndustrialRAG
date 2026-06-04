@@ -146,15 +146,14 @@ def resolve_machine_profile(query: str) -> dict[str, Any] | None:
     return best[1] if best else None
 
 
+# Ingest template line present on maintenance-manual forewords (not a domain phrase list).
 _CATALOG_MODEL_MARKER = "本手册适用产品型号"
-_EDGE_BAND_CATALOG_PATH_HINTS = (
-    "封边机",
-    "自动封边机",
-    "双端封边机",
-    "高速自动",
-    "高速智能",
-    "连线项目",
-)
+
+
+def _query_discriminative_terms(query: str) -> list[str]:
+    from raganything.utils import discriminative_terms  # noqa: WPS433
+
+    return discriminative_terms(query, min_len=3)
 
 
 def is_catalog_product_model_query(query: str) -> bool:
@@ -164,14 +163,14 @@ def is_catalog_product_model_query(query: str) -> bool:
     q = (query or "").strip()
     if not q:
         return False
-    if re.search(r"型号|机型|产品", q) and re.search(
-        r"哪些|多少|一共|总共|全部|有哪些|几种|列举|清单|概况|多少个",
-        q,
-    ):
-        return True
-    if re.search(r"一共有多少|多少种", q) and re.search(r"型号|封边机", q):
-        return True
-    return False
+    asks_scope = bool(
+        re.search(
+            r"哪些|多少|一共|总共|全部|有哪些|几种|列举|清单|概况|多少个|一共有多少|多少种",
+            q,
+        )
+    )
+    asks_models = bool(re.search(r"型号|机型|产品", q))
+    return asks_scope and asks_models
 
 
 def _default_min_rerank_score() -> float:
@@ -190,19 +189,19 @@ def catalog_query_min_rerank_score() -> float:
         return 0.0
 
 
-def _catalog_path_allowed(path: str) -> bool:
-    if not path:
-        return False
-    if any(
-        token in path
-        for token in ("六面钻", "加工中心", "PC封边机电气", "电气报警")
-    ):
-        return False
-    return any(hint in path for hint in _EDGE_BAND_CATALOG_PATH_HINTS)
-
-
 def _chunk_has_catalog_marker(doc: dict) -> bool:
     return _CATALOG_MODEL_MARKER in str(doc.get("content") or "")
+
+
+def _catalog_chunk_relevant_to_query(query: str, doc: dict) -> bool:
+    """Keep foreword catalog lines whose path/body overlap query terms (no manual name lists)."""
+    if not _chunk_has_catalog_marker(doc):
+        return False
+    terms = _query_discriminative_terms(query)
+    if not terms:
+        return True
+    blob = f"{_doc_path(doc)} {str(doc.get('content') or '')[:500]}"
+    return any(len(term) >= 3 and term in blob for term in terms)
 
 
 def _load_catalog_chunks_from_storage() -> list[dict]:
@@ -241,7 +240,7 @@ def supplement_catalog_product_model_chunks(
     *,
     rerank_pool: list[dict] | None = None,
 ) -> list[dict]:
-    """Ensure each edge-band manual's 「本手册适用产品型号」 chunk is present."""
+    """Ensure each relevant manual's 「本手册适用产品型号」 foreword chunk is present."""
     if not _env_bool("RAG_CATALOG_QUERY_BOOST", True):
         return docs
     if not is_catalog_product_model_query(query):
@@ -254,7 +253,7 @@ def supplement_catalog_product_model_chunks(
         path = _doc_path(doc)
         if not path or path in seen_paths:
             return
-        if not _chunk_has_catalog_marker(doc) or not _catalog_path_allowed(path):
+        if not _catalog_chunk_relevant_to_query(query, doc):
             return
         seen_paths.add(path)
         boosted = dict(doc)
@@ -588,10 +587,9 @@ def build_catalog_model_listing_prompt(query: str) -> str:
     if not is_catalog_product_model_query(query):
         return ""
     return (
-        "用户询问封边机产品线型号总览：请按每本维护保养手册分别列出"
-        "「本手册适用产品型号」中的全部型号；须包含高速智能封边机（连线项目手册，"
-        "如 NB9-Smart、NB10-Smart）以及自动/双端/高速自动各册型号，"
-        "不得只汇总其中几本手册。"
+        "用户询问产品线/型号总览：请按检索到的每一份手册分别列出正文中"
+        f"「{_CATALOG_MODEL_MARKER}」一行里的全部型号；"
+        "有几份来源含该行就列几份，不得只汇总其中部分来源。"
     )
 
 
