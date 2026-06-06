@@ -223,9 +223,9 @@ async def query_progress_hooks() -> AsyncIterator[asyncio.Queue[dict[str, str]]]
             scripts_dir = Path(__file__).resolve().parent
             if str(scripts_dir) not in sys.path:
                 sys.path.insert(0, str(scripts_dir))
-            from query_doc_steering import get_steering_report  # noqa: WPS433
+            from query_doc_steering import consume_filter_report  # noqa: WPS433
 
-            report = get_steering_report()
+            report = consume_filter_report()
             if report:
                 _steering_report.set(report)
                 q = _progress_queue.get()
