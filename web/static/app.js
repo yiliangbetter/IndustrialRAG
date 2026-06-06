@@ -33,6 +33,8 @@ let latestSetupStatus = null;
 /** When false, user scrolled up — do not auto-jump to bottom on every token. */
 let scrollPinnedToBottom = true;
 let scrollRaf = 0;
+/** Last clarification session_id from SSE (multi-turn gate). */
+let pendingClarifySessionId = null;
 
 function getMessagesEnd() {
   let end = document.getElementById("messages-end");
@@ -382,11 +384,183 @@ function parseSseLines(buffer, onEvent) {
   return rest;
 }
 
-async function streamQuery(query, loadingEl) {
+function showClarificationPanel(loadingEl, ev) {
+  stopLoadingMessage(loadingEl);
+  loadingEl.classList.remove("streaming");
+  loadingEl.classList.add("clarification-panel");
+  loadingEl.innerHTML = "";
+
+  const roleEl = document.createElement(`d` + `iv`);
+  roleEl.className = "role";
+  roleEl.textContent = "助手";
+  loadingEl.appendChild(roleEl);
+
+  const bodyEl = document.createElement(`d` + `iv`);
+  bodyEl.className = "body";
+
+  const intro = document.createElement("p");
+  intro.className = "clarify-intro";
+  const bandLabel =
+    ev.band === "unrelated"
+      ? "您的问题与手册匹配度较低"
+      : "您的问题较模糊";
+  intro.textContent =
+    ev.message ||
+    `${bandLabel}（匹配分 ${ev.original_score ?? "—"}）。请选择更具体的问法，或仍用原问题继续：`;
+  bodyEl.appendChild(intro);
+
+  if (ev.preview_snippets && ev.preview_snippets.length) {
+    const hint = document.createElement("details");
+    hint.className = "clarify-preview";
+    const sum = document.createElement("summary");
+    sum.textContent = "查看检索摘要";
+    hint.appendChild(sum);
+    const pre = document.createElement("pre");
+    pre.textContent = ev.preview_snippets.join("\n\n");
+    hint.appendChild(pre);
+    bodyEl.appendChild(hint);
+  }
+
+  const list = document.createElement("div");
+  list.className = "clarify-options";
+  const options = ev.options || [];
+  if (ev.session_id) {
+    loadingEl.dataset.clarifySessionId = ev.session_id;
+  }
+  if (ev.original_query) {
+    loadingEl.dataset.clarifyOriginalQuery = ev.original_query;
+  }
+
+  options.forEach((opt, idx) => {
+    const btn = document.createElement("button");
+    btn.type = "button";
+    btn.className = "btn clarify-option";
+    const label = opt.label || opt.query || `选项 ${idx + 1}`;
+    btn.textContent = label;
+    btn.title = opt.query || "";
+    btn.addEventListener("click", () => {
+      void resumeClarifiedQuery({
+        originalQuery: ev.original_query || queryInput.dataset.lastQuery || "",
+        choice: opt.query,
+        sessionId: ev.session_id || pendingClarifySessionId,
+        clarifyPanelEl: loadingEl,
+        clickedBtn: btn,
+      });
+    });
+    list.appendChild(btn);
+  });
+  bodyEl.appendChild(list);
+
+  const actions = document.createElement("div");
+  actions.className = "clarify-actions";
+  const btnOriginal = document.createElement("button");
+  btnOriginal.type = "button";
+  btnOriginal.className = "btn secondary";
+  btnOriginal.textContent = "仍用原问题";
+  btnOriginal.addEventListener("click", () => {
+    void resumeClarifiedQuery({
+      originalQuery: ev.original_query || queryInput.dataset.lastQuery || "",
+      choice: "use_original",
+      sessionId: ev.session_id || pendingClarifySessionId,
+      clarifyPanelEl: loadingEl,
+      clickedBtn: btnOriginal,
+    });
+  });
+  actions.appendChild(btnOriginal);
+  bodyEl.appendChild(actions);
+
+  loadingEl.appendChild(bodyEl);
+  scrollMessages(true);
+}
+
+function setClarifyPanelBusy(panel, busy) {
+  if (!panel) return;
+  panel.querySelectorAll("button.clarify-option, .clarify-actions button").forEach(
+    (btn) => {
+      btn.disabled = busy;
+    }
+  );
+}
+
+function markClarifyChoice(panel, clickedBtn) {
+  if (!panel) return;
+  panel
+    .querySelectorAll("button.clarify-option, .clarify-actions button")
+    .forEach((btn) => btn.classList.remove("clarify-option-selected"));
+  if (clickedBtn) clickedBtn.classList.add("clarify-option-selected");
+}
+
+async function resumeClarifiedQuery({
+  originalQuery,
+  choice,
+  sessionId,
+  clarifyPanelEl,
+  clickedBtn,
+}) {
+  const q = (originalQuery || "").trim();
+  if (!q) return;
+  const panel =
+    clarifyPanelEl ||
+    messagesEl?.querySelector(".msg.clarification-panel:last-of-type");
+  const sid =
+    sessionId ||
+    panel?.dataset.clarifySessionId ||
+    pendingClarifySessionId ||
+    null;
+
+  markClarifyChoice(panel, clickedBtn);
+  btnSend.disabled = true;
+  setClarifyPanelBusy(panel, true);
+
+  const loading = createLoadingMessage();
+  if (choice === "use_original") {
+    setLoadingStatus(loading, "将按原问题检索知识库…");
+  } else if (choice) {
+    const short =
+      choice.length > 36 ? `${choice.slice(0, 35)}…` : choice;
+    setLoadingStatus(loading, `正在检索：${short}`);
+  }
+
+  scrollPinnedToBottom = true;
+  try {
+    await streamQuery(
+      {
+        query: q,
+        clarification_choice: choice,
+        session_id: sid,
+      },
+      loading
+    );
+  } catch (err) {
+    loading.remove();
+    appendMessage("system", `错误：${err.message || err}`);
+  } finally {
+    btnSend.disabled = false;
+    setClarifyPanelBusy(panel, false);
+    queryInput.focus();
+  }
+}
+
+async function streamQuery(params, loadingEl) {
+  const query =
+    typeof params === "string" ? params : (params && params.query) || "";
+  const clarification_choice =
+    typeof params === "object" && params
+      ? params.clarification_choice
+      : undefined;
+  const session_id =
+    typeof params === "object" && params ? params.session_id : undefined;
+
   const res = await fetch("/api/query/stream", {
     method: "POST",
     headers: { "Content-Type": "application/json" },
-    body: JSON.stringify({ query, mode: queryMode.value, stream: true }),
+    body: JSON.stringify({
+      query,
+      mode: queryMode.value,
+      stream: true,
+      clarification_choice: clarification_choice ?? null,
+      session_id: session_id ?? null,
+    }),
   });
 
   if (!res.ok) {
@@ -406,11 +580,22 @@ async function streamQuery(query, loadingEl) {
   let buf = "";
   let ui = null;
   let gotContent = false;
+  let clarifyEnded = false;
   let streamError = null;
 
   const handleEvent = (ev) => {
     if (ev.type === "status") {
       if (!gotContent) setLoadingStatus(loadingEl, ev.text);
+      return;
+    }
+    if (ev.type === "clarification") {
+      pendingClarifySessionId = ev.session_id || null;
+      gotContent = true;
+      showClarificationPanel(loadingEl, ev);
+      return;
+    }
+    if (ev.type === "clarification_done") {
+      clarifyEnded = true;
       return;
     }
     if (ev.type === "retrieval_scope") {
@@ -481,6 +666,10 @@ async function streamQuery(query, loadingEl) {
   buf = parseSseLines(buf + "\n", handleEvent);
   if (streamError) throw streamError;
 
+  if (clarifyEnded || loadingEl.classList.contains("clarification-panel")) {
+    return;
+  }
+
   if (!gotContent) {
     stopLoadingMessage(loadingEl);
     loadingEl.innerHTML = "";
@@ -489,7 +678,8 @@ async function streamQuery(query, loadingEl) {
     roleEl.textContent = "助手";
     const bodyEl = document.createElement(`d` + `iv`);
     bodyEl.className = "body";
-    bodyEl.textContent = "(空回答)";
+    bodyEl.textContent =
+      "未收到回答。若问题较模糊，应出现可选问法；请强制刷新页面（Ctrl+F5）后重试，或查看服务端日志。";
     loadingEl.appendChild(roleEl);
     loadingEl.appendChild(bodyEl);
   } else {
@@ -509,12 +699,14 @@ composer.addEventListener("submit", async (e) => {
 
   appendMessage("user", q);
   queryInput.value = "";
+  queryInput.dataset.lastQuery = q;
+  pendingClarifySessionId = null;
   scrollPinnedToBottom = true;
   btnSend.disabled = true;
   const loading = createLoadingMessage();
 
   try {
-    await streamQuery(q, loading);
+    await streamQuery({ query: q }, loading);
   } catch (err) {
     loading.remove();
     appendMessage("system", `错误：${err.message || err}`);

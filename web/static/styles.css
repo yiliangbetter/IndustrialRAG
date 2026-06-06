@@ -842,6 +842,57 @@ body {
   color: var(--danger);
 }
 
+.msg.clarification-panel .clarify-intro {
+  margin: 0 0 0.75rem;
+  color: var(--text);
+}
+
+.msg.clarification-panel .clarify-preview {
+  margin-bottom: 0.75rem;
+  font-size: 0.92rem;
+  color: var(--text-muted);
+}
+
+.msg.clarification-panel .clarify-preview pre {
+  white-space: pre-wrap;
+  max-height: 8rem;
+  overflow: auto;
+  font-size: 0.85rem;
+  margin: 0.35rem 0 0;
+}
+
+.clarify-options {
+  display: flex;
+  flex-direction: column;
+  gap: 0.5rem;
+  margin-bottom: 0.75rem;
+}
+
+button.clarify-option {
+  text-align: left;
+  white-space: normal;
+  line-height: 1.4;
+  padding: 0.55rem 0.75rem;
+}
+
+button.clarify-option.clarify-option-selected,
+.clarify-actions button.clarify-option-selected {
+  border-color: var(--accent, #3b82f6);
+  box-shadow: inset 0 0 0 1px var(--accent, #3b82f6);
+}
+
+button.clarify-option:disabled,
+.clarify-actions button:disabled {
+  opacity: 0.72;
+  cursor: wait;
+}
+
+.clarify-actions {
+  display: flex;
+  gap: 0.5rem;
+  flex-wrap: wrap;
+}
+
 @media (max-width: 768px) {
   .app {
     grid-template-columns: 1fr;
