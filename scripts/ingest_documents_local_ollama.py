@@ -36,6 +36,7 @@ from raganything import RAGAnything, RAGAnythingConfig
 
 OLLAMA_HOST = os.getenv("OLLAMA_HOST", "http://localhost:11434")
 OLLAMA_LLM_MODEL = os.getenv("OLLAMA_LLM_MODEL", "llama3.2")
+OLLAMA_VISION_MODEL = os.getenv("OLLAMA_VISION_MODEL", OLLAMA_LLM_MODEL)
 # bge-m3 supports ~8192 tokens; bge-large-zh-v1.5 is limited to 512 (use CHUNK_TOKEN_SIZE<=400).
 OLLAMA_EMBEDDING_MODEL = os.getenv("OLLAMA_EMBEDDING_MODEL", "bge-m3")
 OLLAMA_EMBEDDING_DIM = int(os.getenv("OLLAMA_EMBEDDING_DIM", "1024"))
@@ -106,6 +107,60 @@ async def ollama_llm_model_func(
     )
 
 
+async def ollama_vision_model_func(
+    prompt: str,
+    system_prompt: Optional[str] = None,
+    history_messages: List[Dict] = None,
+    image_data: Optional[str] = None,
+    messages: Optional[List[Dict]] = None,
+    **kwargs,
+) -> str:
+    if messages:
+        return await openai_complete_if_cache(
+            model=OLLAMA_VISION_MODEL,
+            prompt="",
+            system_prompt=None,
+            history_messages=[],
+            messages=messages,
+            base_url=OLLAMA_BASE_URL,
+            api_key=OLLAMA_API_KEY,
+            **kwargs,
+        )
+    if image_data:
+        return await openai_complete_if_cache(
+            model=OLLAMA_VISION_MODEL,
+            prompt="",
+            system_prompt=None,
+            history_messages=[],
+            messages=[
+                {"role": "system", "content": system_prompt}
+                if system_prompt
+                else None,
+                {
+                    "role": "user",
+                    "content": [
+                        {"type": "text", "text": prompt},
+                        {
+                            "type": "image_url",
+                            "image_url": {
+                                "url": f"data:image/jpeg;base64,{image_data}",
+                            },
+                        },
+                    ],
+                },
+            ],
+            base_url=OLLAMA_BASE_URL,
+            api_key=OLLAMA_API_KEY,
+            **kwargs,
+        )
+    return await ollama_llm_model_func(
+        prompt,
+        system_prompt=system_prompt,
+        history_messages=history_messages,
+        **kwargs,
+    )
+
+
 def _truncate_for_embed(text: str, max_tokens: int) -> str:
     model = OLLAMA_EMBEDDING_MODEL.lower()
     if any(m in model for m in _BGE_SHORT_CONTEXT_MODELS):
@@ -146,8 +201,8 @@ async def _build_rag(working_dir: Path, parser_output_dir: Path) -> RAGAnything:
         parse_method=os.getenv("PARSE_METHOD", "auto"),
         parser_output_dir=str(parser_output_dir),
         enable_image_processing=False,
-        enable_table_processing=False,
-        enable_equation_processing=False,
+        enable_table_processing=True,
+        enable_equation_processing=True,
         max_concurrent_files=int(os.getenv("MAX_CONCURRENT_FILES", "1")),
     )
 
@@ -168,6 +223,7 @@ async def _build_rag(working_dir: Path, parser_output_dir: Path) -> RAGAnything:
         config=config,
         lightrag=lightrag,
         llm_model_func=ollama_llm_model_func,
+        vision_model_func=ollama_vision_model_func,
         embedding_func=embedding_func,
     )
 
@@ -285,7 +341,7 @@ async def async_main() -> None:
     p.add_argument(
         "--skip-multimodal",
         action=argparse.BooleanOptionalAction,
-        default=True,
+        default=False,
     )
     p.add_argument(
         "--query-mode",
@@ -306,7 +362,10 @@ async def async_main() -> None:
     print(f"Input:   {input_folder}")
     print(f"Storage: {args.working_dir}")
     print(f"MinerU:  {args.parser_output_dir}")
-    print(f"Ollama:  LLM={OLLAMA_LLM_MODEL} embed={OLLAMA_EMBEDDING_MODEL}")
+    print(
+        f"Ollama:  LLM={OLLAMA_LLM_MODEL} vision={OLLAMA_VISION_MODEL} "
+        f"embed={OLLAMA_EMBEDDING_MODEL}"
+    )
     print(flush=True)
 
     rag = await _build_rag(args.working_dir, args.parser_output_dir)
