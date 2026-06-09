@@ -77,9 +77,6 @@ test_*
 # Cline files
 memory-bank/
 
-# Git worktrees (parallel feature checkouts)
-.worktrees/
-
 # AI
 .claude/
 .cursor/

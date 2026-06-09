@@ -1,10 +1,5 @@
-flowchart TD
-    U[用户输入] --> G[计算 score<br/>aquery_data 轻量检索]
-    G -->|score >= upper| R[现有 aquery 全流程]
-    G -->|lower <= score < upper| B[Case B: LLM+k 改写+再检索]
-    G -->|score < lower| A[Case A: LLM+k 改写+再检索]
-    B --> C{候选问法}
-    A --> C
-    C -->|用户选择 / 自动首条| R
-    C -->|仍无合格候选| H[提示用户换说法<br/>不调用 RAG]
-    R --> SSE[回答 + 配图]
+其它可测 B 的：
+
+残胶怎么弄（score≈0.43，2 chunks）
+多久换一次（score≈0.31，3 chunks）
+润滑怎么做（score≈0.29，贴下边界）

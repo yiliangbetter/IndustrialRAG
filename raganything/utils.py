@@ -6,8 +6,9 @@ Contains helper functions for content separation, text insertion, and other util
 
 import base64
 import math
+import os
 import re
-from typing import Dict, List, Any, Tuple
+from typing import Any, Dict, List, Tuple
 from pathlib import Path
 from lightrag.utils import logger
 
@@ -398,6 +399,211 @@ def build_image_ref_block(
     return "\n".join(lines)
 
 
+_IMAGE_REF_MARKER = "[图片]"
+_INGEST_IMAGE_PATH_RE = re.compile(
+    r"图片路径[：:]\s*(.+?)(?:\n|$)", re.MULTILINE
+)
+
+
+def _is_image_ref_segment(segment: str) -> bool:
+    return (segment or "").lstrip().startswith(_IMAGE_REF_MARKER)
+
+
+def _dedupe_key_for_image_segment(segment: str) -> str:
+    match = _INGEST_IMAGE_PATH_RE.search(segment or "")
+    if match:
+        return Path(match.group(1).strip().strip('"').strip("'")).name
+    return (segment or "").strip()
+
+
+def coalesce_text_image_segments(segments: List[str]) -> List[str]:
+    """Merge each text segment with immediately following ``[图片]`` blocks for indexing.
+
+    Keeps figure metadata in the same vector chunk as the anchor body so rerank +
+    steering filter text and inline figures together (Route A ingest).
+    """
+    out: List[str] = []
+    i = 0
+    n = len(segments)
+    while i < n:
+        seg = (segments[i] or "").strip()
+        if not seg:
+            i += 1
+            continue
+        if _is_image_ref_segment(seg):
+            out.append(seg)
+            i += 1
+            continue
+        parts = [seg]
+        seen_images: set[str] = set()
+        j = i + 1
+        while j < n:
+            nxt = (segments[j] or "").strip()
+            if not nxt or not _is_image_ref_segment(nxt):
+                break
+            key = _dedupe_key_for_image_segment(nxt)
+            if key not in seen_images:
+                seen_images.add(key)
+                parts.append(nxt)
+            j += 1
+        out.append("\n\n".join(parts))
+        i = j
+    return out
+
+
+_TABLE_INGEST_MARKER = "[Table]"
+_INGEST_SEGMENT_DELIMITER = "\n<<<RAG_SEG_BOUNDARY>>>\n"
+_TABLE_ROW_RE = re.compile(r"<tr>.*?</tr>", re.IGNORECASE | re.DOTALL)
+
+
+def table_aware_ingest_enabled() -> bool:
+    raw = (os.getenv("RAG_TABLE_AWARE_INGEST") or "true").strip().lower()
+    return raw in ("1", "true", "yes", "on")
+
+
+def _ingest_chunk_token_size(lightrag) -> int:
+    for attr in ("chunk_token_size", "max_chunk_tokens"):
+        val = getattr(lightrag, attr, None)
+        if isinstance(val, int) and val > 0:
+            return val
+    raw = os.getenv("CHUNK_SIZE") or "1200"
+    try:
+        return max(256, int(raw))
+    except ValueError:
+        return 1200
+
+
+def _segment_token_count(tokenizer, text: str) -> int:
+    try:
+        return len(tokenizer.encode(text))
+    except Exception:
+        return len(text.split())
+
+
+def _split_text_by_token_size(
+    text: str,
+    tokenizer,
+    max_tokens: int,
+    *,
+    overlap: int = 100,
+) -> List[str]:
+    if not text.strip():
+        return []
+    if _segment_token_count(tokenizer, text) <= max_tokens:
+        return [text]
+    tokens = tokenizer.encode(text)
+    out: List[str] = []
+    start = 0
+    while start < len(tokens):
+        end = min(start + max_tokens, len(tokens))
+        out.append(tokenizer.decode(tokens[start:end]))
+        if end >= len(tokens):
+            break
+        start = max(0, end - overlap)
+    return out
+
+
+def _split_table_html_segment(
+    segment: str,
+    tokenizer,
+    max_tokens: int,
+) -> List[str]:
+    piece = (segment or "").strip()
+    if not piece:
+        return []
+    marker_idx = piece.find(_TABLE_INGEST_MARKER)
+    if marker_idx < 0:
+        return _split_text_by_token_size(piece, tokenizer, max_tokens)
+    caption = piece[:marker_idx].strip()
+    caption_prefix = f"{caption}\n\n" if caption else ""
+    table_prefix = _TABLE_INGEST_MARKER + "\n"
+    body = piece[marker_idx + len(_TABLE_INGEST_MARKER) :].lstrip("\n")
+    prefix = caption_prefix + table_prefix
+
+    rows = _TABLE_ROW_RE.findall(body)
+    if not rows:
+        return _split_text_by_token_size(prefix + body, tokenizer, max_tokens)
+
+    header, data_rows = rows[0], rows[1:]
+    if not data_rows:
+        chunk = prefix + header
+        if _segment_token_count(tokenizer, chunk) <= max_tokens:
+            return [chunk]
+        return _split_text_by_token_size(chunk, tokenizer, max_tokens)
+
+    out: List[str] = []
+    batch: List[str] = []
+    for row in data_rows:
+        candidate = prefix + header + "".join(batch + [row])
+        if _segment_token_count(tokenizer, candidate) > max_tokens and batch:
+            out.append(prefix + header + "".join(batch))
+            batch = [row]
+        elif _segment_token_count(tokenizer, candidate) > max_tokens:
+            out.append(prefix + header + row)
+            batch = []
+        else:
+            batch.append(row)
+    if batch:
+        out.append(prefix + header + "".join(batch))
+    return out or [piece]
+
+
+def build_table_aware_ingest_segments(document_parts: List[str]) -> List[str]:
+    """Keep each ``[Table]`` block intact; coalesce adjacent non-table parts."""
+    segments: List[str] = []
+    buf: List[str] = []
+
+    def flush_buf() -> None:
+        nonlocal buf
+        if not buf:
+            return
+        sub_parts = [p.strip() for p in "\n\n".join(buf).split("\n\n") if p.strip()]
+        segments.extend(coalesce_text_image_segments(sub_parts))
+        buf = []
+
+    for part in document_parts:
+        piece = (part or "").strip()
+        if not piece:
+            continue
+        if _TABLE_INGEST_MARKER in piece:
+            flush_buf()
+            segments.append(piece)
+            continue
+        buf.append(piece)
+    flush_buf()
+    return segments
+
+
+def prepare_table_aware_ingest_segments(
+    document_parts: List[str],
+    tokenizer,
+    max_tokens: int,
+) -> List[str]:
+    merged = build_table_aware_ingest_segments(document_parts)
+    prepared: List[str] = []
+    for seg in merged:
+        if _TABLE_INGEST_MARKER in seg:
+            prepared.extend(_split_table_html_segment(seg, tokenizer, max_tokens))
+            continue
+        if _segment_token_count(tokenizer, seg) <= max_tokens:
+            prepared.append(seg)
+        else:
+            prepared.extend(_split_text_by_token_size(seg, tokenizer, max_tokens))
+    out = [s for s in prepared if s.strip()]
+    return out
+
+
+def compute_table_aware_ingest_segments(lightrag, document_parts: List[str]) -> List[str]:
+    """Prepared ingest segments (table-aware split; no flatten when matrix ingest is on)."""
+    if not table_aware_ingest_enabled() or not document_parts:
+        return list(document_parts or [])
+    tokenizer = getattr(lightrag, "tokenizer", None)
+    if tokenizer is None:
+        return list(document_parts)
+    max_tokens = _ingest_chunk_token_size(lightrag)
+    return prepare_table_aware_ingest_segments(document_parts, tokenizer, max_tokens)
+
+
 def _bbox_center(bbox: Any) -> tuple[float, float] | None:
     if not isinstance(bbox, (list, tuple)) or len(bbox) < 4:
         return None
@@ -778,6 +984,8 @@ async def insert_text_content(
     split_by_character_only: bool = False,
     ids: str | list[str] | None = None,
     file_paths: str | list[str] | None = None,
+    *,
+    document_parts: List[str] | None = None,
 ):
     """
     Insert pure text content into LightRAG
@@ -791,8 +999,37 @@ async def insert_text_content(
         split_by_character is None, this parameter is ignored.
         ids: single string of the document ID or list of unique document IDs, if not provided, MD5 hash IDs will be generated
         file_paths: single string of the file path or list of file paths, used for citation
+        document_parts: optional pre-split parts (``[Table]`` blocks stay atomic when table-aware ingest is on)
     """
     logger.info("Starting text content insertion into LightRAG...")
+
+    if (
+        table_aware_ingest_enabled()
+        and document_parts
+        and isinstance(input, str)
+    ):
+        tokenizer = getattr(lightrag, "tokenizer", None)
+        if tokenizer is not None:
+            max_tokens = _ingest_chunk_token_size(lightrag)
+            segments = prepare_table_aware_ingest_segments(
+                document_parts, tokenizer, max_tokens
+            )
+            if segments:
+                blob = _INGEST_SEGMENT_DELIMITER.join(segments)
+                logger.info(
+                    "Table-aware ingest: %d segment(s), delimiter split (max_tokens=%d)",
+                    len(segments),
+                    max_tokens,
+                )
+                await lightrag.ainsert(
+                    input=blob,
+                    file_paths=file_paths,
+                    split_by_character=_INGEST_SEGMENT_DELIMITER,
+                    split_by_character_only=True,
+                    ids=ids,
+                )
+                logger.info("Text content insertion complete")
+                return
 
     # Use LightRAG's insert method with all parameters
     await lightrag.ainsert(

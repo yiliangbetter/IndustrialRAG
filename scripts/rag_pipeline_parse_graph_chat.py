@@ -216,6 +216,11 @@ async def _remove_existing_docs_for_file(rag, rel: str) -> int:
         seen.add(doc_id)
         try:
             await delete(doc_id)
+            wd = getattr(lightrag, "working_dir", None)
+            if wd:
+                from raganything.table_matrix import delete_matrix_for_doc  # noqa: WPS433
+
+                delete_matrix_for_doc(wd, doc_id)
             removed += 1
         except Exception:
             continue

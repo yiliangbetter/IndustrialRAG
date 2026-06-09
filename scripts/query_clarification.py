@@ -463,9 +463,9 @@ async def score_candidate_queries(
     band: Band,
 ) -> list[CandidateOption]:
     cfg = load_clarify_config()
-    threshold = (
-        cfg.threshold_lower if band == "unrelated" else cfg.threshold_upper
-    )
+    # Case A (unrelated) and Case B (vague): keep candidates with score > upper (docs/多轮问答.txt).
+    _ = band
+    threshold = cfg.threshold_upper
 
     async def _one(cand: str) -> CandidateOption:
         assess = await assess_query_fit(rag, cand)
@@ -633,11 +633,7 @@ async def run_clarification_gate(
 
     await _emit_status(on_status, "正在评估推荐问法与手册匹配度…")
     options = await score_candidate_queries(rag, alts, band=effective_band)
-    min_score = (
-        cfg.threshold_lower
-        if effective_band == "unrelated"
-        else cfg.threshold_upper
-    )
+    min_score = cfg.threshold_upper
     qualified = [o for o in options if o.score > min_score]
 
     if qualified:

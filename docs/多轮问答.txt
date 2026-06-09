@@ -23,7 +23,7 @@
 
  3. 将这 k 个问题逐个与数据库进行匹配。
 
- 4. 返回所有匹配度 > threshold_lower 的问题（或按策略返回第一个满足条件的）。
+ 4. 返回所有匹配度 > threshold_upper 的问题（或按策略返回第一个满足条件的）。
 
 情况B：threshold_lower ≤ score < threshold_upper（匹配度较低但有一定指向性）
 

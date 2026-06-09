@@ -173,7 +173,83 @@ def is_catalog_product_model_query(query: str) -> bool:
     return asks_scope and asks_models
 
 
+def table_filter_needle(query: str) -> str | None:
+    """Filter value the user wants to match in tabular rows (from the question wording)."""
+    q = (query or "").strip()
+    if not q:
+        return None
+    m = re.search(r"使用\s*([^？?，,；;\n]+?)(?:[？?]|$)", q)
+    if m:
+        needle = m.group(1).strip()
+        if needle:
+            return needle
+    for hint in re.findall(r'[「"\u201c]([^」"\u201d]+)[」"\u201d]', q):
+        if hint.strip():
+            return hint.strip()
+    return None
+
+
+def _table_filter_min_matching_rows() -> int:
+    raw = os.getenv("RAG_TABLE_FILTER_MIN_ROWS") or "2"
+    try:
+        return max(1, int(raw))
+    except ValueError:
+        return 2
+
+
+def _table_row_matches_filter(row_html: str, needle: str) -> bool:
+    tds = [td.strip() for td in re.findall(r"<td[^>]*>([^<]+)</td>", row_html, re.I)]
+    if not tds or needle not in row_html:
+        return False
+    if needle in tds[-1]:
+        return True
+    if len(tds) >= 2:
+        return any(needle in td for td in tds[1:])
+    return False
+
+
+def detect_table_filter_signal(query: str, text: str) -> bool:
+    """True when retrieved context has multiple HTML table rows matching the filter value."""
+    needle = table_filter_needle(query)
+    if not needle or not text or "<tr" not in text.lower():
+        return False
+    rows = re.findall(r"<tr>.*?</tr>", text, re.I | re.DOTALL)
+    matches = sum(1 for row in rows if _table_row_matches_filter(row, needle))
+    return matches >= _table_filter_min_matching_rows()
+
+
+def is_table_filter_listing_query(query: str, context: str | None = None) -> bool:
+    """Confirmed table-filter listing — requires retrieval context unless explicitly passed."""
+    if not (query or "").strip():
+        return False
+    if context is None:
+        return False
+    return detect_table_filter_signal(query, context)
+
+
+def _append_table_filter_user_prompt(query_param: Any, query: str) -> None:
+    if query_param is None:
+        return
+    extra = build_table_filter_listing_prompt(query)
+    if not extra:
+        return
+    existing = str(getattr(query_param, "user_prompt", None) or "").strip()
+    if extra in existing:
+        return
+    query_param.user_prompt = f"{existing}\n\n{extra}".strip() if existing else extra
+
+
 def _default_min_rerank_score() -> float:
+    if (os.getenv("RAG_USE_CLARIFY_UPPER_AS_MIN_RERANK") or "").strip().lower() in (
+        "1",
+        "true",
+        "yes",
+    ):
+        raw = os.getenv("QUERY_SCORE_THRESHOLD_UPPER") or "0.45"
+        try:
+            return float(raw)
+        except ValueError:
+            return 0.45
     raw = os.getenv("MIN_RERANK_SCORE") or "0.28"
     try:
         return float(raw)
@@ -278,6 +354,129 @@ def _stash_catalog_boost_stats(count: int) -> None:
     prev = _last_filter_report.get()
     payload = dict(prev) if isinstance(prev, dict) else {}
     payload["catalog_boost"] = {"chunks_added": count}
+    _last_filter_report.set(payload)
+
+
+def _matrix_store_path() -> Path:
+    try:
+        from client_paths import get_rag_storage_dir  # noqa: WPS433
+
+        return Path(get_rag_storage_dir())
+    except Exception:
+        return _ROOT / "data" / "rag_storage"
+
+
+def _load_table_matrix_from_storage() -> list[Any]:
+    from raganything.table_matrix import load_matrix_store
+
+    store = load_matrix_store(_matrix_store_path())
+    return list(store.values())
+
+
+def _allowed_manual_basenames(docs: list[dict]) -> set[str]:
+    out: set[str] = set()
+    for doc in docs:
+        path = _doc_path(doc)
+        if path:
+            out.add(_basename(path))
+    return out
+
+
+def _table_matrix_chunk_relevant(
+    query: str,
+    record: Any,
+    *,
+    allowed_basenames: set[str],
+) -> bool:
+    from raganything.table_matrix import table_matrix_matches_query
+    from raganything.utils import discriminative_terms
+
+    fp = str(getattr(record, "file_path", "") or "")
+    if allowed_basenames:
+        bp = _basename(fp)
+        if not any(ab and (ab in fp or ab in bp) for ab in allowed_basenames):
+            return False
+    elif fp:
+        terms = discriminative_terms(query, min_len=3)
+        if terms and not any(t in fp for t in terms):
+            return False
+    deny, _profile = active_deny_substrings(query)
+    if _path_hits_deny(fp, deny):
+        return False
+    return table_matrix_matches_query(query, record)
+
+
+def supplement_table_matrix_chunks(
+    query: str,
+    docs: list[dict],
+    *,
+    rerank_pool: list[dict] | None = None,
+) -> list[dict]:
+    """Boost table chunks when row-matrix term overlap matches the query."""
+    from raganything.table_matrix import table_matrix_query_boost_enabled
+
+    if not table_matrix_query_boost_enabled():
+        return docs
+
+    allowed = _allowed_manual_basenames(docs + (rerank_pool or []))
+    seen_chunk: set[str] = set()
+    seen_path: set[str] = set()
+    boosted: list[dict] = []
+
+    def add_chunk(chunk_id: str, file_path: str) -> None:
+        if not chunk_id or chunk_id in seen_chunk:
+            return
+        seen_chunk.add(chunk_id)
+        boosted.append(
+            {
+                "content": "",
+                "id": chunk_id,
+                "file_path": file_path,
+                "rerank_score": 0.98,
+            }
+        )
+
+    for record in _load_table_matrix_from_storage():
+        if not _table_matrix_chunk_relevant(
+            query, record, allowed_basenames=allowed if allowed else set()
+        ):
+            continue
+        fp = str(record.file_path or "")
+        if fp:
+            seen_path.add(_basename(fp))
+        for chunk_id in record.chunk_ids:
+            add_chunk(chunk_id, fp)
+
+    if not boosted:
+        return docs
+
+    # Hydrate content from storage for reranker
+    try:
+        import json
+
+        path = _matrix_store_path() / "kv_store_text_chunks.json"
+        chunk_map = (
+            json.loads(path.read_text(encoding="utf-8"))
+            if path.is_file()
+            else {}
+        )
+        for doc in boosted:
+            cid = str(doc.get("id") or "")
+            row = chunk_map.get(cid)
+            if isinstance(row, dict) and row.get("content"):
+                doc["content"] = row["content"]
+    except (OSError, json.JSONDecodeError):
+        pass
+
+    return boosted + [d for d in docs if str(d.get("id") or "") not in seen_chunk]
+
+
+def _stash_matrix_boost_stats(count: int) -> None:
+    if count <= 0:
+        return
+    prev = _last_filter_report.get()
+    payload = dict(prev) if isinstance(prev, dict) else {}
+    payload["table_matrix_boost"] = {"chunks_added": count}
     _last_filter_report.set(payload)
 
 
@@ -522,18 +721,20 @@ def consume_filter_report() -> dict[str, Any] | None:
 
 
 def build_maintenance_section_fidelity_prompt(query: str) -> str:
-    """When the user asks what to add/do for a named maintenance item, anchor on section body."""
+    """When the user asks about one named item/section, anchor on that section's body."""
     if not _env_bool("RAG_QUERY_SECTION_FIDELITY", True):
         return ""
     q = (query or "").strip()
-    if not q or not re.search(r"保养|加注|润滑|清洁|步骤|周期", q):
+    if not q or table_filter_needle(q):
+        return ""
+    if not re.search(r"保养|加注|润滑|清洁|步骤|周期|检查|更换|调整", q):
         return ""
     return (
-        "用户问的是具体保养条目（如「输送链条保养」「3.1.x」等）。"
-        "只根据检索 chunk 中该条目下「保养周期」「保养内容」「保养步骤」作答；"
-        "勿把其它机型、其它部位、全书「润滑部位和周期」总表或知识图谱合并进来的说法并入；"
-        "不得自编「日常润滑」等正文未出现的周期名称。"
-        "若正文仅写「每季度一次、润滑脂2#」等，只答这些，不要补充正文未出现的油品型号。"
+        "用户问的是针对某一具体条目或小节的操作/保养问题。"
+        "只根据检索 context 中与该条目直接对应的正文段落作答；"
+        "沿用 context 里已有的字段标签（周期、内容、步骤等），不要自行发明标签或周期名称。"
+        "勿将其它条目、其它来源文档、全书汇总表/附录表或知识图谱中的说法并入本条答案；"
+        "正文未出现的型号、规格、周期、方式一律不得补充。"
     )
 
 
@@ -593,6 +794,19 @@ def build_catalog_model_listing_prompt(query: str) -> str:
     )
 
 
+def build_table_filter_listing_prompt(query: str) -> str:
+    needle = table_filter_needle(query) or "问句中的筛选条件"
+    return (
+        "用户问的是对检索 context 中表格行的筛选与列举。"
+        f"在 HTML 表格（<table>/<tr>/<td>）中，找出与「{needle}」匹配的全部行"
+        "（以该行中与问句条件对应的那一列为准，列含义以表头为准）；"
+        "仅列出这些行的对象/部位/部件名称（取标识对象的那一列，以表头为准）。"
+        "须穷尽 context 中所有符合条件的行，不得遗漏；"
+        "回答用简洁编号列表，每行只写名称，不要展开其它列（周期、步骤、方式等）；"
+        "不要改用非表格正文的叙述段落代替表格答案。"
+    )
+
+
 def build_user_prompt_for_query(query: str) -> str:
     """Merge answer-fidelity rules and profile steering for LightRAG."""
     parts: list[str] = []
@@ -631,6 +845,10 @@ def install_doc_filter_on_rerank() -> None:
         )
         if len(docs) > before:
             _stash_catalog_boost_stats(len(docs) - before)
+        before_matrix = len(docs)
+        docs = supplement_table_matrix_chunks(query, docs, rerank_pool=docs)
+        if len(docs) > before_matrix:
+            _stash_matrix_boost_stats(len(docs) - before_matrix)
         kept, _report = filter_retrieved_docs_with_report(query, docs)
         return kept
 
@@ -699,8 +917,21 @@ def install_kg_file_path_filter() -> None:
 
     async def _build_query_context(query, *args, **kwargs):
         token = _kg_filter_query.set((query or "").strip())
+        query_param = kwargs.get("query_param")
+        if query_param is None and len(args) >= 7:
+            query_param = args[7]
         try:
-            return await orig_build_ctx(query, *args, **kwargs)
+            result = await orig_build_ctx(query, *args, **kwargs)
+            if (
+                result is not None
+                and isinstance(query, str)
+                and query.strip()
+                and query_param is not None
+            ):
+                ctx = str(getattr(result, "context", None) or "")
+                if detect_table_filter_signal(query, ctx):
+                    _append_table_filter_user_prompt(query_param, query)
+            return result
         finally:
             _kg_filter_query.reset(token)
 

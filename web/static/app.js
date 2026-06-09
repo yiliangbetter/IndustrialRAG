@@ -810,7 +810,7 @@ btnIngest.addEventListener("click", async () => {
 
   if (knowledgeBaseHasData()) {
     const ok = window.confirm(
-      "新文档将追加到现有知识库，不会删除已有内容。\n\n请勿重复上传已灌过的同一 PDF，否则会产生重复索引。\n\n是否继续？"
+      "新文档将追加到现有知识库，不会删除其它文档；同名 PDF 会自动替换已有索引。\n\n是否继续？"
     );
     if (!ok) return;
   }
