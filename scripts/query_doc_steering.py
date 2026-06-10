@@ -156,10 +156,23 @@ def _query_discriminative_terms(query: str) -> list[str]:
     return discriminative_terms(query, min_len=3)
 
 
+def _asks_manual_applicability_models(query: str) -> bool:
+    """Foreword-style: which product models a named manual applies to."""
+    q = (query or "").strip()
+    if not q:
+        return False
+    return bool(
+        re.search(
+            r"适用(?:于)?(?:哪些|什么|哪(?:些|种)|多少).*?(?:型号|机型)|"
+            r"(?:手册|说明书).*适用.*?(?:型号|机型)|"
+            r"(?:型号|机型).*适用",
+            q,
+        )
+    )
+
+
 def is_catalog_product_model_query(query: str) -> bool:
     """Broad product-line / model-count questions (not single-machine maintenance)."""
-    if resolve_machine_profile(query):
-        return False
     q = (query or "").strip()
     if not q:
         return False
@@ -170,7 +183,14 @@ def is_catalog_product_model_query(query: str) -> bool:
         )
     )
     asks_models = bool(re.search(r"型号|机型|产品", q))
-    return asks_scope and asks_models
+    if not (asks_scope and asks_models):
+        return False
+    # 「XXX手册适用于哪些产品型号」仍走 catalog 补 chunk，即使问句命中单机 profile。
+    if _asks_manual_applicability_models(q):
+        return True
+    if resolve_machine_profile(query):
+        return False
+    return True
 
 
 def table_filter_needle(query: str) -> str | None:
@@ -273,10 +293,21 @@ def _catalog_chunk_relevant_to_query(query: str, doc: dict) -> bool:
     """Keep foreword catalog lines whose path/body overlap query terms (no manual name lists)."""
     if not _chunk_has_catalog_marker(doc):
         return False
+    path = _doc_path(doc)
+    profile = resolve_machine_profile(query)
+    if profile:
+        deny = list(profile.get("deny_path_substrings") or [])
+        if _path_hits_deny(path, deny):
+            return False
+        phrases = profile.get("query_phrases") or []
+        if path and phrases:
+            pn = path.replace(" ", "")
+            if not any(str(p).replace(" ", "") in pn for p in phrases if str(p).strip()):
+                return False
     terms = _query_discriminative_terms(query)
     if not terms:
         return True
-    blob = f"{_doc_path(doc)} {str(doc.get('content') or '')[:500]}"
+    blob = f"{path} {str(doc.get('content') or '')[:500]}"
     return any(len(term) >= 3 and term in blob for term in terms)
 
 
@@ -731,10 +762,13 @@ def build_maintenance_section_fidelity_prompt(query: str) -> str:
         return ""
     return (
         "用户问的是针对某一具体条目或小节的操作/保养问题。"
-        "只根据检索 context 中与该条目直接对应的正文段落作答；"
+        "优先根据检索 context 中与该条目直接对应的正文段落作答；"
         "沿用 context 里已有的字段标签（周期、内容、步骤等），不要自行发明标签或周期名称。"
-        "勿将其它条目、其它来源文档、全书汇总表/附录表或知识图谱中的说法并入本条答案；"
+        "勿将其它条目、其它来源文档、全书汇总表/附录表中的说法并入本条答案；"
         "正文未出现的型号、规格、周期、方式一律不得补充。"
+        "若正文 chunk 均未出现问句核心操作对象（问句主题词），"
+        "而知识图谱中存在与该对象同名的实体或关系且直接回答该问句，"
+        "可以该图谱描述作答；仍不得混入其它条目的周期、油品或其它检查项。"
     )
 
 

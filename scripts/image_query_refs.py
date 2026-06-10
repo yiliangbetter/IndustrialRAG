@@ -1,7 +1,7 @@
 """Query-time image resolution for RAG Q&A (Plan B).
 
 Ingest co-locates ``[图片]`` blocks with anchor text in vector chunks (Route A).
-This module parses inline refs from rerank+steering ``primary_text`` at finalize.
+This module parses inline refs from LLM-input chunk bodies at finalize (Plan A).
 """
 
 from __future__ import annotations
@@ -225,6 +225,23 @@ def _maintenance_topics_in_text(text: str, query: str) -> list[str]:
     return topics
 
 
+def _is_listing_scope_query(query: str) -> bool:
+    """Multi-item scope questions (哪些/几种…), not single how-to steps."""
+    q = (query or "").strip()
+    if not q:
+        return False
+    return bool(
+        re.search(
+            r"哪些|有几种|几种|列举|清单|多少个|多少种|一共有多少|总共|全部|有哪些|一共",
+            q,
+        )
+    )
+
+
+def _listing_mode_active(query: str, listing_targets: list[str]) -> bool:
+    return _is_listing_scope_query(query) and len(listing_targets) >= 2
+
+
 def _listing_target_phrases(query: str, retrieved_text: str) -> list[str]:
     """Distinct maintenance phrases in retrieval that anchor separate figures."""
     text = (retrieved_text or "").strip()
@@ -437,10 +454,9 @@ def _ref_inline_matches_query_subject(query: str, ref: dict[str, Any]) -> bool:
     label = _ref_effective_label(ref)
     if not label:
         return False
-    object_bgs = _subject_object_bigrams(query)
-    label_bgs = substantive_bigrams(label)
-    if object_bgs and object_bgs & label_bgs:
-        return True
+    blob = _ref_blob(ref)
+    if _strict_object_image_gate(query):
+        return _figure_matches_query_object(query, blob)
     for term in _query_terms(query):
         if len(term) >= 3 and term in label:
             return True
@@ -501,7 +517,7 @@ def _ref_passes_image_align_gate(
     listing_targets = _listing_targets_with_query_line_overlap(
         query, list_source, text
     )
-    listing_label_ok = len(listing_targets) >= 2 and any(
+    listing_label_ok = _listing_mode_active(query, listing_targets) and any(
         _label_matches_listing_target(_ref_effective_label(ref), target)
         and (
             _figure_label_matches_query(query, _ref_effective_label(ref))
@@ -531,7 +547,7 @@ def _ref_passes_image_align_gate(
     if text:
         ranked = _ranked_retrieval_lines(query, text, limit=6)
         if ranked and ranked[0][0] >= _image_retrieval_focus_min_overlap():
-            if len(listing_targets) >= 2:
+            if _listing_mode_active(query, listing_targets):
                 pass
             elif _ref_inline_in_retrieved_context(ref, text) and _ref_inline_matches_query_subject(
                 query, ref
@@ -553,7 +569,7 @@ def _ref_passes_image_align_gate(
                 ):
                     return False
     threshold = _image_min_ref_align()
-    if len(listing_targets) >= 2:
+    if _listing_mode_active(query, listing_targets):
         return _ref_aligns_for_multi_figure_listing(
             query,
             ref,
@@ -1042,6 +1058,8 @@ def _chunk_subject_score(query: str, content: str) -> float:
         return 0.0
     score = 0.0
     for needle in needles:
+        if len(needle) > 12:
+            continue
         if len(needle) >= 3 and needle in content:
             score += min(len(needle), 12) * 0.12
     for line in content.splitlines():
@@ -1050,7 +1068,11 @@ def _chunk_subject_score(query: str, content: str) -> float:
             continue
         if not _SECTION_HEADING_RE.match(line):
             continue
-        hits = sum(1 for needle in needles if len(needle) >= 3 and needle in line)
+        hits = sum(
+            1
+            for needle in needles
+            if len(needle) <= 12 and len(needle) >= 3 and needle in line
+        )
         if hits:
             score += 1.0 + hits * 0.25
     return score
@@ -1221,6 +1243,77 @@ def _chunk_belongs_to_anchor_sections(
     return False
 
 
+def _llm_subject_chunk_min_score() -> float:
+    raw = os.getenv("RAG_IMAGE_LLM_CHUNK_MIN_SUBJECT") or "0.24"
+    try:
+        return max(0.08, min(2.0, float(raw)))
+    except ValueError:
+        return 0.24
+
+
+def _action_focus_text(query: str) -> str:
+    """Subject clause with leading device profile label stripped (image / chunk gate)."""
+    clauses = _subject_action_clauses(query)
+    text = max(clauses, key=len) if clauses else (query or "")
+    cjk_runs = re.findall(r"[\u4e00-\u9fff]+", text)
+    merged = "".join(cjk_runs) if cjk_runs else text
+    try:
+        from query_doc_steering import resolve_machine_profile  # noqa: WPS433
+
+        profile = resolve_machine_profile(query)
+        label = str((profile or {}).get("label") or "").replace(" ", "")
+        if label and merged.startswith(label) and len(merged) > len(label):
+            merged = merged[len(label) :]
+    except Exception:
+        pass
+    return merged.strip() or text
+
+
+def _chunk_figure_context_aligns_query(query: str, content: str) -> bool:
+    """Figure caption/context must align with the query action focus, not incidental terms."""
+    focus = _action_focus_text(query)
+    if not focus.strip():
+        return False
+    strict = _strict_object_image_gate(query)
+    for ref in extract_image_refs_from_context(content):
+        label = _ref_effective_label(ref)
+        blob = f"{label} {ref.get('context') or ''}"
+        if strict:
+            if _figure_matches_query_object(query, blob):
+                return True
+            continue
+        if short_label_bag_aligns(focus, label) or short_label_bag_aligns(focus, blob[:80]):
+            return True
+        if any(
+            len(term) >= 4 and term in blob
+            for term in discriminative_terms(focus, min_len=3)
+        ):
+            return True
+        focus_tail = focus[-6:] if len(focus) >= 6 else focus
+        if len(substantive_bigrams(focus_tail) & substantive_bigrams(blob)) >= 2:
+            return True
+    return False
+
+
+def _llm_chunks_with_subject_figures(
+    query: str, retrieved_docs: list[dict[str, Any]] | None
+) -> str:
+    """LLM-input chunks that both carry inline figures and match query subject."""
+    q = (query or "").strip()
+    min_score = _llm_subject_chunk_min_score()
+    parts: list[str] = []
+    for doc in retrieved_docs or []:
+        content = _doc_content(doc).strip()
+        if not content or not extract_image_refs_from_context(content):
+            continue
+        if not _chunk_figure_context_aligns_query(q, content):
+            continue
+        if _chunk_subject_score(q, content) < min_score:
+            continue
+        parts.append(content)
+    return "\n\n".join(parts)
+
+
 def _context_for_image_scan(
     query: str,
     primary_text: str,
@@ -1246,10 +1339,20 @@ def _context_for_image_scan(
     meta["anchor_sections"] = anchor_sections
     if not anchor_sections:
         meta["reason"] = "no_anchor"
-        # Multi-part listing spans several sections; fall back to full primary when
-        # it already contains inline figures (avoid empty scan_text → no images).
-        if extract_image_refs_from_context(primary):
-            meta["fallback"] = "primary_no_anchor"
+        docs = retrieved_docs or []
+        subject_scan = _llm_chunks_with_subject_figures(q, docs)
+        if subject_scan.strip():
+            meta["fallback"] = "llm_subject_chunks"
+            meta["anchor_chars"] = len(subject_scan)
+            meta["anchor_chunks"] = len(
+                [part for part in subject_scan.split("\n\n") if part.strip()]
+            )
+            return subject_scan, meta
+        listing_targets = _listing_targets_with_query_line_overlap(q, primary, primary)
+        if _listing_mode_active(q, listing_targets) and extract_image_refs_from_context(
+            primary
+        ):
+            meta["fallback"] = "llm_primary_scan"
             meta["anchor_chars"] = len(primary)
             return primary, meta
         return "", meta
@@ -1268,13 +1371,33 @@ def _context_for_image_scan(
     anchor_text = "\n\n".join(matching_parts)
     meta["anchor_chars"] = len(anchor_text)
     meta["anchor_chunks"] = len(matching_parts)
-    if anchor_text.strip() and not extract_image_refs_from_context(anchor_text):
-        meta["fallback"] = "primary_scan"
-        meta["anchor_chars"] = len(primary)
-        return primary, meta
     if not anchor_text.strip():
         meta["reason"] = "no_matching_chunks"
-    return anchor_text, meta
+        return "", meta
+
+    def _return_subject_scan(reason: str) -> tuple[str, dict[str, Any]]:
+        subject_scan = _llm_chunks_with_subject_figures(q, docs)
+        if subject_scan.strip():
+            meta["fallback"] = "llm_subject_chunks"
+            meta["reason"] = reason
+            meta["anchor_chars"] = len(subject_scan)
+            meta["anchor_chunks"] = len(
+                [part for part in subject_scan.split("\n\n") if part.strip()]
+            )
+            return subject_scan, meta
+        meta["reason"] = reason
+        return "", meta
+
+    if not extract_image_refs_from_context(anchor_text):
+        return _return_subject_scan("anchor_sections_without_figures")
+
+    aligned = [part for part in matching_parts if _chunk_figure_context_aligns_query(q, part)]
+    if aligned:
+        filtered = "\n\n".join(aligned)
+        meta["anchor_chars"] = len(filtered)
+        meta["anchor_chunks"] = len(aligned)
+        return filtered, meta
+    return _return_subject_scan("anchor_sections_figures_not_aligned")
 
 
 # --- LEGACY (disabled): focus_text_for_images + helpers — see EOF ---
@@ -1371,6 +1494,116 @@ def _subject_object_bigrams(query: str) -> set[str]:
     return focus
 
 
+def _action_object_cjk(query: str) -> str:
+    """Maintenance object phrase from the action clause (question frame stripped)."""
+    cjk = "".join(re.findall(r"[\u4e00-\u9fff]", _action_focus_text(query)))
+    if not cjk:
+        return ""
+    cjk = re.sub(r"^[对向]", "", cjk)
+    try:
+        from query_doc_steering import resolve_machine_profile  # noqa: WPS433
+
+        profile = resolve_machine_profile(query)
+        label = str((profile or {}).get("label") or "").replace(" ", "")
+        if label and label in cjk:
+            cjk = cjk.replace(label, "", 1)
+    except Exception:
+        pass
+    cjk = re.sub(r"^[的]", "", cjk)
+    cjk = re.sub(r"(，|,).*$", "", cjk)
+    cjk = re.sub(
+        r"(应该|需要|要我|我要|还须|须)?(使用|用|加注|加|做|选|读|量)?(什么|哪些|哪种|多少|几).*$",
+        "",
+        cjk,
+    )
+    cjk = re.sub(r"(要多长|多久|多长时间|做一次).*$", "", cjk)
+    cjk = re.sub(r"(进行保养|进行清洁|保养时|保养)$", "", cjk)
+    how = re.search(
+        r"(?:如何|怎样|怎么|要如何)(?:检查|清洁|更换|调整|清理)?(.+)$",
+        cjk,
+    )
+    if how:
+        tail = how.group(1).strip()
+        if len(tail) >= _min_substantive_term_len():
+            cjk = tail
+    for prefix in ("清理", "检查", "更换", "调整", "清洁"):
+        if cjk.startswith(prefix) and len(cjk) > len(prefix) + 2:
+            cjk = cjk[len(prefix) :]
+            break
+    return cjk.strip()
+
+
+def _query_object_terms(query: str) -> list[str]:
+    """Longest-first terms from the action object phrase (not shared inspection verbs)."""
+    tail = _action_object_cjk(query)
+    if len(tail) < _min_substantive_term_len():
+        return []
+    seen: set[str] = set()
+    terms: list[str] = []
+
+    def add(term: str) -> None:
+        term = term.strip()
+        if len(term) < _min_substantive_term_len() or term in seen:
+            return
+        if re.search(r"什么|哪些|多少|如何|怎样|怎么", term):
+            return
+        seen.add(term)
+        terms.append(term)
+
+    add(tail)
+    for term in discriminative_terms(tail, min_len=_min_substantive_term_len()):
+        add(term)
+    return sorted(terms, key=len, reverse=True)
+
+
+def _query_primary_object_term(query: str) -> str:
+    """Concrete object span (e.g. 压带轮残胶), not interrogative tails like 什么工具."""
+    obj = _action_object_cjk(query)
+    if re.search(r"什么|哪些|多少|如何|怎样|怎么", obj):
+        return ""
+    if len(obj) >= 4:
+        return obj
+    terms = _query_object_terms(query)
+    return terms[0] if terms else ""
+
+
+def _strict_object_image_gate(query: str) -> bool:
+    """Single-item maintenance questions get strict object matching; listings stay permissive."""
+    if _is_listing_scope_query(query):
+        return False
+    primary = _query_primary_object_term(query)
+    if not primary or re.search(r"什么|哪些|多少|如何|怎样|怎么", primary):
+        return False
+    return len(primary) >= 4
+
+
+def _figure_matches_query_object(query: str, text: str) -> bool:
+    """Query object must appear in figure text; no 开关-in-保护开关 substring hits."""
+    blob = (text or "").strip()
+    if not blob:
+        return False
+    if not _strict_object_image_gate(query):
+        focus = _action_focus_text(query)
+        if short_label_bag_aligns(focus, blob):
+            return True
+        if any(
+            len(term) >= 4 and term in blob
+            for term in discriminative_terms(focus, min_len=3)
+        ):
+            return True
+        focus_tail = focus[-6:] if len(focus) >= 6 else focus
+        return len(substantive_bigrams(focus_tail) & substantive_bigrams(blob)) >= 2
+    primary = _query_primary_object_term(query)
+    if primary in blob:
+        return True
+    if short_label_bag_aligns(primary, blob):
+        return True
+    shared = substantive_bigrams(primary) & substantive_bigrams(blob)
+    if len(shared) >= 2:
+        return True
+    return False
+
+
 def _action_focus_bigrams(
     query: str, retrieved_text: str | None = None
 ) -> set[str]:
@@ -1438,19 +1671,17 @@ def _ref_passes_focus_bigram_gate(
     if not label:
         return False
     blob = label + str(ref.get("context") or "")
-    label_bgs = substantive_bigrams(blob)
+    if _strict_object_image_gate(query):
+        return _figure_matches_query_object(query, blob)
     for term in _query_terms(query):
         if len(term) >= 4 and term in blob:
             return True
         if len(term) == 3 and term in label:
             return True
-    object_focus = _subject_object_bigrams(query)
-    if object_focus and not (object_focus & label_bgs):
-        return False
     focus = _action_focus_bigrams(query, retrieved_text)
     if not focus:
         return True
-    return bool(focus & label_bgs)
+    return bool(focus & substantive_bigrams(blob))
 
 
 def _ref_aligns_with_retrieval_focus(
@@ -1600,18 +1831,16 @@ def _figure_label_matches_query(query: str, label: str) -> bool:
     if not label or not query:
         return False
     core = _strip_section_prefix(label) if _is_section_number_heading(label) else label
+    if _strict_object_image_gate(query):
+        return _figure_matches_query_object(query, core)
     if short_label_bag_aligns(query, core):
         return True
     qb = substantive_bigrams(query)
     lb = substantive_bigrams(core)
     if len(qb & lb) >= 2:
         return True
-    object_bgs = _subject_object_bigrams(query)
     for term in _query_terms(query):
         if len(term) >= 3 and term in core:
-            if object_bgs and not (object_bgs & lb):
-                if len(qb & lb) < 2 and not short_label_bag_aligns(query, core):
-                    continue
             return True
     return False
 
@@ -1914,7 +2143,9 @@ def retrieval_supports_images(
 
     overlap = _term_overlap_ratio(q, primary)
     min_overlap = _image_min_term_overlap()
-    listing_ok = len(_listing_targets_with_query_line_overlap(q, primary, primary)) >= 2
+    listing_ok = _listing_mode_active(
+        q, _listing_targets_with_query_line_overlap(q, primary, primary)
+    )
     cross_ok = _is_multi_source_retrieval(retrieved_docs)
     near_miss = overlap + 0.051 >= min_overlap
     if overlap < min_overlap and not listing_ok and not cross_ok and not (
@@ -2429,7 +2660,7 @@ def _select_scored_refs(
         )
 
     targets = _listing_target_phrases(query or "", retrieved_text or "")
-    if len(targets) >= 2:
+    if _is_listing_scope_query(query or "") and len(targets) >= 2:
         cap = _multi_figure_image_limit()
         if retrieved_text:
             return _select_scored_refs_for_listing(

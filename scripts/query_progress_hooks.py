@@ -27,6 +27,9 @@ _retrieved_docs_text: ContextVar[str | None] = ContextVar("retrieved_docs_text",
 _media_roots: ContextVar[list[Path] | None] = ContextVar("media_roots", default=None)
 _query_text: ContextVar[str | None] = ContextVar("query_text", default=None)
 _retrieved_docs: ContextVar[list[dict] | None] = ContextVar("retrieved_docs", default=None)
+_llm_chunks_for_images: ContextVar[list[dict] | None] = ContextVar(
+    "llm_chunks_for_images", default=None
+)
 _related_images_selected: ContextVar[list[dict[str, Any]] | None] = ContextVar(
     "related_images_selected", default=None
 )
@@ -47,6 +50,7 @@ def _sync_query_debug_snapshot() -> None:
             "retrieval_context": _retrieval_context.get(),
             "retrieved_docs_text": _retrieved_docs_text.get(),
             "retrieved_docs": _retrieved_docs.get(),
+            "llm_chunks_for_images": _llm_chunks_for_images.get(),
             "related_images": list(_related_images_selected.get() or []),
             "steering_report": dict(_steering_report.get() or {}),
             "images_debug": dict(_last_image_debug.get() or {}),
@@ -60,6 +64,7 @@ def get_query_debug_state() -> dict[str, Any]:
         "retrieval_context": _retrieval_context.get(),
         "retrieved_docs_text": _retrieved_docs_text.get(),
         "retrieved_docs": _retrieved_docs.get(),
+        "llm_chunks_for_images": _llm_chunks_for_images.get(),
         "related_images": list(_related_images_selected.get() or []),
         "steering_report": dict(_steering_report.get() or {}),
         "images_debug": dict(_last_image_debug.get() or {}),
@@ -88,30 +93,21 @@ def get_retrieval_context() -> str | None:
 
 
 def finalize_related_images(*, limit: int = 4) -> list[dict[str, Any]]:
-    """Resolve images from the last reranked docs (same path as batch test)."""
+    """Resolve images from chunks that actually fed the answer LLM (Plan A)."""
     from image_query_refs import resolve_query_images, text_from_retrieved_docs  # noqa: WPS433
 
-    # Rerank hooks often run in LightRAG worker tasks; snapshot holds their docs.
     snap = get_query_debug_state()
-    docs = list(snap.get("retrieved_docs") or _retrieved_docs.get() or [])
+    docs = list(
+        snap.get("llm_chunks_for_images")
+        or _llm_chunks_for_images.get()
+        or []
+    )
     roots = _media_roots.get()
     q = (_query_text.get() or "").strip()
     if not roots or not q:
         _related_images_selected.set([])
         return []
-    docs_text = (
-        snap.get("retrieved_docs_text")
-        or _retrieved_docs_text.get()
-        or ""
-    ).strip()
-    if not docs_text and docs:
-        docs_text = text_from_retrieved_docs(docs).strip()
-    if not docs_text:
-        ctx = (snap.get("retrieval_context") or _retrieval_context.get() or "").strip()
-        if ctx:
-            from image_query_refs import merge_context_for_images  # noqa: WPS433
-
-            docs_text = merge_context_for_images("", ctx).strip()
+    docs_text = text_from_retrieved_docs(docs).strip() if docs else ""
     if not docs_text:
         _related_images_selected.set([])
         return []
@@ -122,30 +118,20 @@ def finalize_related_images(*, limit: int = 4) -> list[dict[str, Any]]:
         retrieved_docs=docs,
         limit=limit,
     )
+    debug["image_source"] = "llm_chunks"
+    debug["llm_chunk_count"] = len(docs)
     _last_image_debug.set(debug)
     _related_images_selected.set(list(images))
     _sync_query_debug_snapshot()
     return images
 
 
-def _sync_retrieved_docs_after_rerank(final_docs: list[dict]) -> None:
-    """Keep last reranked chunks for finalize; do not emit images mid-query."""
-    if not final_docs:
-        # Mix may call rerank with empty lists; do not wipe a good process_chunks snapshot.
+def _sync_llm_chunks_for_images(query: str, chunks: list[dict]) -> None:
+    """Persist only the chunk list returned by ``process_chunks_unified`` (LLM input)."""
+    if not chunks:
         return
     from image_query_refs import text_from_retrieved_docs  # noqa: WPS433
 
-    _retrieved_docs.set(final_docs)
-    docs_text = text_from_retrieved_docs(final_docs).strip()
-    if docs_text:
-        _retrieved_docs_text.set(docs_text)
-    _sync_query_debug_snapshot()
-
-
-def _sync_chunks_for_images(query: str, chunks: list[dict]) -> None:
-    """Persist the chunk list that will feed the LLM (mix often skips rerank hook storage)."""
-    if not chunks:
-        return
     try:
         from query_doc_steering import filter_retrieved_docs_by_query  # noqa: WPS433
 
@@ -153,7 +139,17 @@ def _sync_chunks_for_images(query: str, chunks: list[dict]) -> None:
         final = filtered if filtered else chunks
     except Exception:
         final = chunks
-    _sync_retrieved_docs_after_rerank(final)
+    _llm_chunks_for_images.set(final)
+    _retrieved_docs.set(final)
+    docs_text = text_from_retrieved_docs(final).strip()
+    if docs_text:
+        _retrieved_docs_text.set(docs_text)
+    _sync_query_debug_snapshot()
+
+
+def _sync_retrieved_docs_after_rerank(final_docs: list[dict]) -> None:
+    """Legacy rerank hook — does not drive images (see ``_sync_llm_chunks_for_images``)."""
+    del final_docs
 
 
 @contextlib.asynccontextmanager
@@ -215,7 +211,7 @@ async def query_progress_hooks() -> AsyncIterator[asyncio.Queue[dict[str, str]]]
             _query_text.set(query)
         chunks = await orig_process_chunks(*args, **kwargs)
         if isinstance(chunks, list) and chunks:
-            _sync_chunks_for_images(query, chunks)
+            _sync_llm_chunks_for_images(query, chunks)
         await _emit(PHASE_GENERATE)
         try:
             import sys
@@ -255,6 +251,7 @@ async def query_progress_hooks() -> AsyncIterator[asyncio.Queue[dict[str, str]]]
         _media_roots.set(None)
         _query_text.set(None)
         _retrieved_docs.set(None)
+        _llm_chunks_for_images.set(None)
         _related_images_selected.set(None)
         _steering_report.set(None)
         _last_image_debug.set(None)
