@@ -32,8 +32,10 @@ __all__ = [
     "flatten_image_refs_for_skip_multimodal",
     "extract_image_refs_from_context",
     # focus_text_for_images, supplement_refs_from_content_lists — legacy, see EOF
+    "build_inline_placements",
     "images_for_api",
     "resolve_query_images",
+    "default_image_selection_limit",
     "query_wants_kb_images",
     "retrieval_supports_images",
     "encode_media_token",
@@ -171,12 +173,28 @@ def _retrieval_prefers_catalog_field(query: str, text: str) -> bool:
     return catalog_best >= procedure_best
 
 
-def _multi_figure_image_limit() -> int:
-    raw = os.getenv("RAG_IMAGE_MULTI_LIMIT") or "4"
+def default_image_selection_limit() -> int:
+    """Global cap for selected figures; ``0`` env means no practical cap (24)."""
+    raw = os.getenv("RAG_IMAGE_MULTI_LIMIT") or "0"
     try:
-        return max(2, min(6, int(raw)))
+        val = int(raw)
     except ValueError:
-        return 4
+        return 24
+    if val <= 0:
+        return 24
+    return max(1, min(24, val))
+
+
+def _multi_figure_image_limit() -> int:
+    return default_image_selection_limit()
+
+
+def _inline_min_place_score() -> float:
+    raw = os.getenv("RAG_IMAGE_INLINE_MIN_PLACE_SCORE") or "0.35"
+    try:
+        return float(raw)
+    except ValueError:
+        return 0.35
 
 
 def _normalize_label_key(label: str) -> str:
@@ -1858,6 +1876,306 @@ def filter_docs_cited_by_answer(
     return kept, meta
 
 
+def _answer_text_for_placement(answer: str) -> str:
+    text = (answer or "").strip()
+    parts = re.split(r"\n###\s*References\b", text, maxsplit=1, flags=re.I)
+    return parts[0].strip()
+
+
+def _find_anchor_in_answer(
+    answer: str, anchor: str
+) -> tuple[int, int, float]:
+    """Return (start, end, score) in answer text for inserting a figure after anchor."""
+    body = _answer_text_for_placement(answer)
+    anchor = (anchor or "").strip()
+    if not body or not anchor:
+        return -1, -1, 0.0
+    idx = body.find(anchor)
+    if idx >= 0:
+        end = idx + len(anchor)
+        return idx, end, min(1.0, 0.85 + 0.15 * min(1.0, len(anchor) / 12.0))
+    bare = anchor.replace("*", "")
+    idx = body.find(bare)
+    if idx >= 0:
+        end = idx + len(bare)
+        return idx, end, min(1.0, 0.75 + 0.15 * min(1.0, len(bare) / 12.0))
+    norm_body = _normalize_citation_blob(body)
+    norm_anchor = _normalize_citation_blob(anchor)
+    if len(norm_anchor) >= 4 and norm_anchor in norm_body:
+        terms = sorted(
+            discriminative_terms(anchor, min_len=2),
+            key=len,
+            reverse=True,
+        )
+        for term in terms:
+            if len(term) < 2:
+                continue
+            idx = body.find(term)
+            if idx >= 0:
+                return idx, idx + len(term), 0.55 + 0.05 * min(4, len(term))
+    sem_start, sem_end, sem_score = _find_semantic_anchor_in_answer(body, anchor)
+    if sem_start >= 0 and sem_score > 0:
+        return sem_start, sem_end, sem_score
+    return -1, -1, 0.0
+
+
+def _find_semantic_anchor_in_answer(body: str, anchor: str) -> tuple[int, int, float]:
+    """Match paraphrased / reordered short phrases (e.g. 机床内部清洁 ~ 清洁机床内部)."""
+    anchor = (anchor or "").strip()
+    if not body or not anchor or len(anchor) > 32:
+        return -1, -1, 0.0
+    best_start, best_end, best_score = -1, -1, 0.0
+    seen_spans: set[tuple[int, int]] = set()
+
+    def consider(start: int, end: int, snippet: str) -> None:
+        nonlocal best_start, best_end, best_score
+        if start < 0 or end <= start or (start, end) in seen_spans:
+            return
+        snippet = snippet.strip()
+        if len(snippet) < 3:
+            return
+        seen_spans.add((start, end))
+        bag = short_label_bag_aligns(snippet, anchor) or short_label_bag_aligns(
+            anchor, snippet
+        )
+        sym = text_term_alignment_symmetric(snippet, anchor)
+        if not bag and sym < 0.45:
+            return
+        score = min(0.88, 0.55 + sym * 0.32 + (0.14 if bag else 0.0))
+        if score > best_score:
+            best_start, best_end, best_score = start, end, score
+
+    for line in re.split(r"[\n\r]+", body):
+        line = line.strip()
+        if len(line) < 3:
+            continue
+        idx = body.find(line)
+        if idx >= 0:
+            consider(idx, idx + len(line), line)
+        for run in re.findall(r"[\u4e00-\u9fff]{3,28}", line):
+            run_idx = body.find(run, max(0, idx))
+            if run_idx >= 0:
+                consider(run_idx, run_idx + len(run), run)
+
+    for match in re.finditer(r"[\u4e00-\u9fff]{3,28}", body):
+        consider(match.start(), match.end(), match.group(0))
+
+    return best_start, best_end, best_score
+
+
+def _fallback_end_placements(
+    answer: str, images: list[dict[str, Any]]
+) -> list[dict[str, Any]]:
+    """When no inline anchor matches, attach figure(s) after the last answer paragraph."""
+    body = _answer_text_for_placement(answer)
+    if not body or not images:
+        return []
+    blocks = [b.strip() for b in re.split(r"\n\s*\n", body) if b.strip()]
+    target = blocks[-1] if blocks else body.strip()
+    idx = body.rfind(target)
+    if idx < 0:
+        idx = 0
+        target = body.strip()
+    end = idx + len(target)
+    anchor_text = target if len(target) <= 160 else target[-120:]
+    placements: list[dict[str, Any]] = []
+    for image_index, _img in enumerate(images):
+        placements.append(
+            {
+                "anchor_text": anchor_text,
+                "match_start": idx,
+                "match_end": end,
+                "image_index": image_index,
+                "score": 0.4,
+                "fallback": "answer_end",
+            }
+        )
+    return placements
+
+
+def _apply_placement_reindex(
+    images: list[dict[str, Any]],
+    placements: list[dict[str, Any]],
+) -> list[dict[str, Any]]:
+    """Keep only images referenced by placements; compact image_index values."""
+    reindexed: list[dict[str, Any]] = []
+    kept_images: list[dict[str, Any]] = []
+    for pl in placements:
+        idx = int(pl["image_index"])
+        if idx < 0 or idx >= len(images):
+            continue
+        new_idx = len(kept_images)
+        kept_images.append(images[idx])
+        reindexed.append({**pl, "image_index": new_idx})
+    if reindexed:
+        images.clear()
+        images.extend(kept_images)
+    return reindexed
+
+
+def _build_listing_inline_placements(
+    answer: str,
+    images: list[dict[str, Any]],
+    spans: list[str],
+    min_score: float,
+) -> list[dict[str, Any]]:
+    """One figure per answer listing span, paired by caption/label alignment."""
+    placements: list[dict[str, Any]] = []
+    used_indices: set[int] = set()
+
+    for span in spans:
+        if not span:
+            continue
+        start, end, span_score = _find_anchor_in_answer(answer, span)
+        anchor_text = span
+        if start < 0:
+            head = _listing_target_head(span)
+            if head and head != span:
+                start, end, span_score = _find_anchor_in_answer(answer, head)
+                if start >= 0:
+                    anchor_text = head
+        if start < 0 or span_score < min_score:
+            continue
+
+        best_idx = -1
+        best_align = -1.0
+        for idx, img in enumerate(images):
+            if idx in used_indices:
+                continue
+            caption = str(img.get("caption") or "").strip()
+            if _label_matches_listing_target(caption, span):
+                align = 1.0
+            else:
+                align = text_term_alignment_symmetric(span, caption)
+            if align < 0.35:
+                continue
+            if align > best_align:
+                best_align = align
+                best_idx = idx
+        if best_idx < 0:
+            continue
+        used_indices.add(best_idx)
+        body = _answer_text_for_placement(answer)
+        display_anchor = anchor_text
+        if 0 <= start < end <= len(body):
+            snippet = body[start:end].strip()
+            if snippet:
+                display_anchor = snippet
+        placements.append(
+            {
+                "anchor_text": display_anchor,
+                "match_start": start,
+                "match_end": end,
+                "image_index": best_idx,
+                "score": round(span_score, 3),
+            }
+        )
+
+    placements.sort(key=lambda item: item["match_start"])
+    return placements
+
+
+def build_inline_placements(
+    answer: str,
+    images: list[dict[str, Any]],
+    *,
+    retrieved_docs: list[dict[str, Any]] | None = None,
+) -> list[dict[str, Any]]:
+    """Map each selected image to an answer span for inline Web rendering."""
+    del retrieved_docs  # reserved for future chunk-id anchoring
+    if not (answer or "").strip() or not images:
+        return []
+    min_score = _inline_min_place_score()
+    answer_body = _answer_text_for_placement(answer)
+    listing_spans = _answer_listing_spans(answer)
+    if len(listing_spans) >= 2:
+        listing_placements = _build_listing_inline_placements(
+            answer, images, listing_spans, min_score
+        )
+        if listing_placements:
+            return _apply_placement_reindex(images, listing_placements)
+
+    placements: list[dict[str, Any]] = []
+    used_ranges: list[tuple[int, int]] = []
+
+    for image_index, img in enumerate(images):
+        caption = str(img.get("caption") or "").strip()
+        anchors: list[str] = []
+        if caption:
+            anchors.append(caption)
+        for span in listing_spans:
+            if not span:
+                continue
+            head = _listing_target_head(span)
+            if head and head not in anchors:
+                anchors.append(head)
+            if caption and _label_matches_listing_target(caption, span):
+                anchors.insert(0, span)
+            elif caption and (
+                span in caption
+                or caption in span
+                or text_term_alignment_symmetric(span, caption) >= 0.35
+            ):
+                anchors.append(span)
+        if not anchors and listing_spans:
+            anchors.extend(listing_spans)
+
+        best_start, best_end, best_score, best_anchor = -1, -1, 0.0, ""
+        seen_anchor: set[str] = set()
+        for anchor in anchors:
+            key = _normalize_label_key(anchor)
+            if not key or key in seen_anchor:
+                continue
+            seen_anchor.add(key)
+            start, end, score = _find_anchor_in_answer(answer, anchor)
+            label_match = bool(
+                caption
+                and (
+                    _label_matches_listing_target(caption, anchor)
+                    or _label_matches_listing_target(
+                        caption, _listing_target_head(anchor)
+                    )
+                )
+            )
+            effective = score + (0.5 if label_match else 0.0)
+            if effective > best_score:
+                best_start, best_end, best_score, best_anchor = (
+                    start,
+                    end,
+                    score,
+                    anchor,
+                )
+
+        if best_start < 0 or best_score < min_score:
+            continue
+        overlap = any(not (best_end <= u0 or best_start >= u1) for u0, u1 in used_ranges)
+        if overlap:
+            continue
+        used_ranges.append((best_start, best_end))
+        display_anchor = best_anchor
+        if 0 <= best_start < best_end <= len(answer_body):
+            snippet = answer_body[best_start:best_end].strip()
+            if snippet:
+                display_anchor = snippet
+        placements.append(
+            {
+                "anchor_text": display_anchor,
+                "match_start": best_start,
+                "match_end": best_end,
+                "image_index": image_index,
+                "score": round(best_score, 3),
+            }
+        )
+
+    if not placements:
+        return _apply_placement_reindex(
+            images, _fallback_end_placements(answer, images)
+        )
+
+    placements.sort(key=lambda item: item["match_start"])
+    return _apply_placement_reindex(images, placements)
+
+
 # --- LEGACY (disabled): focus_text_for_images + helpers — see EOF ---
 
 
@@ -3361,7 +3679,13 @@ def explain_query_images(
     debug["source_hints"] = sorted(source_hints)[:8]
     debug["query_subject_needles"] = _query_subject_needles(query or "")
 
-    from_context = extract_image_refs_from_context(figure_context)
+    from_context = _refs_from_retrieved_docs_text(
+        figure_context,
+        media_roots,
+        query=query,
+        retrieved_docs=retrieved_docs,
+        full_context=primary_text,
+    )
     debug["refs_from_context"] = len(from_context)
     debug["listing_targets"] = _listing_target_phrases(query or "", primary_text)
 

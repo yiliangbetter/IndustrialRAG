@@ -662,6 +662,30 @@ body {
   padding: 0.35rem 0.5rem;
   font-size: 0.85rem;
   color: var(--text-muted);
+}
+
+.inline-answer-figure {
+  margin: 0.65rem 0 0.85rem;
+  max-width: min(100%, 420px);
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  overflow: hidden;
+  background: var(--bg-elevated);
+}
+
+.inline-answer-figure img {
+  display: block;
+  width: 100%;
+  max-height: 280px;
+  object-fit: contain;
+  background: #fff;
+}
+
+.inline-answer-figure figcaption {
+  padding: 0.35rem 0.55rem;
+  font-size: 0.85rem;
+  color: var(--text-muted);
+}
   line-height: 1.35;
 }
 

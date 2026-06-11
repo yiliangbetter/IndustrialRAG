@@ -38,6 +38,9 @@ _related_images_selected: ContextVar[list[dict[str, Any]] | None] = ContextVar(
     "related_images_selected", default=None
 )
 _answer_text: ContextVar[str | None] = ContextVar("answer_text", default=None)
+_inline_placements: ContextVar[list[dict[str, Any]] | None] = ContextVar(
+    "inline_placements", default=None
+)
 _last_image_debug: ContextVar[dict[str, Any] | None] = ContextVar(
     "last_image_debug", default=None
 )
@@ -59,6 +62,7 @@ def _sync_query_debug_snapshot() -> None:
             "llm_chunks_rerank_figure_supplement": _llm_chunks_rerank_figure_supplement.get()
             or 0,
             "related_images": list(_related_images_selected.get() or []),
+            "inline_placements": list(_inline_placements.get() or []),
             "steering_report": dict(_steering_report.get() or {}),
             "images_debug": dict(_last_image_debug.get() or {}),
         }
@@ -73,6 +77,7 @@ def get_query_debug_state() -> dict[str, Any]:
         "retrieved_docs": _retrieved_docs.get(),
         "llm_chunks_for_images": _llm_chunks_for_images.get(),
         "related_images": list(_related_images_selected.get() or []),
+        "inline_placements": list(_inline_placements.get() or []),
         "steering_report": dict(_steering_report.get() or {}),
         "images_debug": dict(_last_image_debug.get() or {}),
     }
@@ -107,18 +112,23 @@ def get_retrieval_context() -> str | None:
     return _retrieval_context.get()
 
 
-def finalize_related_images(
+def finalize_inline_images(
     *,
-    limit: int = 4,
+    limit: int | None = None,
     answer_text: str | None = None,
-) -> list[dict[str, Any]]:
-    """Resolve images from LLM chunks cited by the generated answer (Plan A)."""
+) -> dict[str, Any]:
+    """Resolve inline figures cited by the generated answer (Plan A + placements)."""
     from image_query_refs import (  # noqa: WPS433
+        build_inline_placements,
+        default_image_selection_limit,
         filter_docs_cited_by_answer,
         resolve_query_images,
         text_from_retrieved_docs,
     )
     from query_doc_steering import detect_table_filter_signal  # noqa: WPS433
+
+    if limit is None:
+        limit = default_image_selection_limit()
 
     snap = get_query_debug_state()
     docs = list(
@@ -131,9 +141,12 @@ def finalize_related_images(
     answer = (answer_text or _answer_text.get() or "").strip()
     if answer:
         set_answer_text_for_images(answer)
+    empty: dict[str, Any] = {"images": [], "placements": [], "debug": {}}
     if not roots or not q:
         _related_images_selected.set([])
-        return []
+        _inline_placements.set([])
+        return empty
+
     full_primary = text_from_retrieved_docs(docs).strip()
     if full_primary and detect_table_filter_signal(q, full_primary):
         debug: dict[str, Any] = {
@@ -142,22 +155,26 @@ def finalize_related_images(
         }
         _last_image_debug.set(debug)
         _related_images_selected.set([])
+        _inline_placements.set([])
         _sync_query_debug_snapshot()
-        return []
+        return {**empty, "debug": debug}
+
     cite_meta: dict[str, Any] = {}
     if answer:
         docs, cite_meta = filter_docs_cited_by_answer(answer, docs, query=q)
     docs_text = text_from_retrieved_docs(docs).strip() if docs else ""
     if not docs_text:
-        debug: dict[str, Any] = {
+        debug = {
             "gate": {"ok": False, "reason": "no_answer_cited_chunks"},
             "answer_citation": cite_meta,
             "llm_chunk_count": len(docs),
         }
         _last_image_debug.set(debug)
         _related_images_selected.set([])
+        _inline_placements.set([])
         _sync_query_debug_snapshot()
-        return []
+        return {**empty, "debug": debug}
+
     images, debug = resolve_query_images(
         docs_text,
         roots,
@@ -165,6 +182,30 @@ def finalize_related_images(
         retrieved_docs=docs,
         limit=limit,
     )
+    if not images:
+        gate = dict(debug.get("gate") or {})
+        if gate.get("ok") is not False:
+            debug["gate"] = {"ok": False, "reason": "no_inline_in_cited"}
+        _last_image_debug.set(debug)
+        _related_images_selected.set([])
+        _inline_placements.set([])
+        _sync_query_debug_snapshot()
+        return {**empty, "debug": debug}
+
+    placements: list[dict[str, Any]] = []
+    if answer:
+        images_copy = list(images)
+        placements = build_inline_placements(
+            answer,
+            images_copy,
+            retrieved_docs=docs,
+        )
+        if placements:
+            images = images_copy
+        else:
+            images = []
+            debug["gate"] = {"ok": False, "reason": "no_inline_placements"}
+
     supplement = int(snap.get("llm_chunks_rerank_figure_supplement") or 0)
     if cite_meta.get("mode") == "answer_citation":
         debug["image_source"] = "llm_chunks+answer_citation"
@@ -174,12 +215,24 @@ def finalize_related_images(
         )
     debug["answer_citation"] = cite_meta
     debug["llm_chunk_count"] = len(docs)
+    debug["inline_placements"] = placements
     if supplement:
         debug["rerank_figure_supplement"] = supplement
     _last_image_debug.set(debug)
     _related_images_selected.set(list(images))
+    _inline_placements.set(list(placements))
     _sync_query_debug_snapshot()
-    return images
+    return {"images": images, "placements": placements, "debug": debug}
+
+
+def finalize_related_images(
+    *,
+    limit: int | None = None,
+    answer_text: str | None = None,
+) -> list[dict[str, Any]]:
+    """Backward-compatible wrapper returning only the image list."""
+    result = finalize_inline_images(limit=limit, answer_text=answer_text)
+    return list(result.get("images") or [])
 
 
 def _sync_llm_chunks_for_images(query: str, chunks: list[dict]) -> None:
@@ -356,6 +409,7 @@ async def query_progress_hooks() -> AsyncIterator[asyncio.Queue[dict[str, str]]]
         _rerank_docs.set(None)
         _llm_chunks_rerank_figure_supplement.set(0)
         _related_images_selected.set(None)
+        _inline_placements.set(None)
         _steering_report.set(None)
         _last_image_debug.set(None)
         _query_debug_snapshot.clear()

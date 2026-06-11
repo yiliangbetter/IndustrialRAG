@@ -100,14 +100,6 @@ class QueryBody(BaseModel):
         True,
         description="When true, prefer /api/query/stream; ignored on non-stream endpoint.",
     )
-    session_id: str | None = Field(
-        None,
-        description="Clarification session from prior clarification SSE.",
-    )
-    clarification_choice: str | None = Field(
-        None,
-        description='Selected rewritten query, or "use_original" to skip gate.',
-    )
 
 
 class SetupEnvBody(BaseModel):
@@ -712,131 +704,14 @@ async def api_query(body: QueryBody):
     return payload
 
 
-async def _query_stream_events(
-    q: str,
-    mode: str,
-    *,
-    clarification_choice: str | None = None,
-    session_id: str | None = None,
-) -> AsyncIterator[str]:
+async def _query_stream_events(q: str, mode: str) -> AsyncIterator[str]:
     """SSE tied to real LightRAG stages (retrieve → rerank → generate), then token deltas."""
-    _scripts_dir = _ROOT / "scripts"
-    if str(_scripts_dir) not in sys.path:
-        sys.path.insert(0, str(_scripts_dir))
-    from query_clarification import (  # noqa: WPS433
-        USE_ORIGINAL,
-        clarify_enabled,
-        clarification_to_sse_payload,
-        resolve_query_for_rag,
-        run_clarification_gate,
-    )
     from query_doc_steering import strip_manual_circled_step_markers  # noqa: WPS433
     from query_progress_hooks import query_progress_hooks, set_query_media_roots, set_query_text_for_images  # noqa: WPS433
     from stream_cot_parser import StreamCotParser  # noqa: WPS433
 
+    q = q.strip()
     parser_root = Path(state.parser_output_dir).resolve()
-    original_q = q.strip()
-    gate_reason = "clear"
-
-    if (clarification_choice or "").strip():
-        q, gate_reason = resolve_query_for_rag(
-            original_q, clarification_choice, session_id
-        )
-        yield _sse(
-            {
-                "type": "status",
-                "phase": "clarify",
-                "text": "已确认问法，正在检索知识库…"
-                if gate_reason != USE_ORIGINAL
-                else "将按原问题检索，正在检索知识库…",
-            }
-        )
-    elif clarify_enabled():
-        status_queue: asyncio.Queue[str] = asyncio.Queue()
-
-        async def _on_clarify_status(text: str) -> None:
-            await status_queue.put(text)
-
-        async def _run_gate_locked() -> Any:
-            async with state.lock:
-                return await run_clarification_gate(
-                    state.rag,
-                    original_q,
-                    mode=mode,
-                    on_status=_on_clarify_status,
-                )
-
-        gate_task = asyncio.create_task(_run_gate_locked())
-        try:
-            while not gate_task.done():
-                while True:
-                    try:
-                        status_text = status_queue.get_nowait()
-                    except asyncio.QueueEmpty:
-                        break
-                    yield _sse(
-                        {
-                            "type": "status",
-                            "phase": "clarify",
-                            "text": status_text,
-                        }
-                    )
-                await asyncio.sleep(0.05)
-            while True:
-                try:
-                    status_text = status_queue.get_nowait()
-                except asyncio.QueueEmpty:
-                    break
-                yield _sse(
-                    {
-                        "type": "status",
-                        "phase": "clarify",
-                        "text": status_text,
-                    }
-                )
-            outcome = await gate_task
-        except Exception as exc:
-            logger.exception("clarification gate failed for %r", original_q[:80])
-            yield _sse(
-                {
-                    "type": "error",
-                    "message": f"问题澄清环节失败：{exc}",
-                }
-            )
-            return
-
-        if outcome.action == "clarify":
-            payload = clarification_to_sse_payload(outcome)
-            if not payload.get("options"):
-                yield _sse(
-                    {
-                        "type": "error",
-                        "message": outcome.message
-                        or "未能生成可选问法，请补充设备型号或具体操作后重试。",
-                    }
-                )
-                return
-            yield _sse(payload)
-            yield _sse({"type": "clarification_done"})
-            return
-        if outcome.action == "abort":
-            yield _sse(
-                {
-                    "type": "error",
-                    "message": outcome.message or "无法澄清该问题，请补充信息后重试。",
-                }
-            )
-            return
-        q = outcome.effective_query or original_q
-        gate_reason = outcome.band
-        yield _sse(
-            {
-                "type": "gate_skip",
-                "reason": gate_reason,
-                "score": round(outcome.original_score, 4),
-            }
-        )
-
     set_query_media_roots([parser_root])
     set_query_text_for_images(q)
     started = time.perf_counter()
@@ -871,7 +746,12 @@ async def _query_stream_events(
                 if prog_task in done and not prog_task.cancelled():
                     try:
                         ev = prog_task.result()
-                        if ev.get("type") in ("status", "retrieval_scope", "related_images"):
+                        if ev.get("type") in (
+                            "status",
+                            "retrieval_scope",
+                            "related_images",
+                            "inline_images",
+                        ):
                             yield _sse(ev)
                     except Exception:
                         pass
@@ -943,11 +823,19 @@ async def _query_stream_events(
                     final_answer = strip_manual_circled_step_markers(
                         "".join(answer_parts).strip()
                     )
-                    from query_progress_hooks import finalize_related_images  # noqa: WPS433
+                    from query_progress_hooks import finalize_inline_images  # noqa: WPS433
 
-                    related = finalize_related_images(answer_text=final_answer)
-                    if related:
-                        yield _sse({"type": "related_images", "images": related})
+                    inline_result = finalize_inline_images(answer_text=final_answer)
+                    related = inline_result.get("images") or []
+                    placements = inline_result.get("placements") or []
+                    if related and placements:
+                        yield _sse(
+                            {
+                                "type": "inline_images",
+                                "images": related,
+                                "placements": placements,
+                            }
+                        )
                     dump_path = _persist_query_debug_dump(
                         query=q,
                         mode=mode,
@@ -975,35 +863,6 @@ async def _query_stream_events(
                     pass
 
 
-@app.post("/api/query/assess")
-async def api_query_assess(body: QueryBody):
-    """Debug: retrieval fit score only (no LLM answer / rewrite)."""
-    if not state.ready or state.rag is None:
-        raise HTTPException(
-            503,
-            state.init_error or "RAG engine not initialized; check server logs and .env",
-        )
-    from query_clarification import assess_query_fit, load_clarify_config  # noqa: WPS433
-
-    mode = (body.mode or state.query_mode or "mix").strip()
-    q = body.query.strip()
-    cfg = load_clarify_config()
-    async with state.lock:
-        assess = await assess_query_fit(state.rag, q, mode=mode)
-    return {
-        "query": q,
-        "enabled": cfg.enabled,
-        "threshold_lower": cfg.threshold_lower,
-        "threshold_upper": cfg.threshold_upper,
-        "band": assess.band,
-        "score": assess.score,
-        "score_top1": assess.score_top1,
-        "chunk_count": assess.chunk_count,
-        "preview_snippets": assess.preview_snippets,
-        "error": assess.error,
-    }
-
-
 @app.post("/api/query/stream")
 async def api_query_stream(body: QueryBody):
     if not state.ready or state.rag is None:
@@ -1014,12 +873,7 @@ async def api_query_stream(body: QueryBody):
     mode = (body.mode or state.query_mode or "mix").strip()
     q = body.query.strip()
     return StreamingResponse(
-        _query_stream_events(
-            q,
-            mode,
-            clarification_choice=body.clarification_choice,
-            session_id=body.session_id,
-        ),
+        _query_stream_events(q, mode),
         media_type="text/event-stream",
         headers={
             "Cache-Control": "no-cache",
