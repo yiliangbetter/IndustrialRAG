@@ -32,6 +32,8 @@
             <dd id="meta-wd" class="mono">—</dd>
             <dt>查询模式</dt>
             <dd id="meta-mode">—</dd>
+            <dt>灌库模式</dt>
+            <dd id="meta-multimodal">—</dd>
           </dl>
           <p id="meta-error" class="error hidden"></p>
         </section>
@@ -48,11 +50,32 @@
               <option value="naive">naive（仅向量）</option>
             </select>
           </label>
+          <div class="dev-tools" id="dev-panel">
+            <p class="dev-tools-label">开发人员</p>
+            <label class="checkbox-row">
+              <input type="checkbox" id="query-debug-dump" />
+              <span>保存查询调试日志（JSON dump）</span>
+            </label>
+            <p class="hint" id="query-debug-hint">
+              开启后每次问答写入 logs/query_dumps/，便于排查检索与配图。
+            </p>
+          </div>
+          <p class="hint hidden" id="setup-link-wrap">
+            <a href="/setup" id="setup-link">打开安装向导</a>
+          </p>
         </section>
 
         <section class="panel">
           <h2>上传灌库</h2>
-          <p class="hint">解析并写入当前工作目录下的知识库（耗时较长，请勿关闭页面）。</p>
+          <p class="hint" id="ingest-hint">
+            将新文档追加到当前知识库（不会清空已有内容）。整批重灌或清空知识库请打开
+            <a href="/setup">安装向导</a>。
+          </p>
+          <label class="checkbox-row" id="multimodal-wrap">
+            <input type="checkbox" id="enable-multimodal" />
+            <span>启用多模态灌库（图片/表格/公式；更慢，消耗更多 LLM）</span>
+          </label>
+          <p class="hint" id="multimodal-hint"></p>
           <label class="upload-zone" id="upload-zone">
             <input
               type="file"
@@ -63,9 +86,25 @@
             <span>点击或拖拽文件到此处</span>
           </label>
           <ul id="file-list" class="file-list"></ul>
-          <button type="button" class="btn secondary" id="btn-ingest" disabled>
-            开始灌库
-          </button>
+          <div class="file-list-toolbar hidden" id="file-list-toolbar">
+            <span id="file-list-count" class="file-list-count"></span>
+            <button type="button" class="btn-link" id="btn-clear-files">清空列表</button>
+          </div>
+          <div class="ingest-actions">
+            <button type="button" class="btn secondary" id="btn-ingest" disabled>
+              开始灌库
+            </button>
+            <button type="button" class="btn danger hidden" id="btn-stop-ingest">
+              停止灌库
+            </button>
+          </div>
+          <div class="ingest-progress hidden" id="ingest-progress">
+            <div class="ingest-progress-label" id="ingest-progress-label">灌库进行中…</div>
+            <div class="ingest-progress-track">
+              <div class="ingest-progress-bar" id="ingest-progress-bar"></div>
+            </div>
+          </div>
+          <pre class="ingest-log" id="ingest-log" aria-live="polite"></pre>
           <p id="ingest-status" class="hint"></p>
         </section>
       </aside>
@@ -95,6 +134,7 @@
     </div>
     <script src="/static/vendor/marked.min.js"></script>
     <script src="/static/vendor/purify.min.js"></script>
-    <script src="/static/app.js"></script>
+    <script src="/static/ingest_ui.js?v=20260602b"></script>
+    <script src="/static/app.js?v=20260520a"></script>
   </body>
 </html>

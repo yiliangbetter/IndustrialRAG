@@ -31,6 +31,7 @@ import subprocess
 import sys
 from functools import partial
 from pathlib import Path
+from typing import Any
 
 from dotenv import load_dotenv
 
@@ -42,6 +43,10 @@ load_dotenv(dotenv_path=_ROOT / ".env", override=False)
 if (os.getenv("HF_EMBED_OFFLINE") or "").strip().lower() in ("1", "true", "yes"):
     os.environ["HF_HUB_OFFLINE"] = "1"
     os.environ.setdefault("TRANSFORMERS_OFFLINE", "1")
+
+from raganything.prompt_manager import apply_prompt_language_from_env  # noqa: E402
+
+apply_prompt_language_from_env()
 
 
 def _ensure_venv_bin_on_path() -> None:
@@ -84,6 +89,144 @@ def _collect_files(folder: Path, extensions: list[str], recursive: bool) -> list
     return sorted({p.resolve() for p in files if p.is_file()})
 
 
+def _doc_status_file_path(meta: Any) -> str | None:
+    if isinstance(meta, dict):
+        val = meta.get("file_path")
+    else:
+        val = getattr(meta, "file_path", None)
+    if isinstance(val, str) and val.strip():
+        return val.strip()
+    return None
+
+
+_DOC_SUCCESS_STATUSES = frozenset({"processed", "completed", "done"})
+_DOC_FAILURE_STATUSES = frozenset({"failed", "error"})
+
+
+def _normalize_doc_status(raw: Any) -> str:
+    """LightRAG may return DocStatus enum; str() becomes ``docstatus.processed``."""
+    if raw is None:
+        return ""
+    val = getattr(raw, "value", None)
+    if isinstance(val, str) and val.strip():
+        return val.strip().lower()
+    text = str(raw).strip().lower()
+    if "." in text:
+        text = text.rsplit(".", 1)[-1]
+    return text
+
+
+async def _lookup_doc_status_meta(rag, rel: str, doc_id: str) -> Any | None:
+    lightrag = getattr(rag, "lightrag", None)
+    if lightrag is None:
+        return None
+    doc_status = getattr(lightrag, "doc_status", None)
+    if doc_status is None:
+        return None
+
+    meta = None
+    try:
+        meta = await doc_status.get_by_id(doc_id)
+    except Exception:
+        meta = None
+    if meta:
+        return meta
+
+    target = Path(rel).name
+    page = 1
+    while True:
+        rows, total = await doc_status.get_docs_paginated(
+            page=page, page_size=200, sort_field="updated_at", sort_direction="desc"
+        )
+        if not rows:
+            break
+        for did, row_meta in rows:
+            if did == doc_id:
+                return row_meta
+            fp = _doc_status_file_path(row_meta)
+            if fp == rel or (fp and Path(fp).name == target):
+                return row_meta
+        if page * 200 >= total:
+            break
+        page += 1
+    return None
+
+
+async def _verify_doc_ingest_outcome(rag, rel: str, doc_id: str) -> tuple[bool, str]:
+    """Confirm LightRAG finished indexing; insert may return before extract fails."""
+    meta = await _lookup_doc_status_meta(rag, rel, doc_id)
+    if meta is None:
+        return False, "灌库后未找到文档状态记录"
+
+    if isinstance(meta, dict):
+        status = _normalize_doc_status(meta.get("status"))
+        err = str(meta.get("error_msg") or meta.get("error") or "").strip()
+        chunks = int(meta.get("chunks_count") or 0)
+    else:
+        status = _normalize_doc_status(getattr(meta, "status", None))
+        err = str(
+            getattr(meta, "error_msg", None) or getattr(meta, "error", None) or ""
+        ).strip()
+        chunks = int(getattr(meta, "chunks_count", 0) or 0)
+
+    if status in _DOC_FAILURE_STATUSES:
+        return False, err or "知识图谱抽取失败（文档状态：failed）"
+    if status in _DOC_SUCCESS_STATUSES:
+        if chunks <= 0:
+            return False, err or "文档已标记完成但未生成任何分块"
+        return True, ""
+    if status in ("processing", "pending", "handling"):
+        return False, err or f"文档仍处于处理中（{status}），可能 LLM 配额不足或抽取中断"
+    return False, err or f"未知文档状态：{status or 'empty'}"
+
+
+async def _remove_existing_docs_for_file(rag, rel: str) -> int:
+    """Replace prior index rows that share the same uploaded filename."""
+    lightrag = getattr(rag, "lightrag", None)
+    if lightrag is None:
+        return 0
+
+    doc_status = getattr(lightrag, "doc_status", None)
+    delete = getattr(lightrag, "adelete_by_doc_id", None)
+    if doc_status is None or delete is None:
+        return 0
+
+    target = Path(rel).name
+    matches: list[str] = []
+    page = 1
+    while True:
+        rows, total = await doc_status.get_docs_paginated(
+            page=page, page_size=200, sort_field="updated_at", sort_direction="desc"
+        )
+        if not rows:
+            break
+        for doc_id, meta in rows:
+            fp = _doc_status_file_path(meta)
+            if fp == rel or (fp and Path(fp).name == target):
+                matches.append(doc_id)
+        if page * 200 >= total:
+            break
+        page += 1
+
+    removed = 0
+    seen: set[str] = set()
+    for doc_id in matches:
+        if doc_id in seen:
+            continue
+        seen.add(doc_id)
+        try:
+            await delete(doc_id)
+            wd = getattr(lightrag, "working_dir", None)
+            if wd:
+                from raganything.table_matrix import delete_matrix_for_doc  # noqa: WPS433
+
+                delete_matrix_for_doc(wd, doc_id)
+            removed += 1
+        except Exception:
+            continue
+    return removed
+
+
 def _download_mineru_pipeline_models() -> None:
     src = os.getenv("MINERU_MODEL_SOURCE", "huggingface").strip().lower()
     if src not in ("huggingface", "modelscope"):
@@ -117,8 +260,8 @@ async def _build_rag(
         return str(v).strip().lower() in ("1", "true", "yes", "on")
 
     llm_key = (
-        os.getenv("OPENAI_API_KEY", "").strip()
-        or os.getenv("LLM_BINDING_API_KEY", "").strip()
+        os.getenv("LLM_BINDING_API_KEY", "").strip()
+        or os.getenv("OPENAI_API_KEY", "").strip()
     )
     if not llm_key:
         raise SystemExit("Set OPENAI_API_KEY or LLM_BINDING_API_KEY.")
@@ -301,7 +444,9 @@ async def _ingest_folder(
     recursive: bool,
     limit: int,
     skip_multimodal: bool,
-) -> tuple[int, int]:
+    on_event=None,
+    should_cancel=None,
+) -> tuple[int, int, list[dict[str, str]], bool]:
     files = _collect_files(
         input_folder, config.supported_file_extensions, recursive
     )
@@ -314,14 +459,38 @@ async def _ingest_folder(
         files = files[:limit]
 
     ok = fail = 0
-    for fp in files:
+    errors: list[dict[str, str]] = []
+    total = len(files)
+    cancelled = False
+
+    async def _emit(ev: dict) -> None:
+        if on_event is not None:
+            await on_event(ev)
+
+    await _emit({"type": "ingest_start", "total": total})
+
+    for idx, fp in enumerate(files, start=1):
+        if should_cancel and should_cancel():
+            cancelled = True
+            await _emit({"type": "log", "message": "收到停止请求，正在终止灌库…"})
+            break
+        rel = str(fp.relative_to(input_folder))
+        await _emit(
+            {
+                "type": "file_start",
+                "file": rel,
+                "current": idx,
+                "total": total,
+                "message": f"正在处理 ({idx}/{total})：{rel}",
+            }
+        )
         try:
-            rel = str(fp.relative_to(input_folder))
             sub_out = parser_output_dir
             if fp.parent != input_folder:
                 sub_out = parser_output_dir / fp.parent.relative_to(input_folder)
             sub_out.mkdir(parents=True, exist_ok=True)
 
+            await _emit({"type": "log", "message": f"解析文档：{rel}"})
             content_list, doc_id = await rag.parse_document(
                 str(fp),
                 output_dir=str(sub_out),
@@ -329,20 +498,66 @@ async def _ingest_folder(
                 display_stats=config.display_content_stats,
                 **parse_extra,
             )
+            if should_cancel and should_cancel():
+                cancelled = True
+                await _emit({"type": "log", "message": "收到停止请求，正在终止灌库…"})
+                break
+            replaced = await _remove_existing_docs_for_file(rag, rel)
+            if replaced:
+                await _emit(
+                    {
+                        "type": "log",
+                        "message": f"替换已有索引：{rel}（移除 {replaced} 条旧记录）",
+                    }
+                )
+                logger.info("INGEST_REPLACE::%s::removed=%d", rel, replaced)
+            await _emit({"type": "log", "message": f"写入知识库：{rel}"})
             await rag.insert_content_list(
                 content_list,
                 file_path=rel,
                 doc_id=doc_id,
                 skip_multimodal_processing=skip_multimodal,
             )
+            ingest_ok, ingest_err = await _verify_doc_ingest_outcome(rag, rel, doc_id)
+            if not ingest_ok:
+                raise RuntimeError(ingest_err or "灌库未完成")
             ok += 1
             logger.info(f"INGEST_FILE_OK::{rel}")
+            await _emit({"type": "file_ok", "file": rel, "current": idx, "total": total})
         except Exception as e:
+            err = str(e)
             logger.error(f"INGEST_FILE_FAIL::{fp}: {e}")
             fail += 1
+            errors.append({"file": rel, "error": err})
+            await _emit({"type": "log", "message": f"✗ 灌库失败：{rel}\n  {err}"})
+            await _emit(
+                {
+                    "type": "file_fail",
+                    "file": rel,
+                    "error": err,
+                    "current": idx,
+                    "total": total,
+                }
+            )
+        if should_cancel and should_cancel():
+            cancelled = True
+            await _emit({"type": "log", "message": "收到停止请求，正在终止灌库…"})
+            break
 
-    logger.info(f"INGEST_DONE::ok={ok}::fail={fail}")
-    return ok, fail
+    if cancelled:
+        logger.info(f"INGEST_CANCELLED::ok={ok}::fail={fail}")
+        await _emit(
+            {
+                "type": "ingest_cancelled",
+                "ok": ok,
+                "fail": fail,
+                "errors": errors,
+            }
+        )
+    else:
+        logger.info(f"INGEST_DONE::ok={ok}::fail={fail}")
+        await _emit({"type": "ingest_done", "ok": ok, "fail": fail, "errors": errors})
+    return ok, fail, errors, cancelled
 
 
 _QUIT_TOKENS = frozenset(
@@ -384,9 +599,9 @@ def _query_extras_from_env(query: str | None = None) -> dict:
         scripts_dir = Path(__file__).resolve().parent
         if str(scripts_dir) not in sys.path:
             sys.path.insert(0, str(scripts_dir))
-        from query_doc_steering import build_steering_user_prompt  # noqa: WPS433
+        from query_doc_steering import build_user_prompt_for_query  # noqa: WPS433
 
-        steer = build_steering_user_prompt(query)
+        steer = build_user_prompt_for_query(query)
         if steer:
             up = f"{up}\n{steer}".strip() if up else steer
     if up:

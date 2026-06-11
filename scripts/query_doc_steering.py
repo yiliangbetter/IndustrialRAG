@@ -12,7 +12,24 @@ import os
 import re
 from contextvars import ContextVar
 from dataclasses import dataclass, field
+from pathlib import Path
 from typing import Any
+
+_ROOT = Path(__file__).resolve().parents[1]
+
+# Manual step markers (①②…) — strip in user-facing answers, keep wording.
+_CIRCLED_STEP_BEFORE_CJK = re.compile(
+    r"[\u2460-\u2473\u3251-\u325f\u2776-\u277f\u24ea-\u24ff"
+    r"](?=\s*[\u4e00-\u9fff])"
+)
+
+
+def strip_manual_circled_step_markers(text: str) -> str:
+    """Remove circled list prefixes (①②) before Chinese text in answers."""
+    if not text or not text.strip():
+        return text
+    return _CIRCLED_STEP_BEFORE_CJK.sub("", text)
+
 
 # Order matters: longer / more specific query phrases first.
 MACHINE_PROFILES: list[dict[str, Any]] = [
@@ -213,6 +230,383 @@ def _basename(path: str) -> str:
     return path.replace("\\", "/").rsplit("/", 1)[-1] if path else ""
 
 
+def _path_hits_deny(path: str, deny: list[str]) -> str | None:
+    if not path or not deny:
+        return None
+    hit = next((s for s in deny if s in path), None)
+    return hit
+
+
+_CATALOG_MODEL_MARKER = "本手册适用产品型号"
+
+
+def _query_discriminative_terms(query: str) -> list[str]:
+    from raganything.utils import discriminative_terms  # noqa: WPS433
+
+    return discriminative_terms(query, min_len=3)
+
+
+def _asks_manual_applicability_models(query: str) -> bool:
+    """Foreword-style: which product models a named manual applies to."""
+    q = (query or "").strip()
+    if not q:
+        return False
+    return bool(
+        re.search(
+            r"适用(?:于)?(?:哪些|什么|哪(?:些|种)|多少).*?(?:型号|机型)|"
+            r"(?:手册|说明书).*适用.*?(?:型号|机型)|"
+            r"(?:型号|机型).*适用",
+            q,
+        )
+    )
+
+
+def is_catalog_product_model_query(query: str) -> bool:
+    """Broad product-line / model-count questions (not single-machine maintenance)."""
+    q = (query or "").strip()
+    if not q:
+        return False
+    asks_scope = bool(
+        re.search(
+            r"哪些|多少|一共|总共|全部|有哪些|几种|列举|清单|概况|多少个|一共有多少|多少种",
+            q,
+        )
+    )
+    asks_models = bool(re.search(r"型号|机型|产品", q))
+    if not (asks_scope and asks_models):
+        return False
+    if _asks_manual_applicability_models(q):
+        return True
+    if resolve_machine_profile(query):
+        return False
+    return True
+
+
+def _default_min_rerank_score() -> float:
+    if (os.getenv("RAG_USE_CLARIFY_UPPER_AS_MIN_RERANK") or "").strip().lower() in (
+        "1",
+        "true",
+        "yes",
+    ):
+        raw = os.getenv("QUERY_SCORE_THRESHOLD_UPPER") or "0.45"
+        try:
+            return float(raw)
+        except ValueError:
+            return 0.45
+    raw = os.getenv("MIN_RERANK_SCORE") or "0.28"
+    try:
+        return float(raw)
+    except ValueError:
+        return 0.28
+
+
+def catalog_query_min_rerank_score() -> float:
+    raw = os.getenv("RAG_CATALOG_QUERY_MIN_RERANK_SCORE") or "0.0"
+    try:
+        return max(0.0, float(raw))
+    except ValueError:
+        return 0.0
+
+
+def _chunk_has_catalog_marker(doc: dict) -> bool:
+    return _CATALOG_MODEL_MARKER in str(doc.get("content") or "")
+
+
+def _catalog_chunk_relevant_to_query(query: str, doc: dict) -> bool:
+    """Keep foreword catalog lines whose path/body overlap query terms (no manual name lists)."""
+    if not _chunk_has_catalog_marker(doc):
+        return False
+    path = _doc_path(doc)
+    profile = resolve_machine_profile(query)
+    if profile:
+        deny = list(profile.get("deny_path_substrings") or [])
+        if _path_hits_deny(path, deny):
+            return False
+        phrases = profile.get("query_phrases") or []
+        if path and phrases:
+            pn = path.replace(" ", "")
+            if not any(str(p).replace(" ", "") in pn for p in phrases if str(p).strip()):
+                return False
+    terms = _query_discriminative_terms(query)
+    if not terms:
+        return True
+    blob = f"{path} {str(doc.get('content') or '')[:500]}"
+    return any(len(term) >= 3 and term in blob for term in terms)
+
+
+def _load_catalog_chunks_from_storage() -> list[dict]:
+    try:
+        from client_paths import get_rag_storage_dir  # noqa: WPS433
+
+        store = Path(get_rag_storage_dir())
+    except Exception:
+        store = _ROOT / "data" / "rag_storage"
+    path = store / "kv_store_text_chunks.json"
+    if not path.is_file():
+        return []
+    try:
+        raw = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError):
+        return []
+    if not isinstance(raw, dict):
+        return []
+    out: list[dict] = []
+    for chunk_id, row in raw.items():
+        if not isinstance(row, dict):
+            continue
+        content = str(row.get("content") or "")
+        if _CATALOG_MODEL_MARKER not in content:
+            continue
+        doc = dict(row)
+        doc.setdefault("content", content)
+        doc.setdefault("id", chunk_id)
+        out.append(doc)
+    return out
+
+
+def supplement_catalog_product_model_chunks(
+    query: str,
+    docs: list[dict],
+    *,
+    rerank_pool: list[dict] | None = None,
+) -> list[dict]:
+    """Ensure each relevant manual's foreword ``本手册适用产品型号`` chunk is present."""
+    if not _env_bool("RAG_CATALOG_QUERY_BOOST", True):
+        return docs
+    if not is_catalog_product_model_query(query):
+        return docs
+
+    seen_paths: set[str] = set()
+    merged: list[dict] = []
+
+    def add_doc(doc: dict) -> None:
+        path = _doc_path(doc)
+        if not path or path in seen_paths:
+            return
+        if not _catalog_chunk_relevant_to_query(query, doc):
+            return
+        seen_paths.add(path)
+        boosted = dict(doc)
+        boosted["rerank_score"] = max(float(boosted.get("rerank_score") or 0), 0.99)
+        merged.append(boosted)
+
+    for doc in docs:
+        add_doc(doc)
+    for doc in rerank_pool or []:
+        add_doc(doc)
+    for doc in _load_catalog_chunks_from_storage():
+        add_doc(doc)
+
+    if not merged:
+        return docs
+    return merged + [d for d in docs if _doc_path(d) not in seen_paths]
+
+
+def _stash_catalog_boost_stats(count: int) -> None:
+    if count <= 0:
+        return
+    prev = _last_filter_report.get()
+    payload = dict(prev) if isinstance(prev, dict) else {}
+    payload["catalog_boost"] = {"chunks_added": count}
+    _last_filter_report.set(payload)
+
+
+def table_filter_needle(query: str) -> str | None:
+    """Filter value the user wants to match in tabular rows (from the question wording)."""
+    q = (query or "").strip()
+    if not q:
+        return None
+    m = re.search(r"使用\s*([^，。？,；;\n]+?)(?:[？?]|$)", q)
+    if m:
+        needle = m.group(1).strip()
+        if needle:
+            return needle
+    for hint in re.findall(r'[「"\u201c]([^」"\u201d]+)[」"\u201d]', q):
+        if hint.strip():
+            return hint.strip()
+    return None
+
+
+def _table_filter_min_matching_rows() -> int:
+    raw = os.getenv("RAG_TABLE_FILTER_MIN_ROWS") or "2"
+    try:
+        return max(1, int(raw))
+    except ValueError:
+        return 2
+
+
+def _table_row_matches_filter(row_html: str, needle: str) -> bool:
+    tds = [td.strip() for td in re.findall(r"<td[^>]*>([^<]+)</td>", row_html, re.I)]
+    if not tds or needle not in row_html:
+        return False
+    if needle in tds[-1]:
+        return True
+    if len(tds) >= 2:
+        return any(needle in td for td in tds[1:])
+    return False
+
+
+def detect_table_filter_signal(query: str, text: str) -> bool:
+    """True when retrieved context has multiple HTML table rows matching the filter value."""
+    needle = table_filter_needle(query)
+    if not needle or not text or "<tr" not in text.lower():
+        return False
+    rows = re.findall(r"<tr>.*?</tr>", text, re.I | re.DOTALL)
+    matches = sum(1 for row in rows if _table_row_matches_filter(row, needle))
+    return matches >= _table_filter_min_matching_rows()
+
+
+def is_table_filter_listing_query(query: str, context: str | None = None) -> bool:
+    """Confirmed table-filter listing — requires retrieval context unless explicitly passed."""
+    if not (query or "").strip():
+        return False
+    if context is None:
+        return False
+    return detect_table_filter_signal(query, context)
+
+
+def build_table_filter_listing_prompt(query: str) -> str:
+    needle = table_filter_needle(query) or "问句中的筛选条件"
+    return (
+        "用户问的是对检索 context 中表格行的筛选与列举。"
+        f"在 HTML 表格<table>/<tr>/<td>行中，找出与「{needle}」匹配的全部行"
+        "（以各行文字所示或对应表头列为准；行内容以表头为准）。"
+        "列出这些行的对象/部位/部件名称（取能识别的第一列，以表头为准）。"
+        "请把 context 中所有符合条件的行列出，不要遗漏。"
+        "回答用简洁列表，每行只写名称，不要展开其它列（周期、内容、方式等）。"
+        "不要引用非表格的正文或其它材料来组合答案。"
+    )
+
+
+def _append_table_filter_user_prompt(query_param: Any, query: str) -> None:
+    if query_param is None:
+        return
+    extra = build_table_filter_listing_prompt(query)
+    if not extra:
+        return
+    existing = str(getattr(query_param, "user_prompt", None) or "").strip()
+    if extra in existing:
+        return
+    query_param.user_prompt = f"{existing}\n\n{extra}".strip() if existing else extra
+
+
+def _matrix_store_path() -> Path:
+    try:
+        from client_paths import get_rag_storage_dir  # noqa: WPS433
+
+        return Path(get_rag_storage_dir())
+    except Exception:
+        return _ROOT / "data" / "rag_storage"
+
+
+def _load_table_matrix_from_storage() -> list[Any]:
+    from raganything.table_matrix import load_matrix_store
+
+    store = load_matrix_store(_matrix_store_path())
+    return list(store.values())
+
+
+def _allowed_manual_basenames(docs: list[dict]) -> set[str]:
+    out: set[str] = set()
+    for doc in docs:
+        path = _doc_path(doc)
+        if path:
+            out.add(_basename(path))
+    return out
+
+
+def _table_matrix_chunk_relevant(
+    query: str,
+    record: Any,
+    *,
+    allowed_basenames: set[str],
+) -> bool:
+    from raganything.table_matrix import table_matrix_matches_query
+    from raganything.utils import discriminative_terms
+
+    fp = str(getattr(record, "file_path", "") or "")
+    if allowed_basenames:
+        bp = _basename(fp)
+        if not any(ab and (ab in fp or ab in bp) for ab in allowed_basenames):
+            return False
+    elif fp:
+        terms = discriminative_terms(query, min_len=3)
+        if terms and not any(t in fp for t in terms):
+            return False
+    deny, _profile = active_deny_substrings(query)
+    if _path_hits_deny(fp, deny):
+        return False
+    return table_matrix_matches_query(query, record)
+
+
+def supplement_table_matrix_chunks(
+    query: str,
+    docs: list[dict],
+    *,
+    rerank_pool: list[dict] | None = None,
+) -> list[dict]:
+    """Boost table chunks when row-matrix term overlap matches the query."""
+    from raganything.table_matrix import table_matrix_query_boost_enabled
+
+    if not table_matrix_query_boost_enabled():
+        return docs
+
+    allowed = _allowed_manual_basenames(docs + (rerank_pool or []))
+    seen_chunk: set[str] = set()
+    boosted: list[dict] = []
+
+    def add_chunk(chunk_id: str, file_path: str) -> None:
+        if not chunk_id or chunk_id in seen_chunk:
+            return
+        seen_chunk.add(chunk_id)
+        boosted.append(
+            {
+                "content": "",
+                "id": chunk_id,
+                "file_path": file_path,
+                "rerank_score": 0.98,
+            }
+        )
+
+    for record in _load_table_matrix_from_storage():
+        if not _table_matrix_chunk_relevant(
+            query, record, allowed_basenames=allowed if allowed else set()
+        ):
+            continue
+        fp = str(record.file_path or "")
+        for chunk_id in record.chunk_ids:
+            add_chunk(chunk_id, fp)
+
+    if not boosted:
+        return docs
+
+    try:
+        path = _matrix_store_path() / "kv_store_text_chunks.json"
+        chunk_map = (
+            json.loads(path.read_text(encoding="utf-8"))
+            if path.is_file()
+            else {}
+        )
+        for doc in boosted:
+            cid = str(doc.get("id") or "")
+            row = chunk_map.get(cid)
+            if isinstance(row, dict) and row.get("content"):
+                doc["content"] = row["content"]
+    except (OSError, json.JSONDecodeError):
+        pass
+
+    return boosted + [d for d in docs if str(d.get("id") or "") not in seen_chunk]
+
+
+def _stash_matrix_boost_stats(count: int) -> None:
+    if count <= 0:
+        return
+    prev = _last_filter_report.get()
+    payload = dict(prev) if isinstance(prev, dict) else {}
+    payload["table_matrix_boost"] = {"chunks_added": count}
+    _last_filter_report.set(payload)
+
+
 def filter_retrieved_docs_by_query(query: str, docs: list[dict]) -> list[dict]:
     kept, _report = filter_retrieved_docs_with_report(query, docs)
     return kept
@@ -271,6 +665,33 @@ def consume_filter_report() -> dict[str, Any] | None:
     return report
 
 
+def build_catalog_model_listing_prompt(query: str) -> str:
+    if not is_catalog_product_model_query(query):
+        return ""
+    return (
+        "用户询问产品线/型号总览：请按检索到的每一份手册分别列出正文中"
+        f"「{_CATALOG_MODEL_MARKER}」一行里的全部型号；"
+        "有几份来源含该行就列几份，不得只汇总其中部分来源。"
+    )
+
+
+def build_query_user_prompt(query: str) -> str:
+    """Merge catalog listing + profile steering hints for LightRAG ``user_prompt``."""
+    parts: list[str] = []
+    catalog = build_catalog_model_listing_prompt(query)
+    if catalog:
+        parts.append(catalog)
+    steer = build_steering_user_prompt(query)
+    if steer:
+        parts.append(steer)
+    return "\n\n".join(parts)
+
+
+def build_user_prompt_for_query(query: str) -> str:
+    """Alias used by ``rag_pipeline_parse_graph_chat`` (same as ``build_query_user_prompt``)."""
+    return build_query_user_prompt(query)
+
+
 def build_steering_user_prompt(query: str) -> str:
     """Per-query hint for the LLM (not per-machine ``.env`` entries)."""
     if not _env_bool("RAG_QUERY_KG_STEERING", True):
@@ -279,53 +700,10 @@ def build_steering_user_prompt(query: str) -> str:
     if not profile:
         return ""
     label = str(profile.get("label") or "")
-    parts = [
+    return (
         f"用户问题针对「{label}」。只引用与该机型对应手册的正文 chunk；"
         "若知识图谱实体描述与其它机型手册合并后冲突，以 chunk 正文为准。"
-    ]
-    qn = _normalize_query(query)
-    if profile.get("id") == "high_speed_smart" and "输送链条" in qn:
-        parts.append(
-            "输送链条保养以手册 3.1.2 及附表为准：季度/半年用手动黄油枪加注润滑脂2#；"
-            "勿写「每天加注长城导轨油68#」，除非 chunk 正文明确写出该条。"
-        )
-    return " ".join(parts)
-
-
-def _line_is_chain_daily_oil_noise(line: str) -> bool:
-    lower = line.lower()
-    chain_related = (
-        "conveyor chain" in lower
-        or "输送链条" in line
-        or ("输送" in line and "链条" in line)
     )
-    if not chain_related:
-        return False
-    oil_markers = (
-        "长城导轨油",
-        "great wall guide",
-        "greatwall guide",
-        "centralized lubrication",
-        "每天",
-        "daily",
-    )
-    return any(m in lower or m in line for m in oil_markers)
-
-
-def scrub_kg_context(query: str, context: str) -> str:
-    """Remove KG lines that wrongly merge other manuals' chain lubrication."""
-    if not _env_bool("RAG_QUERY_KG_SCRUB", True):
-        return context
-    profile = resolve_machine_profile(query)
-    if not profile or profile.get("id") != "high_speed_smart":
-        return context
-    qn = _normalize_query(query)
-    if "输送链条" not in qn:
-        return context
-    if not context:
-        return context
-    kept = [ln for ln in context.split("\n") if not _line_is_chain_daily_oil_noise(ln)]
-    return "\n".join(kept)
 
 
 def install_doc_filter_on_rerank() -> None:
@@ -345,6 +723,16 @@ def install_doc_filter_on_rerank() -> None:
         docs = await orig(
             query, retrieved_docs, global_config, enable_rerank, top_n
         )
+        before_catalog = len(docs)
+        docs = supplement_catalog_product_model_chunks(
+            query, docs, rerank_pool=docs
+        )
+        if len(docs) > before_catalog:
+            _stash_catalog_boost_stats(len(docs) - before_catalog)
+        before_matrix = len(docs)
+        docs = supplement_table_matrix_chunks(query, docs, rerank_pool=docs)
+        if len(docs) > before_matrix:
+            _stash_matrix_boost_stats(len(docs) - before_matrix)
         kept, _report = filter_retrieved_docs_with_report(query, docs)
         return kept
 
@@ -352,12 +740,12 @@ def install_doc_filter_on_rerank() -> None:
     ut.apply_rerank_if_enabled = _wrapped  # type: ignore[method-assign]
 
 
-def install_kg_context_scrub() -> None:
+def install_query_context_hooks() -> None:
+    """Table-filter user_prompt when retrieval context confirms a tabular listing query."""
     import lightrag.operate as op
-    from dataclasses import replace
 
     orig = op._build_query_context
-    if getattr(orig, "_kg_scrub_wrapped", False):
+    if getattr(orig, "_query_context_hooks_wrapped", False):
         return
 
     async def _wrapped(*args: Any, **kwargs: Any):
@@ -365,16 +753,66 @@ def install_kg_context_scrub() -> None:
         if result is None:
             return result
         query = args[0] if args else str(kwargs.get("query") or "")
-        scrubbed = scrub_kg_context(query, result.context or "")
-        if scrubbed != result.context:
-            result = replace(result, context=scrubbed)
+        query_param = kwargs.get("query_param")
+        if query_param is None and len(args) >= 8:
+            query_param = args[7]
+        if (
+            isinstance(query, str)
+            and query.strip()
+            and query_param is not None
+        ):
+            ctx = str(getattr(result, "context", None) or "")
+            if detect_table_filter_signal(query, ctx):
+                _append_table_filter_user_prompt(query_param, query)
         return result
 
-    _wrapped._kg_scrub_wrapped = True  # type: ignore[attr-defined]
+    _wrapped._query_context_hooks_wrapped = True  # type: ignore[attr-defined]
     op._build_query_context = _wrapped  # type: ignore[method-assign]
 
 
+def install_catalog_rerank_threshold() -> None:
+    """Lower ``min_rerank_score`` for product-line catalog queries."""
+    import lightrag.utils as ut
+
+    orig = ut.process_chunks_unified
+    if getattr(orig, "_catalog_rerank_wrapped", False):
+        return
+
+    async def _wrapped(
+        query: str,
+        unique_chunks: list[dict],
+        query_param: Any,
+        global_config: dict,
+        source_type: str = "mixed",
+        chunk_token_limit: int | None = None,
+    ):
+        prev_min: float | None = None
+        if is_catalog_product_model_query(query) and _env_bool(
+            "RAG_CATALOG_QUERY_RERANK", True
+        ):
+            prev_min = float(
+                global_config.get("min_rerank_score", _default_min_rerank_score())
+            )
+            global_config["min_rerank_score"] = catalog_query_min_rerank_score()
+        try:
+            return await orig(
+                query,
+                unique_chunks,
+                query_param,
+                global_config,
+                source_type,
+                chunk_token_limit,
+            )
+        finally:
+            if prev_min is not None:
+                global_config["min_rerank_score"] = prev_min
+
+    _wrapped._catalog_rerank_wrapped = True  # type: ignore[attr-defined]
+    ut.process_chunks_unified = _wrapped  # type: ignore[method-assign]
+
+
 def install_query_steering_hooks() -> None:
-    """Chunk file_path filter + KG context scrub (idempotent)."""
+    """Chunk file_path filter + catalog/table query hooks (idempotent)."""
     install_doc_filter_on_rerank()
-    install_kg_context_scrub()
+    install_catalog_rerank_threshold()
+    install_query_context_hooks()

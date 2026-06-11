@@ -15,9 +15,16 @@ from raganything.base import DocStatus
 from raganything.parser import MineruParser, MineruExecutionError, get_parser
 from raganything.utils import (
     separate_content,
+    build_image_ref_block,
+    coalesce_text_image_segments,
+    context_text_for_image,
+    flatten_image_refs_for_skip_multimodal,
     insert_text_content,
     insert_text_content_with_multimodal_content,
     get_processor_for_type,
+    _join_caption_field,
+    resolve_image_caption,
+    resolve_image_footnote,
 )
 import asyncio
 from lightrag.utils import compute_mdhash_id
@@ -241,6 +248,87 @@ class ProcessorMixin:
             return ""
         return "\n\n".join(f"[Table]\n{t}" for t in parts)
 
+    @staticmethod
+    def _preceding_text_caption(parts: List[str], max_len: int = 400) -> str:
+        """Nearest prior non-table, non-image text block (document order)."""
+        for prev in reversed(parts):
+            ps = (prev or "").strip()
+            if not ps or ps.startswith("[Table]") or ps.startswith("[图片]"):
+                continue
+            return ps[:max_len]
+        return ""
+
+    def _table_text_from_item(self, item: Dict[str, Any]) -> str:
+        body = item.get("table_body")
+        if isinstance(body, str) and body.strip():
+            return body.strip()
+        content = item.get("content")
+        if isinstance(content, dict):
+            html = (content.get("html") or "").strip()
+            if html:
+                return html
+        return ""
+
+    def _build_document_parts_for_ingest(self, items: List[Dict[str, Any]]) -> List[str]:
+        """Document-order blocks for ingest; each ``[Table]`` block is one part."""
+        parts: List[str] = []
+        for idx, item in enumerate(items):
+            if not isinstance(item, dict):
+                continue
+            block_type = item.get("type")
+
+            if block_type == "image":
+                img_path = (item.get("img_path") or "").strip()
+                if img_path:
+                    caption = resolve_image_caption(items, idx)
+                    footnote = resolve_image_footnote(items, idx)
+                    page_idx = item.get("page_idx")
+                    context = context_text_for_image(items, idx)
+                    parts.append(
+                        build_image_ref_block(
+                            img_path=img_path,
+                            page_idx=page_idx if isinstance(page_idx, int) else None,
+                            caption=caption,
+                            footnote=footnote,
+                            context=context,
+                        )
+                    )
+                else:
+                    chunk = self._plaintext_from_mineru_blocks([item])
+                    if chunk.strip():
+                        parts.append(chunk.strip())
+                continue
+
+            if block_type == "table":
+                table_text = self._table_text_from_item(item)
+                if table_text:
+                    caption = self._preceding_text_caption(parts)
+                    if caption:
+                        parts.append(f"{caption}\n\n[Table]\n{table_text}")
+                    else:
+                        parts.append(f"[Table]\n{table_text}")
+                continue
+
+            if block_type == "equation":
+                eq = item.get("text") or item.get("equation_text") or ""
+                if isinstance(eq, str) and eq.strip():
+                    parts.append(eq.strip())
+                continue
+
+            chunk = self._plaintext_from_mineru_blocks([item])
+            if not chunk.strip() and block_type == "text":
+                text = item.get("text")
+                if isinstance(text, str):
+                    chunk = text.strip()
+            if chunk.strip():
+                parts.append(chunk.strip())
+
+        return parts
+
+    def _build_text_with_inline_image_refs(self, items: List[Dict[str, Any]]) -> str:
+        """Walk content_list in document order; place image refs next to surrounding text."""
+        return "\n\n".join(self._build_document_parts_for_ingest(items))
+
     async def _insert_text_content_embedding_only(
         self, text_content: str, file_ref: str, doc_id: str
     ) -> None:
@@ -249,7 +337,10 @@ class ProcessorMixin:
             await self._mark_multimodal_processing_complete(doc_id)
             return
 
-        raw_chunks = [chunk.strip() for chunk in text_content.split("\n\n") if chunk.strip()]
+        segments = [
+            chunk.strip() for chunk in text_content.split("\n\n") if chunk.strip()
+        ]
+        raw_chunks = coalesce_text_image_segments(segments) if segments else []
         if not raw_chunks:
             raw_chunks = [text_content.strip()]
 
@@ -292,6 +383,29 @@ class ProcessorMixin:
         )
         await self.lightrag.doc_status.index_done_callback()
         await self.lightrag._insert_done()
+
+    async def _persist_table_matrix_index(
+        self,
+        *,
+        doc_id: str,
+        file_ref: str,
+        document_parts: List[str] | None,
+    ) -> None:
+        from raganything.table_matrix import (
+            persist_table_matrix_after_ingest,
+            table_matrix_ingest_enabled,
+        )
+        from raganything.utils import compute_table_aware_ingest_segments
+
+        if not table_matrix_ingest_enabled() or not document_parts:
+            return
+        segments = compute_table_aware_ingest_segments(self.lightrag, document_parts)
+        await persist_table_matrix_after_ingest(
+            self.lightrag,
+            full_doc_id=doc_id,
+            file_path=file_ref,
+            ingest_segments=segments,
+        )
 
     async def _get_cached_result(
         self, cache_key: str, file_path: Path, parse_method: str = None, **kwargs
@@ -2184,30 +2298,62 @@ class ProcessorMixin:
 
         # Step 1: Separate text and multimodal content
         text_content, multimodal_items = separate_content(normalized_content_list)
-
-        if not text_content.strip():
-            text_content = self._plaintext_from_mineru_blocks(normalized_content_list)
-        if not text_content.strip():
-            text_parts = []
-            for item in normalized_content_list:
-                candidate = item.get("text")
-                if isinstance(candidate, str) and candidate.strip():
-                    text_parts.append(candidate.strip())
-            text_content = "\n\n".join(text_parts)
+        document_parts: List[str] | None = None
 
         if skip_multimodal_processing:
-            table_blob = self._flatten_table_text_for_skip_multimodal(
-                normalized_content_list
-            )
-            if table_blob:
-                if text_content.strip():
-                    text_content = text_content.strip() + "\n\n" + table_blob
-                else:
-                    text_content = table_blob
-                self.logger.info(
-                    "skip_multimodal_processing: appended %d chars of table text for indexing",
-                    len(table_blob),
+            document_parts = self._build_document_parts_for_ingest(normalized_content_list)
+            inline_text = "\n\n".join(document_parts)
+            if inline_text.strip():
+                text_content = inline_text
+                img_count = inline_text.count("[图片]")
+                if img_count:
+                    self.logger.info(
+                        "skip_multimodal_processing: inline-indexed %d image ref(s) "
+                        "in document order",
+                        img_count,
+                    )
+            else:
+                if not text_content.strip():
+                    text_content = self._plaintext_from_mineru_blocks(
+                        normalized_content_list
+                    )
+                if not text_content.strip():
+                    text_parts = []
+                    for item in normalized_content_list:
+                        candidate = item.get("text")
+                        if isinstance(candidate, str) and candidate.strip():
+                            text_parts.append(candidate.strip())
+                    text_content = "\n\n".join(text_parts)
+                table_blob = self._flatten_table_text_for_skip_multimodal(
+                    normalized_content_list
                 )
+                if table_blob:
+                    if text_content.strip():
+                        text_content = text_content.strip() + "\n\n" + table_blob
+                    else:
+                        text_content = table_blob
+                image_blob = flatten_image_refs_for_skip_multimodal(
+                    normalized_content_list
+                )
+                if image_blob:
+                    if text_content.strip():
+                        text_content = text_content.strip() + "\n\n" + image_blob
+                    else:
+                        text_content = image_blob
+            if not document_parts and text_content.strip():
+                document_parts = [
+                    p.strip() for p in text_content.split("\n\n") if p.strip()
+                ]
+        else:
+            if not text_content.strip():
+                text_content = self._plaintext_from_mineru_blocks(normalized_content_list)
+            if not text_content.strip():
+                text_parts = []
+                for item in normalized_content_list:
+                    candidate = item.get("text")
+                    if isinstance(candidate, str) and candidate.strip():
+                        text_parts.append(candidate.strip())
+                text_content = "\n\n".join(text_parts)
 
         # Step 1.5: Set content source for context extraction in multimodal processing
         if hasattr(self, "set_content_source_for_context") and multimodal_items:
@@ -2244,6 +2390,7 @@ class ProcessorMixin:
                 split_by_character=split_by_character,
                 split_by_character_only=split_by_character_only,
                 ids=doc_id,
+                document_parts=document_parts if skip_multimodal_processing else None,
             )
             if callback_manager is not None:
                 insert_duration = time.time() - insert_start
@@ -2255,6 +2402,11 @@ class ProcessorMixin:
                 )
             if skip_multimodal_processing:
                 await self._mark_multimodal_processing_complete(doc_id)
+                await self._persist_table_matrix_index(
+                    doc_id=doc_id,
+                    file_ref=file_ref,
+                    document_parts=document_parts,
+                )
                 self.logger.info(
                     "skip_multimodal_processing=True: text ingested via LightRAG; "
                     "skipping multimodal batch for this document."
