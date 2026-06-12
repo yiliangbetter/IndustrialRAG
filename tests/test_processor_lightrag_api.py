@@ -1,3 +1,6 @@
+import asyncio
+from unittest.mock import AsyncMock
+
 import pytest
 
 from raganything.base import DocStatus
@@ -66,4 +69,61 @@ async def test_lightrag_api_init_failure_persists_failed_doc_status():
     assert doc_status["status"] == DocStatus.FAILED
     assert doc_status["error_msg"] == "missing llm_model_func"
     assert doc_status["file_path"] == "sample.pdf"
+    assert processor.lightrag.doc_status.index_done_calls == 1
+
+
+@pytest.mark.asyncio
+async def test_lightrag_api_insert_failure_persists_failed_doc_status(monkeypatch):
+    class DummyProcessor(ProcessorMixin):
+        pass
+
+    processor = DummyProcessor()
+    processor.logger = FakeLogger()
+    processor.config = type(
+        "Config",
+        (),
+        {
+            "use_full_path": False,
+            "parser": "mineru",
+            "parser_output_dir": "out",
+            "parse_method": "auto",
+            "display_content_stats": False,
+        },
+    )()
+
+    async def fake_ensure_lightrag_initialized():
+        return {"success": True}
+
+    async def fake_parse_document(*args, **kwargs):
+        return ([{"type": "text", "text": "hello"}], "doc-content-id")
+
+    import lightrag.kg.shared_storage as shared_storage
+
+    pipeline_status = {"history_messages": []}
+
+    async def fake_get_namespace_data(namespace):
+        assert namespace == "pipeline_status"
+        return pipeline_status
+
+    monkeypatch.setattr(shared_storage, "get_namespace_data", fake_get_namespace_data)
+    monkeypatch.setattr(shared_storage, "get_pipeline_status_lock", asyncio.Lock)
+
+    processor._ensure_lightrag_initialized = fake_ensure_lightrag_initialized
+    processor.parse_document = fake_parse_document
+    processor.lightrag = type(
+        "FakeLightRAG",
+        (),
+        {
+            "doc_status": FakeDocStatusStorage(),
+            "ainsert": AsyncMock(side_effect=RuntimeError("storage write failed")),
+        },
+    )()
+
+    result = await processor.process_document_complete_lightrag_api("sample.pdf")
+
+    assert result is False
+    processor.lightrag.ainsert.assert_awaited_once()
+    doc_status = processor.lightrag.doc_status.records["doc-pre-sample.pdf"]
+    assert doc_status["status"] == DocStatus.FAILED
+    assert doc_status["error_msg"] == "storage write failed"
     assert processor.lightrag.doc_status.index_done_calls == 1
