@@ -607,6 +607,318 @@ def _stash_matrix_boost_stats(count: int) -> None:
     _last_filter_report.set(payload)
 
 
+def _query_align_boost_enabled() -> bool:
+    return _env_bool("RAG_QUERY_ALIGN_BOOST", True)
+
+
+def _query_align_min_score() -> float:
+    raw = os.getenv("RAG_QUERY_ALIGN_MIN") or "0.12"
+    try:
+        return max(0.0, float(raw))
+    except ValueError:
+        return 0.12
+
+
+def _query_align_rerank_score() -> float:
+    raw = os.getenv("RAG_QUERY_ALIGN_RERANK") or "0.94"
+    try:
+        return min(1.0, max(0.0, float(raw)))
+    except ValueError:
+        return 0.94
+
+
+def _query_align_top_n() -> int:
+    raw = os.getenv("RAG_QUERY_ALIGN_TOP_N") or "2"
+    try:
+        return max(1, int(raw))
+    except ValueError:
+        return 2
+
+
+def _query_align_min_chars() -> int:
+    raw = os.getenv("RAG_QUERY_ALIGN_MIN_CHARS") or "22"
+    try:
+        return max(8, int(raw))
+    except ValueError:
+        return 22
+
+
+def _query_subject_terms(query: str) -> list[str]:
+    """Discriminative terms with resolved machine-profile wording de-emphasized."""
+    terms = list(dict.fromkeys(_query_discriminative_terms(query)))
+    profile = resolve_machine_profile(query)
+    if profile:
+        profile_phrases = [
+            str(p).replace(" ", "")
+            for p in (profile.get("query_phrases") or [])
+            if str(p).strip()
+        ]
+
+        def _profile_boilerplate(term: str) -> bool:
+            return any(
+                (term in phrase or phrase in term)
+                for phrase in profile_phrases
+                if len(phrase) >= 3 and len(term) >= 3
+            )
+
+        subject = [t for t in terms if not _profile_boilerplate(t)]
+        if len(subject) >= 2:
+            terms = subject
+    return sorted(terms, key=len, reverse=True)[:20]
+
+
+def _query_focus_terms(query: str) -> list[str]:
+    """Longer subject spans from the question (no domain phrase lists)."""
+    terms = _query_subject_terms(query)
+    if not terms:
+        return []
+    long_terms = [t for t in terms if len(t) >= 4]
+    if long_terms:
+        return sorted(long_terms, key=len, reverse=True)[:16]
+    return terms[:16]
+
+
+def _query_subject_anchor(query: str) -> str:
+    """Longest remaining CJK span after stripping matched machine-profile phrases."""
+    q = (query or "").strip()
+    profile = resolve_machine_profile(query)
+    if profile:
+        for phrase in sorted(
+            (str(p) for p in (profile.get("query_phrases") or [])),
+            key=len,
+            reverse=True,
+        ):
+            pn = phrase.replace(" ", "")
+            if pn and pn in q.replace(" ", ""):
+                q = q.replace(phrase, " ").replace(pn, " ")
+    runs = re.findall(r"[\u4e00-\u9fff]+", q)
+    return max(runs, key=len, default="")
+
+
+def _query_anchor_alignment(query: str, content: str) -> float:
+    from raganything.utils import text_term_alignment  # noqa: WPS433
+
+    anchor = _query_subject_anchor(query)
+    if len(anchor) < 4:
+        return 1.0
+    return text_term_alignment(anchor, content, min_len=3)
+
+
+def _query_anchor_min_align() -> float:
+    raw = os.getenv("RAG_QUERY_ALIGN_ANCHOR_MIN") or "0.18"
+    try:
+        return max(0.0, float(raw))
+    except ValueError:
+        return 0.18
+
+
+def _chunk_query_alignment_score(query: str, content: str) -> float:
+    from raganything.utils import text_term_alignment_symmetric  # noqa: WPS433
+
+    body = content.strip()
+    if len(body) < _query_align_min_chars():
+        return 0.0
+    sym = text_term_alignment_symmetric(query, body, min_len=3)
+    short_cap = max(28, len(query) // 6)
+    if len(body) < short_cap:
+        sym *= len(body) / short_cap
+    subject = _query_subject_terms(query)
+    if not subject:
+        return sym
+    hits = sum(1 for term in subject if term in body)
+    hit_ratio = hits / len(subject)
+    longest = max((len(term) for term in subject if term in body), default=0)
+    return sym + 0.55 * hit_ratio + 0.02 * longest
+
+
+def _chunk_literal_focus_hit(query: str, content: str) -> bool:
+    subject = _query_subject_terms(query)
+    if not subject:
+        return True
+    return any(term in content for term in subject)
+
+
+def _text_chunks_store_path() -> Path:
+    try:
+        from client_paths import get_rag_storage_dir  # noqa: WPS433
+
+        store = Path(get_rag_storage_dir())
+    except Exception:
+        store = _ROOT / "data" / "rag_storage"
+    return store / "kv_store_text_chunks.json"
+
+
+def _load_manual_chunks_for_paths(
+    allowed_paths: set[str],
+    deny: list[str],
+) -> list[dict]:
+    path = _text_chunks_store_path()
+    if not path.is_file() or not allowed_paths:
+        return []
+    try:
+        raw = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError):
+        return []
+    if not isinstance(raw, dict):
+        return []
+    allowed_basenames = {_basename(p) for p in allowed_paths if p}
+    out: list[dict] = []
+    for chunk_id, row in raw.items():
+        if not isinstance(row, dict):
+            continue
+        fp = str(row.get("file_path") or "")
+        if not fp or _path_hits_deny(fp, deny):
+            continue
+        bp = _basename(fp)
+        if not any(ab and (ab in fp or ab in bp or bp in ab) for ab in allowed_basenames):
+            continue
+        content = str(row.get("content") or "")
+        if len(content.strip()) < _query_align_min_chars():
+            continue
+        doc = dict(row)
+        doc.setdefault("content", content)
+        doc.setdefault("id", chunk_id)
+        out.append(doc)
+    return out
+
+
+def _apply_query_alignment_rerank_bonus(query: str, docs: list[dict]) -> list[dict]:
+    """Nudge rerank order toward chunks whose body literally overlaps query terms."""
+    if not docs:
+        return docs
+    rescored: list[tuple[float, dict]] = []
+    for doc in docs:
+        content = str(doc.get("content") or "")
+        align = _chunk_query_alignment_score(query, content)
+        boosted = dict(doc)
+        base = float(boosted.get("rerank_score") or 0)
+        boosted["rerank_score"] = base + min(0.3, align * 0.45)
+        rescored.append((align, boosted))
+    rescored.sort(
+        key=lambda pair: (float(pair[1].get("rerank_score") or 0), pair[0]),
+        reverse=True,
+    )
+    return [doc for _, doc in rescored]
+
+
+def supplement_query_aligned_chunks(
+    query: str,
+    docs: list[dict],
+    *,
+    rerank_pool: list[dict] | None = None,
+) -> list[dict]:
+    """Promote chunks whose body literally matches query discriminative terms."""
+    if not _query_align_boost_enabled():
+        return docs
+    focus = _query_focus_terms(query)
+    if len(focus) < 2:
+        return docs
+
+    deny, _profile = active_deny_substrings(query)
+    allowed_paths = {
+        p for p in (_doc_path(d) for d in list(docs) + list(rerank_pool or [])) if p
+    }
+    if not allowed_paths:
+        return _apply_query_alignment_rerank_bonus(query, docs)
+
+    candidates: dict[str, dict] = {}
+    for doc in list(docs) + list(rerank_pool or []):
+        cid = str(doc.get("id") or "")
+        if cid:
+            candidates[cid] = doc
+
+    for doc in _load_manual_chunks_for_paths(
+        allowed_paths,
+        deny,
+    ):
+        cid = str(doc.get("id") or "")
+        if cid and cid not in candidates:
+            candidates[cid] = doc
+
+    min_score = _query_align_min_score()
+    scored: list[tuple[float, dict]] = []
+    for doc in candidates.values():
+        content = str(doc.get("content") or "")
+        score = _chunk_query_alignment_score(query, content)
+        if score < min_score:
+            continue
+        if not _chunk_literal_focus_hit(query, content) and score < min_score * 2:
+            continue
+        if _query_anchor_alignment(query, content) < _query_anchor_min_align():
+            continue
+        scored.append((score, doc))
+
+    if not scored:
+        return _apply_query_alignment_rerank_bonus(query, docs)
+
+    scored.sort(key=lambda pair: pair[0], reverse=True)
+    top_n = _query_align_top_n()
+    boost_score = _query_align_rerank_score()
+    boosted_ids: set[str] = set()
+    merged: list[dict] = []
+    for score, doc in scored[:top_n]:
+        cid = str(doc.get("id") or "")
+        if cid in boosted_ids:
+            continue
+        boosted_ids.add(cid)
+        boosted = dict(doc)
+        boosted["rerank_score"] = max(
+            float(boosted.get("rerank_score") or 0),
+            boost_score,
+        )
+        merged.append(boosted)
+
+    if not merged:
+        return _apply_query_alignment_rerank_bonus(query, docs)
+
+    rest = [
+        d for d in _apply_query_alignment_rerank_bonus(query, docs)
+        if str(d.get("id") or "") not in boosted_ids
+    ]
+    return merged + rest
+
+
+def _stash_query_align_boost_stats(count: int) -> None:
+    if count <= 0:
+        return
+    prev = _last_filter_report.get()
+    payload = dict(prev) if isinstance(prev, dict) else {}
+    payload["query_align_boost"] = {"chunks_added": count}
+    _last_filter_report.set(payload)
+
+
+def build_query_subject_chunk_prompt(query: str) -> str:
+    """Generic LLM hint: prefer chunks that literally contain query wording."""
+    if not _env_bool("RAG_QUERY_SUBJECT_STEER", True):
+        return ""
+    if len(_query_focus_terms(query)) < 2:
+        return ""
+    return (
+        "若某条正文 chunk 的字面表述与用户问题中的专有名词或动作对象一致，"
+        "须优先引用该 chunk 作答；不要用仅部分用词相近的其它段落替代。"
+        "不得声称手册未提及，而检索 chunk 中已出现相同对象或步骤。"
+    )
+
+
+def build_concise_fact_answer_prompt(query: str) -> str:
+    """Single-fact questions (tool/cycle/brand): avoid neighbor maintenance sections."""
+    if not _env_bool("RAG_QUERY_CONCISE_FACT", True):
+        return ""
+    q = (query or "").strip()
+    if re.search(r"步骤|哪些|几种|列举|分别", q):
+        return ""
+    if re.search(
+        r"什么工具|用什么工具|用什么[^？?]*清|多长时间|多久|多少|哪种|哪个品牌",
+        q,
+    ):
+        return (
+            "用户只问单一事实（工具名/周期/品牌等）。"
+            "只回答所问内容；不要展开同页或其它条目的保养步骤、更换流程或邻节检查"
+            "（例如问压带轮残胶工具时，勿写刮刀片检查/更换等其它保养条目）。"
+        )
+    return ""
+
+
 def filter_retrieved_docs_by_query(query: str, docs: list[dict]) -> list[dict]:
     kept, _report = filter_retrieved_docs_with_report(query, docs)
     return kept
@@ -681,6 +993,12 @@ def build_query_user_prompt(query: str) -> str:
     catalog = build_catalog_model_listing_prompt(query)
     if catalog:
         parts.append(catalog)
+    subject = build_query_subject_chunk_prompt(query)
+    if subject:
+        parts.append(subject)
+    concise = build_concise_fact_answer_prompt(query)
+    if concise:
+        parts.append(concise)
     steer = build_steering_user_prompt(query)
     if steer:
         parts.append(steer)
@@ -733,6 +1051,10 @@ def install_doc_filter_on_rerank() -> None:
         docs = supplement_table_matrix_chunks(query, docs, rerank_pool=docs)
         if len(docs) > before_matrix:
             _stash_matrix_boost_stats(len(docs) - before_matrix)
+        before_align = len(docs)
+        docs = supplement_query_aligned_chunks(query, docs, rerank_pool=docs)
+        if len(docs) > before_align:
+            _stash_query_align_boost_stats(len(docs) - before_align)
         kept, _report = filter_retrieved_docs_with_report(query, docs)
         return kept
 

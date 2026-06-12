@@ -119,6 +119,7 @@ def finalize_inline_images(
 ) -> dict[str, Any]:
     """Resolve inline figures cited by the generated answer (Plan A + placements)."""
     from image_query_refs import (  # noqa: WPS433
+        _dedupe_doc_list,
         build_inline_placements,
         default_image_selection_limit,
         filter_docs_cited_by_answer,
@@ -159,9 +160,20 @@ def finalize_inline_images(
         _sync_query_debug_snapshot()
         return {**empty, "debug": debug}
 
+    docs_before_cite = list(docs)
     cite_meta: dict[str, Any] = {}
     if answer:
-        docs, cite_meta = filter_docs_cited_by_answer(answer, docs, query=q)
+        cite_pool = list(docs_before_cite)
+        rerank_pool = list(_rerank_docs.get() or [])
+        if rerank_pool:
+            cite_pool = _dedupe_doc_list(cite_pool + rerank_pool)
+        docs, cite_meta = filter_docs_cited_by_answer(
+            answer,
+            docs,
+            query=q,
+            pool=cite_pool,
+        )
+        cite_meta["cite_pool_size"] = len(cite_pool)
     docs_text = text_from_retrieved_docs(docs).strip() if docs else ""
     if not docs_text:
         debug = {
@@ -181,6 +193,7 @@ def finalize_inline_images(
         query=q,
         retrieved_docs=docs,
         limit=limit,
+        answer=answer or None,
     )
     if not images:
         gate = dict(debug.get("gate") or {})
@@ -236,10 +249,11 @@ def finalize_related_images(
 
 
 def _sync_llm_chunks_for_images(query: str, chunks: list[dict]) -> None:
-    """Persist LLM input chunks; optionally add rerank inline-figure chunks aligned with query."""
+    """Persist LLM input chunks (same batch the answer LLM sees)."""
     if not chunks:
         return
     from image_query_refs import (  # noqa: WPS433
+        llm_rerank_figure_supplement_enabled,
         supplement_llm_docs_with_rerank_figures,
         text_from_retrieved_docs,
     )
@@ -252,9 +266,12 @@ def _sync_llm_chunks_for_images(query: str, chunks: list[dict]) -> None:
     except Exception:
         final = chunks
     rerank_pool = list(_rerank_docs.get() or [])
-    merged, added = supplement_llm_docs_with_rerank_figures(
-        query, final, rerank_pool
-    )
+    if llm_rerank_figure_supplement_enabled() and rerank_pool:
+        merged, added = supplement_llm_docs_with_rerank_figures(
+            query, final, rerank_pool
+        )
+    else:
+        merged, added = final, 0
     _llm_chunks_rerank_figure_supplement.set(added)
     _llm_chunks_for_images.set(merged)
     _retrieved_docs.set(merged)
@@ -328,25 +345,9 @@ async def query_progress_hooks() -> AsyncIterator[asyncio.Queue[dict[str, str]]]
             _query_text.set(query)
         chunks = await orig_process_chunks(*args, **kwargs)
         if isinstance(chunks, list) and chunks:
-            final_chunks = chunks
-            try:
-                from image_query_refs import (  # noqa: WPS433
-                    narrow_retrieved_docs_to_anchor_sections,
-                    sanitize_retrieved_docs_content,
-                )
-
-                narrowed, narrow_meta = narrow_retrieved_docs_to_anchor_sections(
-                    query, chunks
-                )
-                final_chunks = narrowed if narrow_meta.get("narrowed") else chunks
-                final_chunks = sanitize_retrieved_docs_content(final_chunks)
-                if narrow_meta.get("narrowed"):
-                    prev = dict(_last_image_debug.get() or {})
-                    prev["llm_section_narrow"] = narrow_meta
-                    _last_image_debug.set(prev)
-            except Exception:
-                final_chunks = chunks
-            _sync_llm_chunks_for_images(query, final_chunks)
+            # Plan B: passthrough chunks to the answer LLM (demo granularity).
+            # Snapshot the same batch for Plan A inline images; do not narrow/sanitize return.
+            _sync_llm_chunks_for_images(query, chunks)
             await _emit(PHASE_GENERATE)
             try:
                 import sys
@@ -364,7 +365,7 @@ async def query_progress_hooks() -> AsyncIterator[asyncio.Queue[dict[str, str]]]
                         q.put_nowait(report)
             except Exception:
                 pass
-            return final_chunks
+            return chunks
         await _emit(PHASE_GENERATE)
         try:
             import sys
