@@ -76,7 +76,7 @@ _IMAGE_EXTS = frozenset({".png", ".jpg", ".jpeg", ".gif", ".webp", ".bmp", ".tif
 _MIN_SUBSTANTIVE_TERM_LEN = 3
 _MIN_QUERY_CHARS_FOR_IMAGES = 6
 _PDF_NAME_RE = re.compile(r"[^\s\\n/]+\.pdf", re.IGNORECASE)
-_REF_LINE_RE = re.compile(r"^\s*\[(\d+)\]\s*(.+?)\s*$", re.MULTILINE)
+_REF_LINE_RE = re.compile(r"^\s*(?:[-*•]\s*)?\[(\d+)\]\s*(.+?)\s*$", re.MULTILINE)
 
 
 def _min_substantive_term_len() -> int:
@@ -291,6 +291,13 @@ def _pair_component_ref_align(component: str, ref: dict[str, Any]) -> float:
     section_subj = _ref_section_subject(ref)
     ctx = str(ref.get("context") or "").strip()
 
+    if section_subj and caption:
+        cap_sec = text_term_alignment_symmetric(section_subj, caption)
+        cap_comp = text_term_alignment_symmetric(head, caption)
+        sec_comp = text_term_alignment_symmetric(head, section_subj)
+        if cap_sec >= 0.4 and cap_comp < 0.35 and sec_comp < 0.35:
+            return 0.0
+
     if topic and _label_matches_listing_target(topic, head):
         return 1.0
     if section_subj:
@@ -313,9 +320,13 @@ def _pair_component_ref_align(component: str, ref: dict[str, Any]) -> float:
             return max(0.0, body_sym - 0.4)
     if caption and _label_matches_listing_target(caption, head):
         return 0.88
+    ctx_sym = text_term_alignment_symmetric(head, ctx) if ctx else 0.0
+    in_ctx = 0.92 if head in ctx else 0.0
     return max(
         text_term_alignment_symmetric(head, caption),
         text_term_alignment_symmetric(head, topic) if topic else 0.0,
+        ctx_sym,
+        in_ctx,
     )
 
 
@@ -327,9 +338,31 @@ def _answer_listing_spans(answer: str) -> list[str]:
     def add(raw: str) -> None:
         span = _listing_target_head(raw)
         key = _normalize_label_key(span)
+        if _is_answer_structural_label(span):
+            return
         if len(span) >= 2 and len(span) <= 24 and key not in seen:
             seen.add(key)
             spans.append(span)
+
+    for line in (answer or "").splitlines():
+        field = re.match(
+            r"^\s*[*\-•]\s*(?:\*\*([^*]+)\*\*|([^*：:\n]+))[：:]\s*(.+)$",
+            line,
+        )
+        if not field:
+            continue
+        fname = (field.group(1) or field.group(2) or "").strip()
+        fkey = _normalize_label_key(fname)
+        if _is_component_field_name(fname):
+            value = field.group(3).strip().strip("*").rstrip("。")
+            value = re.split(r"[（(]", value, maxsplit=1)[0].strip()
+            if value:
+                add(value)
+            continue
+        machine = _machine_from_section_title(fname)
+        if machine:
+            for extra in re.findall(r"\*\*([^*]+)\*\*", field.group(3)):
+                add(extra.strip())
 
     for match in re.finditer(r"\*\*([^*]{2,32})\*\*", answer or ""):
         add(match.group(1).strip())
@@ -434,11 +467,20 @@ def _is_multi_machine_comparison_query(query: str) -> bool:
 
 
 def _machine_spans_from_answer(answer: str) -> list[str]:
-    return [
-        span
-        for span in _answer_listing_spans(_answer_primary_listing_body(answer))
-        if "封边机" in span or "加工中心" in span
-    ]
+    out: list[str] = []
+    seen: set[str] = set()
+    for span in _answer_listing_spans(_answer_primary_listing_body(answer)):
+        machine = _machine_from_section_title(span)
+        if not machine and ("封边机" in span or "加工中心" in span):
+            machine = span
+        if not machine:
+            continue
+        key = _normalize_label_key(machine)
+        if key in seen:
+            continue
+        seen.add(key)
+        out.append(machine)
+    return out
 
 
 def _answer_primary_listing_body(answer: str) -> str:
@@ -453,10 +495,15 @@ def _answer_primary_listing_body(answer: str) -> str:
 
 
 def _component_spans_from_answer(answer: str) -> list[str]:
+    comps = _pair_component_spans_from_answer(answer)
+    if comps:
+        return comps
     return [
         span
         for span in _answer_listing_spans(_answer_primary_listing_body(answer))
-        if "封边机" not in span and "加工中心" not in span
+        if "封边机" not in span
+        and "加工中心" not in span
+        and not _is_answer_structural_label(span)
     ]
 
 
@@ -488,6 +535,10 @@ def _cited_manual_hints_from_answer(answer: str) -> set[str]:
                 compact = re.sub(r"\s+", "", stem)
                 if compact:
                     hints.add(compact[:80])
+                machine = _machine_from_section_title(stem)
+                if machine:
+                    hints.add(machine)
+                    hints.add(re.sub(r"\s+", "", machine))
     for match in _PDF_NAME_RE.finditer(ref_blob):
         stem = Path(match.group(0)).stem[:80]
         if stem:
@@ -526,25 +577,168 @@ _KNOWN_MACHINE_NAMES = (
     "高速自动封边机",
     "双端封边机",
     "自动封边机",
+    "加工中心",
+    "数控六面钻",
+)
+
+_ANSWER_STRUCTURAL_LABEL_KEYS = frozenset(
+    _normalize_label_key(x)
+    for x in (
+        "保养部件",
+        "依据内容",
+        "依据说明",
+        "依据",
+        "润滑部位",
+        "润滑方式",
+        "润滑周期",
+        "操作要求",
+    )
+)
+
+_COMPONENT_FIELD_KEYS = frozenset(
+    _normalize_label_key(x) for x in ("保养部件", "润滑部位")
 )
 
 
+def _is_answer_structural_label(span: str) -> bool:
+    """Answer-template field names (cross-manual listing prompts), not figure subjects."""
+    return _normalize_label_key(span) in _ANSWER_STRUCTURAL_LABEL_KEYS
+
+
+def _pair_component_spans_from_answer(answer: str, *, query: str = "") -> list[str]:
+    seen: set[str] = set()
+    out: list[str] = []
+    for _, comp in _machine_component_targets_from_answer(answer, query=query):
+        comp = _listing_target_head(comp)
+        if not comp or _is_answer_structural_label(comp):
+            continue
+        key = _normalize_label_key(comp)
+        if key in seen:
+            continue
+        seen.add(key)
+        out.append(comp)
+    return out
+
+
+def _cross_listing_figure_topics(query: str, answer: str) -> list[str]:
+    """Topics for figure scan on cross-manual component listings (e.g. Q16/Q17)."""
+    if not _is_component_listing_across_machines(query):
+        return []
+    machines: list[str] = []
+    components: list[str] = []
+    seen_m: set[str] = set()
+    seen_c: set[str] = set()
+    for machine, comp in _machine_component_targets_from_answer(answer, query=query):
+        machine = machine.strip()
+        comp = _listing_target_head(comp)
+        if not machine or not comp or _is_answer_structural_label(comp):
+            continue
+        mk, ck = _normalize_label_key(machine), _normalize_label_key(comp)
+        if mk not in seen_m:
+            seen_m.add(mk)
+            machines.append(machine)
+        if ck not in seen_c:
+            seen_c.add(ck)
+            components.append(comp)
+    if len(machines) >= 2 and len(components) == 1:
+        return machines
+    if len(machines) >= 2 and re.search(r"哪些机型|用来保养哪个部件", query or ""):
+        return machines
+    if len(components) >= 2:
+        return components
+    if components:
+        return components
+    return []
+
+
+def _is_component_field_name(field_name: str) -> bool:
+    name = (field_name or "").strip()
+    if _normalize_label_key(name) in _COMPONENT_FIELD_KEYS:
+        return True
+    return bool(re.fullmatch(r"保养部件\d*", name) or re.fullmatch(r"润滑部位\d*", name))
+
+
+def _is_query_subject_echo(span: str, query: str) -> bool:
+    """True when *span* mostly restates the query subject rather than a distinct part."""
+    s = (span or "").strip()
+    q = (query or "").strip()
+    if not s or not q:
+        return False
+    if text_term_alignment_symmetric(s, q, min_len=2) < 0.5:
+        return False
+    s_terms = discriminative_terms(s, min_len=2)
+    if not s_terms:
+        return False
+    q_compact = re.sub(r"\s+", "", q)
+    hit = sum(
+        1
+        for t in s_terms
+        if t in q or t in q_compact or re.sub(r"\s+", "", t) in q_compact
+    )
+    return hit / len(s_terms) >= 0.5
+
+
+_MACHINE_LINE_COMPONENT_PATTERNS = (
+    r"用于保养\s*\*\*([^*]+)\*\*",
+    r"对\s*\*\*([^*]+)\*\*\s*进行",
+    r"保养\s*\*\*([^*]+)\*\*",
+)
+
+
+def _components_from_machine_line_value(value: str, query: str) -> list[str]:
+    """Maintenance components from a machine bullet value (structural + bold)."""
+    out: list[str] = []
+    seen: set[str] = set()
+
+    def add(raw: str) -> None:
+        comp = _listing_target_head(raw.strip())
+        if (
+            not comp
+            or _machine_from_section_title(comp)
+            or _is_answer_structural_label(comp)
+            or _is_query_subject_echo(comp, query)
+        ):
+            return
+        key = _normalize_label_key(comp)
+        if key in seen:
+            return
+        seen.add(key)
+        out.append(comp)
+
+    for pat in _MACHINE_LINE_COMPONENT_PATTERNS:
+        for match in re.finditer(pat, value):
+            add(match.group(1))
+    if not out:
+        for extra in re.findall(r"\*\*([^*]+)\*\*", value):
+            add(extra)
+    return out
+
+
 def _machine_from_section_title(title: str) -> str:
+    title = re.sub(r"^\d+\.\s*", "", title).strip()
     title = re.sub(r"^[一二三四五六七八九十]+、", "", title).strip()
+    title = re.sub(r"^机型[：:]\s*", "", title).strip()
     title = title.strip("《》").strip()
+    if _is_answer_structural_label(title):
+        return ""
     for name in _KNOWN_MACHINE_NAMES:
         if name in title:
             return name
     if "封边机" in title:
         return title.split("维护保养")[0].split(".pdf")[0].split(".PDF")[0].strip()
+    if re.search(r"(?:钻|中心)$", title) and 2 <= len(title) <= 24:
+        return title
     return ""
 
 
-def _machine_component_targets_from_answer(answer: str) -> list[tuple[str, str]]:
+def _machine_component_targets_from_answer(
+    answer: str, *, query: str = ""
+) -> list[tuple[str, str]]:
     """(machine line, component) pairs from numbered markdown sections in the answer."""
     body = _answer_primary_listing_body(answer)
     pairs: list[tuple[str, str]] = []
     current_machine = ""
+    q = (query or "").strip()
 
     for line in body.splitlines():
         line = line.strip()
@@ -561,6 +755,72 @@ def _machine_component_targets_from_answer(answer: str) -> list[tuple[str, str]]
             if machine:
                 current_machine = machine
             continue
+        num_bullet_machine = re.match(
+            r"^\s*[*\-•]\s*\*\*(?:\d+\.\s*)?([^*]+)\*\*\s*$", line
+        )
+        if num_bullet_machine:
+            machine = _machine_from_section_title(num_bullet_machine.group(1).strip())
+            if machine:
+                current_machine = machine
+            continue
+        field_match = re.match(
+            r"^\s*[*\-•]\s*(?:\*\*([^*]+)\*\*|([^*：:\n]+))[：:]\s*(.+)$",
+            line,
+        )
+        if field_match:
+            field_name = (field_match.group(1) or field_match.group(2) or "").strip()
+            value = field_match.group(3).strip()
+            if field_name in ("注", "备注") or re.fullmatch(r"注\d*", field_name):
+                continue
+            machine = _machine_from_section_title(field_name)
+            if machine:
+                current_machine = machine
+                inline_added = False
+                for comp in _components_from_machine_line_value(value, q):
+                    pairs.append((machine, comp))
+                    inline_added = True
+                if not inline_added and "**" not in value:
+                    plain = re.sub(r"\*\*([^*]+)\*\*", r"\1", value)
+                    plain = plain.strip().rstrip("。")
+                    plain = re.split(r"[（(]", plain, maxsplit=1)[0].strip()
+                    if (
+                        plain
+                        and len(plain) <= 32
+                        and not _is_query_subject_echo(plain, q)
+                    ):
+                        comp = _listing_target_head(plain)
+                        if (
+                            comp
+                            and not _machine_from_section_title(comp)
+                            and not _is_answer_structural_label(comp)
+                            and not _is_query_subject_echo(comp, q)
+                        ):
+                            pairs.append((machine, comp))
+                continue
+            field_key = _normalize_label_key(field_name)
+            if current_machine and _is_component_field_name(field_name):
+                bold_parts = re.findall(r"\*\*([^*]+)\*\*", value)
+                if bold_parts:
+                    for part in bold_parts:
+                        comp = _listing_target_head(part.strip())
+                        if comp and not _is_answer_structural_label(comp):
+                            pairs.append((current_machine, comp))
+                else:
+                    value = value.strip().strip("*").rstrip("。")
+                    value = re.split(r"[（(]", value, maxsplit=1)[0].strip()
+                    parts = re.split(r"[/／、与和及]", value)
+                    for part in parts:
+                        part = part.strip()
+                        if not part or _machine_from_section_title(part):
+                            continue
+                        comp = _listing_target_head(part)
+                        if comp and not _is_answer_structural_label(comp):
+                            pairs.append((current_machine, comp))
+            elif current_machine and not _is_answer_structural_label(field_name):
+                comp = _listing_target_head(field_name)
+                if comp and not _machine_from_section_title(comp):
+                    pairs.append((current_machine, comp))
+            continue
         bullet_match = re.match(r"^\s*[*\-•]\s*\*\*([^*]+)\*\*", line)
         if bullet_match:
             bullet_title = bullet_match.group(1).strip()
@@ -568,10 +828,7 @@ def _machine_component_targets_from_answer(answer: str) -> list[tuple[str, str]]
             if machine:
                 current_machine = machine
                 inline_added = False
-                for extra in re.findall(r"\*\*([^*]+)\*\*", line)[1:]:
-                    comp = _listing_target_head(extra.strip())
-                    if not comp or _machine_from_section_title(comp):
-                        continue
+                for comp in _components_from_machine_line_value(line, q):
                     parts = re.split(r"[与和、及]", comp)
                     for part in parts:
                         part = part.strip()
@@ -667,7 +924,7 @@ def _machine_component_listing_pair_targets(
 ) -> list[tuple[str, str]]:
     """Ordered (machine, component) pairs for cross-manual listings (Q17)."""
     del kept
-    pairs = _machine_component_targets_from_answer(answer)
+    pairs = _machine_component_targets_from_answer(answer, query=query)
     if len(pairs) < 2:
         return []
     out: list[tuple[str, str]] = []
@@ -684,7 +941,42 @@ def _machine_component_listing_pair_targets(
         out.append((machine, comp))
     if pool:
         out = _infer_listing_pairs_from_cited_chunks(query, answer, pool, out)
+    out = _filter_cross_listing_pair_targets(query, answer, out)
     return out[:16]
+
+
+def _filter_cross_listing_pair_targets(
+    query: str,
+    answer: str,
+    pairs: list[tuple[str, str]],
+) -> list[tuple[str, str]]:
+    """Drop non-cited manuals, query echoes, and oil-query footnote extras."""
+    if not pairs:
+        return pairs
+    cited = _cited_manual_hints_from_answer(answer)
+    filtered: list[tuple[str, str]] = []
+    seen: set[tuple[str, str]] = set()
+    for machine, comp in pairs:
+        machine = machine.strip()
+        comp = _listing_target_head(comp)
+        if not machine or not comp or _is_answer_structural_label(comp):
+            continue
+        if _is_query_subject_echo(comp, query):
+            continue
+        if cited and not any(
+            _doc_matches_manual_hint({"file_path": h, "source_key": h}, machine)
+            for h in cited
+        ):
+            continue
+        if re.search(r"1#透平油|透平油", query or ""):
+            if "六面钻" in machine or "加工中心" in machine:
+                continue
+        key = (_normalize_label_key(machine), _normalize_label_key(comp))
+        if key in seen:
+            continue
+        seen.add(key)
+        filtered.append((machine, comp))
+    return filtered if len(filtered) >= 2 else pairs
 
 
 def _manual_hint_for_component(
@@ -721,32 +1013,73 @@ def _manual_hint_for_component(
     return ""
 
 
+def _normalize_machine_alias(name: str) -> str:
+    if name == "高速智能封边机":
+        return "高速自动封边机"
+    return name
+
+
+def _resolve_known_machine_name(text: str) -> str:
+    """Longest known machine name in *text* (avoids 自动封边机 ⊂ 高速自动封边机 false positives)."""
+    blob = (text or "").strip()
+    if not blob:
+        return ""
+    compact = re.sub(r"\s+", "", blob)
+    best = ""
+    for name in sorted(_KNOWN_MACHINE_NAMES, key=len, reverse=True):
+        nc = re.sub(r"\s+", "", name)
+        if nc in compact or name in blob:
+            return _normalize_machine_alias(name)
+    return best
+
+
+def _source_hint_matches_doc(hint: str, doc_hint: str) -> bool:
+    """Machine-aware doc_hint filter for content_list supplement (no substring bleed)."""
+    hint = (hint or "").strip()
+    doc_hint = (doc_hint or "").strip()
+    if not hint or not doc_hint:
+        return False
+    hint_compact = re.sub(r"\s+", "", hint)
+    doc_compact = re.sub(r"\s+", "", doc_hint)
+    hint_machine = _normalize_machine_alias(_resolve_known_machine_name(hint))
+    doc_machine = _normalize_machine_alias(_resolve_known_machine_name(doc_hint))
+    if hint_machine and doc_machine:
+        return hint_machine == doc_machine
+    if hint_machine:
+        return hint_machine in doc_hint or re.sub(r"\s+", "", hint_machine) in doc_compact
+    if hint_compact in doc_compact or doc_compact in hint_compact:
+        return True
+    if len(hint_compact) >= 8 and hint_compact[:8] in doc_compact:
+        return True
+    return False
+
+
 def _doc_matches_manual_hint(doc: dict[str, Any], manual_hint: str) -> bool:
     hint = (manual_hint or "").strip()
     if not hint:
         return True
-    fp = _doc_basename(doc)
+    fp = str(doc.get("file_path") or doc.get("path") or "").replace("\\", "/")
     if not fp:
-        fp = str(doc.get("file_path") or doc.get("path") or "")
+        fp = _doc_basename(doc)
     fp_compact = re.sub(r"\s+", "", fp)
     hint_compact = re.sub(r"\s+", "", hint)
     if not fp_compact:
         return False
-    if "高速智能" in hint_compact and "高速自动" in fp_compact and "高速智能" not in fp_compact:
-        return False
-    if "高速自动" in hint_compact and "高速智能" in fp_compact and "高速自动" not in fp_compact:
-        return False
-    if hint_compact in ("自动封边机", "自动封边") or hint == "自动封边机":
-        if "高速自动" in fp_compact or "高速智能" in fp_compact:
+    hint_machine = _normalize_machine_alias(_resolve_known_machine_name(hint))
+    fp_machine = _normalize_machine_alias(_resolve_known_machine_name(fp))
+    if hint_machine and fp_machine:
+        return hint_machine == fp_machine
+    if hint_machine:
+        nc = re.sub(r"\s+", "", hint_machine)
+        if nc not in fp_compact and hint_machine not in fp:
             return False
-    for name in _KNOWN_MACHINE_NAMES:
-        nc = re.sub(r"\s+", "", name)
-        if nc in hint_compact or hint_compact in nc:
-            return nc in fp_compact or name in fp
-    if hint_compact and len(hint_compact) >= 6 and hint_compact[:6] in fp_compact:
+        return not fp_machine or fp_machine == hint_machine
+    if hint_compact in fp_compact:
         return True
-    for term in discriminative_terms(hint, min_len=3):
-        if len(term) >= 3 and term in fp:
+    if hint_compact and len(hint_compact) >= 8 and hint_compact[:8] in fp_compact:
+        return True
+    for term in discriminative_terms(hint, min_len=4):
+        if len(term) >= 4 and term in fp:
             return True
     return False
 
@@ -951,7 +1284,7 @@ def _component_listing_span_targets(
     kept: list[dict[str, Any]] | None = None,
 ) -> list[str]:
     """Ordered component targets for cross-manual part listings (Q17)."""
-    pairs = _machine_component_targets_from_answer(answer)
+    pairs = _machine_component_targets_from_answer(answer, query=query)
     components: list[str] = []
     seen: set[str] = set()
     for _, comp in pairs:
@@ -1076,6 +1409,9 @@ def _supplement_component_listing_figure_chunks(
 
 def _answer_image_span_targets(query: str, answer: str) -> list[str]:
     """One figure per answer item: component names for part listings, machine lines for Q15-style."""
+    cross = _cross_listing_figure_topics(query, answer)
+    if cross:
+        return cross
     components = _component_spans_from_answer(answer)
     machines = _machine_spans_from_answer(answer)
     if _is_multi_machine_comparison_query(query):
@@ -1315,6 +1651,10 @@ def _listing_targets_with_query_line_overlap(
     """Listing targets whose focus lines also share substantive query terms."""
     focus_norm = normalize_context_for_image_parse(focus)
     answer = _answer_text_for_listing()
+    if answer:
+        cross = _cross_listing_figure_topics(query, answer)
+        if len(cross) >= 2:
+            return cross
     if _is_listing_scope_query(query) and answer:
         bold = _component_spans_from_answer(answer)
         if len(bold) < 2:
@@ -2648,15 +2988,26 @@ def _figure_context_from_answer_docs(
     q = (query or "").strip()
     machines = _machine_spans_from_answer(answer)
     machine_names = set(machines)
-    multi_machine = _is_multi_machine_comparison_query(q) and len(machines) >= 2
+    cross_listing = _is_component_listing_across_machines(q)
+    pair_components = _pair_component_spans_from_answer(answer)
+    shared_component = pair_components[0] if len(pair_components) == 1 else ""
+    multi_machine = (
+        _is_multi_machine_comparison_query(q) and len(machines) >= 2
+    ) or (cross_listing and len(machines) >= 2 and topics and topics[0] in machine_names)
     seen_parts: set[str] = set()
 
     def _topic_matches_chunk(topic: str, content: str, doc: dict[str, Any]) -> bool:
         if _chunk_matches_answer_topic(content, topic):
+            if shared_component and topic in machine_names:
+                return _chunk_matches_answer_topic(content, shared_component)
             return True
         if multi_machine and topic in machine_names:
             manual = _doc_basename(doc)
-            return bool(manual and topic in manual)
+            if not (manual and topic in manual):
+                return False
+            if shared_component:
+                return _chunk_matches_answer_topic(content, shared_component)
+            return True
         return False
 
     def _add_part(content: str) -> None:
@@ -3624,8 +3975,6 @@ def _section_span_for_machine(answer: str, machine: str) -> tuple[int, int] | No
     for name, start, end in _answer_machine_section_spans(answer):
         if _normalize_label_key(name) == machine_key:
             return start, end
-        if machine in name or name in machine:
-            return start, end
     return None
 
 
@@ -3883,22 +4232,36 @@ def _build_machine_component_inline_placements(
                 section_start=section[0],
                 section_end=section[1],
             )
-        if start < 0:
-            start, end, span_score = _find_anchor_in_answer(answer, component)
-        if start < 0:
+        if start < 0 and section:
             head = _listing_target_head(component)
             if head and head != component:
-                if section:
-                    start, end, span_score = _find_anchor_in_answer_scoped(
-                        answer,
-                        head,
-                        section_start=section[0],
-                        section_end=section[1],
-                    )
-                if start < 0:
-                    start, end, span_score = _find_anchor_in_answer(answer, head)
+                start, end, span_score = _find_anchor_in_answer_scoped(
+                    answer,
+                    head,
+                    section_start=section[0],
+                    section_end=section[1],
+                )
                 if start >= 0:
                     anchor_text = head
+        if start < 0 and section:
+            for anchor_try in (f"**{machine}**", machine):
+                start, end, span_score = _find_anchor_in_answer_scoped(
+                    answer,
+                    anchor_try,
+                    section_start=section[0],
+                    section_end=section[1],
+                )
+                if start >= 0:
+                    anchor_text = anchor_try
+                    break
+        if start < 0 and not section:
+            start, end, span_score = _find_anchor_in_answer(answer, component)
+            if start < 0:
+                head = _listing_target_head(component)
+                if head and head != component:
+                    start, end, span_score = _find_anchor_in_answer(answer, head)
+                    if start >= 0:
+                        anchor_text = head
         if start < 0 or span_score < min_score:
             continue
 
@@ -4866,6 +5229,57 @@ def retrieval_supports_images(
     ):
         return True
 
+    if (
+        _is_component_listing_across_machines(q)
+        and (answer or "").strip()
+    ):
+        pairs = _machine_component_targets_from_answer(answer or "", query=q)
+        machines = {
+            m.strip()
+            for m, c in pairs
+            if m.strip() and c.strip() and not _is_answer_structural_label(c)
+        }
+        if len(machines) < 2:
+            machines = set(_machine_spans_from_answer(answer or ""))
+        if len(machines) >= 2:
+            for scan_blob in (figure_context, primary):
+                scan_blob = (scan_blob or "").strip()
+                if not scan_blob:
+                    continue
+                eligible = _collect_figure_refs(
+                    scan_blob,
+                    media_roots,
+                    query=query,
+                    retrieved_docs=retrieved_docs,
+                    full_context=primary,
+                )
+                if not eligible:
+                    continue
+                for machine in machines:
+                    comp = next(
+                        (
+                            _listing_target_head(c)
+                            for m, c in pairs
+                            if _normalize_label_key(m) == _normalize_label_key(machine)
+                            and c.strip()
+                            and not _is_answer_structural_label(c)
+                        ),
+                        "",
+                    )
+                    for ref in eligible:
+                        if not _ref_matches_manual_hint(ref, machine):
+                            continue
+                        if comp and _pair_component_ref_align(comp, ref) >= 0.38:
+                            return True
+                        for shared in _pair_component_spans_from_answer(answer or "", query=q):
+                            if _pair_component_ref_align(shared, ref) >= 0.38:
+                                return True
+                if eligible:
+                    return True
+            max_score = _max_rerank_score(retrieved_docs)
+            if max_score is not None and max_score >= _image_min_rerank_score():
+                return True
+
     max_score = _max_rerank_score(retrieved_docs)
     if max_score is not None:
         threshold = _image_min_rerank_score()
@@ -4927,6 +5341,12 @@ def retrieval_supports_images(
         )
         return False
     logger.info("Skip related images: no figure label/heading matches query")
+    if (
+        _is_component_listing_across_machines(q)
+        and (answer or "").strip()
+        and len(_machine_spans_from_answer(answer)) >= 2
+    ):
+        return True
     return False
 
 
@@ -5442,32 +5862,38 @@ def _select_scored_refs_for_listing_pairs(
     limit: int,
     min_absolute: int = 1,
 ) -> list[dict[str, Any]]:
-    """One on-manual figure per (machine, component) answer pair (Q17)."""
+    """One on-manual figure per (machine, component) answer pair (Q16/Q17)."""
     selected: list[dict[str, Any]] = []
-    used_keys: set[str] = set()
+    used_paths: set[str] = set()
     for machine, component in pairs:
         best_score = 0
         best_ref: dict[str, Any] | None = None
+        comp_heads: list[str] = []
+        seen_heads: set[str] = set()
+        for cand in (component, _listing_target_head(component)):
+            key = _normalize_label_key(cand)
+            if cand and key not in seen_heads:
+                seen_heads.add(key)
+                comp_heads.append(cand)
         for score, ref in scored:
             if score < min_absolute:
                 continue
-            key = _figure_label_key(ref)
-            if key in used_keys:
+            path_key = Path(str(ref.get("path") or "")).name
+            if not path_key or path_key in used_paths:
                 continue
             if not _ref_matches_manual_hint(ref, machine):
                 continue
-            label = _ref_effective_label(ref)
-            ctx = str(ref.get("context") or "")
-            if not (
-                _label_matches_listing_target(label, component)
-                or _label_matches_listing_target(ctx, component)
-            ):
+            align = max(_pair_component_ref_align(head, ref) for head in comp_heads)
+            if align < 0.38:
                 continue
-            if score > best_score:
-                best_score = score
+            effective = int(score * (0.45 + align * 0.55))
+            if effective > best_score:
+                best_score = effective
                 best_ref = ref
         if best_ref is not None:
-            used_keys.add(_figure_label_key(best_ref))
+            path_key = Path(str(best_ref.get("path") or "")).name
+            if path_key:
+                used_paths.add(path_key)
             selected.append(best_ref)
         if len(selected) >= limit:
             break
@@ -5747,6 +6173,18 @@ def explain_retrieval_supports_images(
             "threshold": _image_min_rerank_score(),
         }
     overlap = _term_overlap_ratio(q, primary)
+    if (
+        not ok
+        and _is_component_listing_across_machines(q)
+        and (answer or "").strip()
+        and len(_machine_spans_from_answer(answer)) >= 2
+    ):
+        return {
+            "ok": True,
+            "reason": "cross_listing_answer_machines",
+            "primary_chars": len(primary),
+            "overlap": overlap,
+        }
     return {
         "ok": False,
         "reason": "no_query_label_match",
@@ -5847,6 +6285,11 @@ def explain_query_images(
         _is_component_listing_across_machines(query or "")
         and (answer or "").strip()
     ):
+        span_pool = _expand_pool_with_cited_manual_figure_chunks(
+            list(span_pool),
+            _cited_manual_hints_from_answer(answer or ""),
+            query or "",
+        )
         pair_targets = _machine_component_listing_pair_targets(
             query or "", answer or "", span_pool, kept=kept_docs
         )
@@ -5862,7 +6305,6 @@ def explain_query_images(
             )
             debug["refs_from_listing"] = len(extra)
             refs = refs + extra
-            span_pool = list(figure_pool or retrieved_docs or [])
             pair_extra = _supplement_pair_driven_refs_from_docs(
                 pair_targets,
                 refs,
@@ -5891,7 +6333,7 @@ def explain_query_images(
             source_hints=source_hints,
             listing_source_text=primary_text,
             retrieved_docs=retrieved_docs,
-        ):
+        ) or _ref_passes_pair_listing_gate(query or "", answer or "", ref):
             aligned_refs.append(ref)
         else:
             dropped.append({**summary, "drop_reason": "query_label_mismatch"})
@@ -5899,8 +6341,23 @@ def explain_query_images(
     debug["refs_dropped_align"] = dropped
 
     if not aligned_refs:
-        debug["gate"] = {"ok": False, "reason": "no_query_label_match"}
-        return debug
+        if (
+            _is_component_listing_across_machines(query or "")
+            and (answer or "").strip()
+            and refs
+            and any(
+                _ref_passes_pair_listing_gate(query or "", answer or "", ref)
+                for ref in refs
+            )
+        ):
+            aligned_refs = [
+                ref
+                for ref in refs
+                if _ref_passes_pair_listing_gate(query or "", answer or "", ref)
+            ]
+        else:
+            debug["gate"] = {"ok": False, "reason": "no_query_label_match"}
+            return debug
 
     if source_hints:
         aligned_refs = [
@@ -6002,7 +6459,11 @@ def images_for_api(
         _is_component_listing_across_machines(query or "")
         and (answer or "").strip()
     ):
-        span_pool = list(figure_pool or retrieved_docs or [])
+        span_pool = _expand_pool_with_cited_manual_figure_chunks(
+            list(figure_pool or retrieved_docs or []),
+            _cited_manual_hints_from_answer(answer or ""),
+            query or "",
+        )
         pair_targets = _machine_component_listing_pair_targets(
             query or "",
             answer or "",
@@ -6019,7 +6480,6 @@ def images_for_api(
                 source_hints=source_hints,
                 existing_refs=refs,
             )
-            span_pool = list(figure_pool or retrieved_docs or [])
             refs = refs + _supplement_pair_driven_refs_from_docs(
                 pair_targets,
                 refs,
@@ -6031,13 +6491,16 @@ def images_for_api(
         ref
         for ref in refs
         if not _is_cover_page_ref(ref)
-        and _ref_passes_image_align_gate(
-            query or "",
-            ref,
-            retrieved_text=figure_context,
-            source_hints=source_hints,
-            listing_source_text=primary_text,
-            retrieved_docs=retrieved_docs,
+        and (
+            _ref_passes_image_align_gate(
+                query or "",
+                ref,
+                retrieved_text=figure_context,
+                source_hints=source_hints,
+                listing_source_text=primary_text,
+                retrieved_docs=retrieved_docs,
+            )
+            or _ref_passes_pair_listing_gate(query or "", answer or "", ref)
         )
     ]
     if not refs:
@@ -6204,17 +6667,72 @@ def _append_content_list_image_ref(
     refs.append(ref)
 
 
+def _ref_passes_pair_listing_gate(
+    query: str,
+    answer: str,
+    ref: dict[str, Any],
+) -> bool:
+    """Cross-manual (machine, component) pair match without narrow figure_context."""
+    if not _is_component_listing_across_machines(query or "") or not (answer or "").strip():
+        return False
+    pairs = _filter_cross_listing_pair_targets(
+        query or "",
+        answer or "",
+        _machine_component_targets_from_answer(answer or "", query=query or ""),
+    )
+    comp_spans = _pair_component_spans_from_answer(answer or "", query=query or "")
+    machines = {
+        _normalize_label_key(m)
+        for m, _ in pairs
+        if m.strip()
+    }
+    if len(machines) < 2:
+        machines = {
+            _normalize_label_key(m) for m in _machine_spans_from_answer(answer or "")
+        }
+    for machine, component in pairs:
+        if not _ref_matches_manual_hint(ref, machine):
+            continue
+        if _pair_component_ref_align(component, ref) >= 0.38:
+            return True
+    for machine_key in machines:
+        machine = next(
+            (m for m, _ in pairs if _normalize_label_key(m) == machine_key),
+            "",
+        )
+        if not machine:
+            for m in _machine_spans_from_answer(answer or ""):
+                if _normalize_label_key(m) == machine_key:
+                    machine = m
+                    break
+        if not machine or not _ref_matches_manual_hint(ref, machine):
+            continue
+        for comp in comp_spans:
+            if _pair_component_ref_align(comp, ref) >= 0.38:
+                return True
+    return False
+
+
 def _listing_pair_targets_missing_refs(
     pairs: list[tuple[str, str]],
     refs: list[dict[str, Any]],
 ) -> list[tuple[str, str]]:
     covered: set[tuple[str, str]] = set()
     for ref in refs:
-        lab = _ref_effective_label(ref)
-        ctx = str(ref.get("context") or "")
         for machine, target in pairs:
             if not _ref_matches_manual_hint(ref, machine):
                 continue
+            head = _listing_target_head(target)
+            if _pair_component_ref_align(head, ref) >= 0.38:
+                covered.add(
+                    (
+                        _normalize_label_key(machine),
+                        _normalize_label_key(target),
+                    )
+                )
+                continue
+            lab = _ref_effective_label(ref)
+            ctx = str(ref.get("context") or "")
             if _label_matches_listing_target(lab, target) or _label_matches_listing_target(
                 ctx, target
             ):
@@ -6239,11 +6757,13 @@ def _ref_matches_manual_hint(ref: dict[str, Any], manual_hint: str) -> bool:
     hint = (manual_hint or "").strip()
     if not hint:
         return True
-    blob = " ".join(
-        str(ref.get(key) or "")
-        for key in ("path", "source_key", "caption", "context", "label")
-    )
-    return _doc_matches_manual_hint({"file_path": blob}, hint)
+    for key in ("path", "source_key", "context", "caption", "label"):
+        val = str(ref.get(key) or "").strip()
+        if not val:
+            continue
+        if _doc_matches_manual_hint({"file_path": val}, hint):
+            return True
+    return False
 
 
 def _listing_targets_missing_refs(
@@ -6304,7 +6824,9 @@ def _supplement_cited_listing_refs_from_content_lists(
                 doc_hint = cl_path.stem.replace("_content_list", "").replace(
                     "_content_list_v2", ""
                 )
-                if source_hints and not any(hint in doc_hint for hint in source_hints):
+                if source_hints and not any(
+                    _source_hint_matches_doc(hint, doc_hint) for hint in source_hints
+                ):
                     continue
                 if manual_hint and not _doc_matches_manual_hint(
                     {"file_path": doc_hint + ".pdf"}, manual_hint

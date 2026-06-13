@@ -254,11 +254,6 @@ def _image_matches_machine(img: dict, machine_hint: str) -> bool:
     probe = {"file_path": blob}
     if _doc_matches_manual_hint(probe, machine_hint):
         return True
-    hint = machine_hint.strip()
-    for token in (hint, hint.replace("封边机", "")):
-        token = token.strip()
-        if len(token) >= 3 and token in blob:
-            return True
     return False
 
 
@@ -282,37 +277,46 @@ def _image_matches_component(img: dict, component: str) -> bool:
 
 
 def _grade_images_answer_pairs(answer: str, imgs: list[dict]) -> tuple[bool, list[str]]:
-    from image_query_refs import _machine_component_targets_from_answer  # noqa: WPS433
+    from image_query_refs import (  # noqa: WPS433
+        _listing_target_head,
+        _machine_component_targets_from_answer,
+        _normalize_label_key,
+    )
 
     notes: list[str] = []
     if not imgs:
         notes.append("no_images")
         return False, notes
-    pairs = _machine_component_targets_from_answer(answer)
+    raw_pairs = _machine_component_targets_from_answer(answer)
+    pairs: list[tuple[str, str]] = []
+    seen: set[tuple[str, str]] = set()
+    for machine, component in raw_pairs:
+        machine = machine.strip()
+        component = _listing_target_head(component)
+        if not machine or not component:
+            continue
+        key = (_normalize_label_key(machine), _normalize_label_key(component))
+        if key in seen:
+            continue
+        seen.add(key)
+        pairs.append((machine, component))
     if len(pairs) < 2:
         notes.append(f"answer_pairs:{len(pairs)}<2")
         return False, notes
     uncovered: list[str] = []
-    used: set[int] = set()
     for machine, component in pairs:
-        matched_idx: int | None = None
-        for idx, img in enumerate(imgs):
-            if idx in used:
-                continue
-            if _image_matches_machine(img, machine) and _image_matches_component(
-                img, component
-            ):
-                matched_idx = idx
-                break
-        if matched_idx is None:
+        if not any(
+            _image_matches_machine(img, machine)
+            and _image_matches_component(img, component)
+            for img in imgs
+        ):
             uncovered.append(f"{machine}/{component}")
-        else:
-            used.add(matched_idx)
+    machines = {_normalize_label_key(m) for m, _ in pairs}
     if uncovered:
         notes.append(f"pair_missing:{uncovered}")
-    if len(imgs) < len(pairs):
-        notes.append(f"image_count:{len(imgs)}<{len(pairs)}")
-    ok = not uncovered and len(imgs) >= len(pairs)
+    if len(imgs) < len(machines):
+        notes.append(f"image_count:{len(imgs)}<{len(machines)}")
+    ok = not uncovered and len(imgs) >= len(machines)
     return ok, notes
 
 
