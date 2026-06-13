@@ -1,4 +1,4 @@
-# 配图 Query 锚定实施方案（待实施）
+# 配图 Query 锚定实施方案（阶段 1 已完成）
 
 > **目的**：记录 2026-06-12 讨论的配图改进方向与分步计划，便于追溯与回退。  
 > **关联**：[`查询配图设计方案.md`](查询配图设计方案.md) · [`测试例参考答案.md`](测试例参考答案.md)  
@@ -23,6 +23,20 @@ git checkout 1d3b5f4
 # 或
 git revert <later-commits>
 ```
+
+---
+
+## Checkpoint（阶段 1）
+
+| 项 | 内容 |
+|----|------|
+| **Git commit** | （提交后填入） |
+| **批测结果** | 全量 Q1–Q17：**17/17**；报告 `logs/web_path_q1_17/20260612_161319_all.md` |
+| **相对基线** | 修 Q5/Q9/Q17 配图；Q1–Q16 无回归 |
+| **主要改动** | `_anchor_chunks_by_query_section`、`cite_pool`/`anchor_pool` 分离、`figure_pool`、`_figure_context_from_answer_docs` query 回退、多机型手册名 span |
+| **开关** | `RAG_IMAGE_QUERY_SECTION_ANCHOR=1`（`config/env.example`） |
+
+回退阶段 1：`git revert <phase-1-commit>` 或 `git checkout 1d3b5f4` 后 cherry-pick 所需提交。
 
 ---
 
@@ -86,7 +100,7 @@ Query 辅助锚定 **仅允许** 在以下集合内选 chunk（优先级从高�
 - [x] 全量批测并记录 `20260612_122334_all.md`
 - [x] 本文档
 
-### 阶段 1：修单题「0 图」断链（低风险，优先）
+### 阶段 1：修单题「0 图」断链（低风险，优先）✅ 已完成
 
 **目标**：Q5、Q9 类「短答案 + 单保养条目」恢复配图，不扩大误配面。
 
@@ -95,8 +109,12 @@ Query 辅助锚定 **仅允许** 在以下集合内选 chunk（优先级从高�
 | 1.1 | 去掉 / 改写 `filter_docs_cited_by_answer` 中 `not scored and not span_keep` 的 **提前 return**；在空 `kept` 时进入 query 辅锚分支 | Q5、Q9 不再 `no_answer_cited_chunks` |
 | 1.2 | 新增 `_anchor_chunks_by_query_section(query, pool, *, answer_gate)`：在 pool 内用 query subject needles + 节标题（`2.1.5 …`）+ `保养内容：` 对齐，**且** chunk 与 answer 有最低 term/步骤重合（gate，非扩池） | Q5 → 图注「压带轮残胶清理」；Q9 → 注油泵相关图 |
 | 1.3 | Query 辅锚 **仅写回 `kept`**，不修改送给答案模型的 chunk；配图仍走 `resolve_query_images` | Web 路径与批测一致 |
+| 1.4 | `_figure_context_from_answer_docs`：短答案单题在 topic 未命中时 **query 对齐回退**（不作用于 listing / 多机型对比）；多机型 **手册名匹配** 补 span | Q4 不误配；Q15 四图稳定 |
+| 1.5 | `finalize_inline_images`：`cite_pool` / `anchor_pool` 分离；`figure_pool` + 多机型 rerank 含图 chunk 扩 anchor；多机型跳过 `query_aligned` 删 chunk | Q2 无图；Q15 不回归 |
 
 **风险控**：answer_gate 用已有 `discriminative_terms` / 步骤句重合，**不用**答案加粗 span 列表。
+
+**批测**：`logs/web_path_q1_17/20260612_161319_all.md` — **17/17**（基线 `122334` 为 14/17）。
 
 ### 阶段 2：收敛 answer-span 扩池逻辑（中风险）
 
@@ -120,11 +138,11 @@ Query 辅助锚定 **仅允许** 在以下集合内选 chunk（优先级从高�
 
 ### 阶段 4：批测、文档与开关
 
-| 步骤 | 改动要点 | 验收 |
-|------|----------|------|
-| 4.1 | 全量 `run_web_path_q1_17.py` ≥ **17/17** 或明确记录例外 | 新报告入 `logs/web_path_q1_17/` |
-| 4.2 | 更新 `查询配图设计方案.md` §0 三层收窄表述，与本文 **query 辅锚** 一致 | 设计 / 实现文档同步 |
-| 4.3 | `config/env.example` 增加 query 节锚相关开关（如 `RAG_IMAGE_QUERY_SECTION_ANCHOR=true`） | 可回退单步行为 |
+| 步骤 | 改动要点 | 验收 | 状态 |
+|------|----------|------|------|
+| 4.1 | 全量 `run_web_path_q1_17.py` ≥ **17/17** 或明确记录例外 | 新报告入 `logs/web_path_q1_17/` | ✅ 阶段 1 已达成（`161319`） |
+| 4.2 | 更新 `查询配图设计方案.md` §0 三层收窄表述，与本文 **query 辅锚** 一致 | 设计 / 实现文档同步 | 待做 |
+| 4.3 | `config/env.example` 增加 query 节锚相关开关（如 `RAG_IMAGE_QUERY_SECTION_ANCHOR=true`） | 可回退单步行为 | ✅ 阶段 1 |
 
 ---
 
@@ -152,7 +170,8 @@ Query 辅助锚定 **仅允许** 在以下集合内选 chunk（优先级从高�
 | 日期 | Commit | 说明 |
 |------|--------|------|
 | 2026-06-12 | `1d3b5f4` | Plan B + citation 扩池 + span 策略基线；全量 14/17；**本方案起点** |
-| （待填） | — | 阶段 1：query 节锚 + 去掉 early return |
+| 2026-06-12 | （待提交） | 阶段 1：query 节锚、figure 扫描 query 回退、多机型 anchor_pool / 跳过 query_aligned 过滤 |
+| 2026-06-12 | — | 阶段 1 批测：`20260612_161319_all.md` **17/17**（基线 14/17；修 Q5/Q9/Q17 配图，无 Q1–Q16 回归） |
 | （待填） | — | 阶段 2：span 收敛 |
 | （待填） | — | 阶段 3：Q17 跨手册 |
 | （待填） | — | 阶段 4：17/17 批测与文档 |

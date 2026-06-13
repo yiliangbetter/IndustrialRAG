@@ -321,6 +321,14 @@ def _maintenance_topics_in_text(text: str, query: str) -> list[str]:
     return topics
 
 
+def _is_catalog_or_model_listing_query(query: str) -> bool:
+    """Product catalog / model list questions (Q1/Q14), not maintenance item listings."""
+    q = (query or "").strip()
+    if not q:
+        return False
+    return bool(re.search(r"型号|产品型号|适用于哪些|一共有多少|有多少|几种产品", q))
+
+
 def _is_listing_scope_query(query: str) -> bool:
     """Multi-item scope questions (哪些/几种…), not single how-to steps."""
     q = (query or "").strip()
@@ -1290,6 +1298,172 @@ def _image_anchor_max_sections() -> int:
         return 1
 
 
+def query_section_anchor_enabled() -> bool:
+    raw = (os.getenv("RAG_IMAGE_QUERY_SECTION_ANCHOR") or "1").strip().lower()
+    return raw not in ("", "0", "false", "no", "off")
+
+
+def _query_section_anchor_min_score() -> float:
+    raw = os.getenv("RAG_IMAGE_QUERY_SECTION_MIN_SCORE") or "0.28"
+    try:
+        return max(0.12, min(2.0, float(raw)))
+    except ValueError:
+        return 0.28
+
+
+def _answer_weak_consistency_gate(answer_blob: str, content: str) -> bool:
+    """Answer terms overlap chunk body (not bold-span expansion)."""
+    if not answer_blob.strip() or not (content or "").strip():
+        return False
+    terms = [
+        t
+        for t in discriminative_terms(answer_blob, min_len=2)
+        if len(t) >= 2
+    ]
+    if not terms:
+        return False
+    body = _normalize_citation_blob(content)
+    hits = sum(1 for term in terms if term in body)
+    if hits >= 1 and hits / len(terms) >= 0.12:
+        return True
+    return text_term_alignment_symmetric(answer_blob, content) >= 0.12
+
+
+def _chunk_query_section_score(
+    query: str,
+    content: str,
+    *,
+    anchor_sections: list[str],
+    pool_primary: str,
+) -> float:
+    score = 0.0
+    if anchor_sections and _chunk_belongs_to_anchor_sections(
+        query, pool_primary, content, anchor_sections
+    ):
+        score += 1.2
+    score += _chunk_subject_score(query, content) * 0.65
+    for match in _MAINT_TOPIC_RE.finditer(content):
+        topic = match.group(1).strip()
+        if any(
+            len(needle) >= 3 and needle in topic
+            for needle in _query_subject_needles(query)
+        ):
+            score += 0.45
+            break
+    if _chunk_figure_context_aligns_query(query, content):
+        score += 0.35
+    return score
+
+
+def _anchor_chunks_by_query_section(
+    query: str,
+    pool: list[dict[str, Any]],
+    *,
+    answer: str,
+    kept: list[dict[str, Any]] | None = None,
+) -> tuple[list[dict[str, Any]], dict[str, Any]]:
+    """Query-led section anchor when citation kept nothing (single-topic, terse answers)."""
+    meta: dict[str, Any] = {
+        "mode": "query_section_anchor",
+        "anchor_sections": [],
+        "picked": 0,
+    }
+    out = list(kept or [])
+    q = (query or "").strip()
+    if out or not q or _is_listing_scope_query(q) or not query_section_anchor_enabled():
+        return out, meta
+
+    answer_blob = _answer_body_for_citation_match(answer)
+    if not answer_blob.strip():
+        meta["reason"] = "no_answer_body"
+        return out, meta
+
+    pool_primary = text_from_retrieved_docs(pool)
+    if _retrieval_prefers_catalog_field(q, pool_primary):
+        meta["reason"] = "catalog_query"
+        return out, meta
+    if re.search(r"开机前", q) and not _is_listing_scope_query(q):
+        meta["reason"] = "preflight_query"
+        return out, meta
+    if not re.search(
+        r"清理|残胶|润滑|保养|油量|液压油|工具|步骤|周期|清洁|涂胶|电控|注油",
+        q,
+    ):
+        meta["reason"] = "no_procedure_figure_query"
+        return out, meta
+    anchor_sections = _pick_anchor_sections(q, pool_primary, pool)
+    meta["anchor_sections"] = anchor_sections
+
+    best_doc: dict[str, Any] | None = None
+    best_score = 0.0
+    min_score = _query_section_anchor_min_score()
+    subject_needles = [n for n in _query_subject_needles(q) if len(n) >= 4]
+
+    for doc in pool:
+        content = _doc_content(doc).strip()
+        if (
+            not content
+            or _chunk_is_toc_heavy(content)
+            or _chunk_is_title_only(content)
+            or not extract_image_refs_from_context(content)
+        ):
+            continue
+        if not _answer_weak_consistency_gate(answer_blob, content):
+            continue
+        if subject_needles and not any(needle in content for needle in subject_needles):
+            continue
+        if not _chunk_figure_context_aligns_query(q, content):
+            continue
+        q_score = _chunk_query_section_score(
+            q,
+            content,
+            anchor_sections=anchor_sections,
+            pool_primary=pool_primary,
+        )
+        if anchor_sections and not _chunk_belongs_to_anchor_sections(
+            q, pool_primary, content, anchor_sections
+        ):
+            q_score *= 0.55
+        if q_score > best_score:
+            best_score = q_score
+            best_doc = doc
+
+    if best_doc is None or best_score < min_score:
+        fallback_doc: dict[str, Any] | None = None
+        fallback_score = 0.0
+        for doc in pool:
+            content = _doc_content(doc).strip()
+            if (
+                not content
+                or _chunk_is_toc_heavy(content)
+                or not extract_image_refs_from_context(content)
+                or not _chunk_figure_context_aligns_query(q, content)
+                or not _answer_weak_consistency_gate(answer_blob, content)
+            ):
+                continue
+            if subject_needles and not any(
+                needle in content for needle in subject_needles
+            ):
+                continue
+            score = _chunk_subject_score(q, content)
+            if score > fallback_score:
+                fallback_score = score
+                fallback_doc = doc
+        if fallback_doc is not None and fallback_score >= 0.18:
+            best_doc = fallback_doc
+            best_score = fallback_score
+            meta["fallback"] = True
+
+    if best_doc is None or best_score < min(min_score, 0.18):
+        meta["reason"] = "no_query_section_match"
+        meta["best_score"] = round(best_score, 3)
+        return out, meta
+
+    meta["picked"] = 1
+    meta["best_score"] = round(best_score, 3)
+    return [best_doc], meta
+
+
 def _valid_manual_section_id(section_id: str) -> bool:
     section_id = (section_id or "").strip()
     if not section_id or not section_id[0].isdigit():
@@ -1580,8 +1754,25 @@ def _figure_context_from_answer_docs(
 
     parts: list[str] = []
     min_cite = 0.12
+    q = (query or "").strip()
+    machines = _machine_spans_from_answer(answer)
+    multi_machine = _is_multi_machine_comparison_query(q) and len(machines) >= 2
+    seen_parts: set[str] = set()
+
+    def _topic_matches_chunk(topic: str, content: str, doc: dict[str, Any]) -> bool:
+        if _chunk_matches_answer_topic(content, topic):
+            return True
+        if multi_machine and "封边机" in topic:
+            manual = _doc_basename(doc)
+            return bool(manual and topic in manual)
+        return False
+
+    def _add_part(content: str) -> None:
+        if content and content not in seen_parts:
+            seen_parts.add(content)
+            parts.append(content)
+
     if len(topics) >= 2:
-        seen_content: set[str] = set()
         for topic in topics:
             best_content = ""
             best_score = 0.0
@@ -1589,7 +1780,7 @@ def _figure_context_from_answer_docs(
                 content = _doc_content(doc).strip()
                 if not content or not extract_image_refs_from_context(content):
                     continue
-                if not _chunk_matches_answer_topic(content, topic):
+                if not _topic_matches_chunk(topic, content, doc):
                     continue
                 score = max(
                     _answer_chunk_term_overlap(topic, content),
@@ -1598,23 +1789,80 @@ def _figure_context_from_answer_docs(
                 if score > best_score:
                     best_score = score
                     best_content = content
-            if best_content and best_content not in seen_content:
-                seen_content.add(best_content)
-                parts.append(best_content)
+            _add_part(best_content)
     else:
         for doc in docs:
             content = _doc_content(doc).strip()
             if not content or not extract_image_refs_from_context(content):
                 continue
             if topics:
-                if not any(_chunk_matches_answer_topic(content, topic) for topic in topics):
+                if not any(
+                    _topic_matches_chunk(topic, content, doc) for topic in topics
+                ):
                     continue
             elif body:
                 if _chunk_citation_score(body, content) < min_cite:
                     continue
             else:
                 continue
-            parts.append(content)
+            _add_part(content)
+
+    if multi_machine:
+        q_terms = [
+            t for t in discriminative_terms(q, min_len=2) if len(t) >= 2
+        ]
+        for topic in machines:
+            if any(
+                topic in _doc_basename(doc)
+                and _doc_content(doc).strip() in seen_parts
+                for doc in docs
+            ):
+                continue
+            best_content = ""
+            best_score = 0.0
+            for doc in docs:
+                content = _doc_content(doc).strip()
+                if not content or not extract_image_refs_from_context(content):
+                    continue
+                manual = _doc_basename(doc)
+                if not (manual and topic in manual):
+                    continue
+                if q_terms and not any(term in content for term in q_terms):
+                    continue
+                score = _chunk_subject_score(q, content)
+                if score > best_score:
+                    best_score = score
+                    best_content = content
+            _add_part(best_content)
+    _procedure_q = bool(
+        q
+        and re.search(
+            r"清理|残胶|润滑|保养|油量|液压油|工具|步骤|周期|清洁|涂胶|注油",
+            q,
+        )
+    )
+    query_aligned = [p for p in parts if _chunk_figure_context_aligns_query(q, p)]
+    if (
+        _procedure_q
+        and not query_aligned
+        and not _is_listing_scope_query(q)
+        and not multi_machine
+    ):
+        parts = []
+        seen_parts = set()
+        for doc in docs:
+            content = _doc_content(doc).strip()
+            if not content or not extract_image_refs_from_context(content):
+                continue
+            if not _chunk_figure_context_aligns_query(q, content):
+                continue
+            if body and not (
+                _answer_weak_consistency_gate(body, content)
+                or _chunk_citation_score(body, content) >= min_cite
+            ):
+                continue
+            _add_part(content)
+            break
 
     meta["anchor_chunks"] = len(parts)
     meta["anchor_chars"] = sum(len(p) for p in parts)
@@ -1888,12 +2136,20 @@ def _supplement_answer_topic_figure_chunks(
                 if (lab := _ref_effective_label(ref))
             )
             topic_match = _chunk_matches_answer_topic(content, topic)
-            if not topic_match and not label_hit:
+            manual = _doc_basename(doc)
+            machine_match = (
+                _is_multi_machine_comparison_query(query or "")
+                and "封边机" in topic
+                and bool(manual and topic in manual)
+            )
+            if not topic_match and not label_hit and not machine_match:
                 continue
             score = max(topic_ov, cite * 0.85)
             if label_hit:
                 score += 0.12
-            if topic_match and score < 0.15:
+            if machine_match:
+                score = max(score, 0.2)
+            if (topic_match or machine_match) and score < 0.15:
                 score = 0.15
             if score < 0.06:
                 continue
@@ -2184,6 +2440,7 @@ def filter_docs_cited_by_answer(
     *,
     query: str | None = None,
     pool: list[dict[str, Any]] | None = None,
+    anchor_pool: list[dict[str, Any]] | None = None,
 ) -> tuple[list[dict[str, Any]], dict[str, Any]]:
     """Keep LLM chunks whose body lines appear in the generated answer."""
     meta: dict[str, Any] = {
@@ -2197,6 +2454,10 @@ def filter_docs_cited_by_answer(
         return list(docs or []), meta
 
     search_pool = _dedupe_doc_list(list(pool or docs or []))
+    section_pool = _dedupe_doc_list(
+        list(anchor_pool or pool or docs or [])
+    )
+    pool_for_spans = section_pool
 
     scored: list[tuple[float, dict[str, Any]]] = []
     for doc in docs or []:
@@ -2211,15 +2472,13 @@ def filter_docs_cited_by_answer(
         if score > 0:
             scored.append((score, doc))
 
-    span_keep = _is_listing_scope_query(query or "") or (
+    span_keep = (
+        _is_listing_scope_query(query or "")
+        and not _is_catalog_or_model_listing_query(query or "")
+    ) or (
         _is_multi_machine_comparison_query(query or "")
         and len(_machine_spans_from_answer(answer)) >= 2
     )
-
-    if not scored and not span_keep:
-        meta["mode"] = "answer_no_chunk_match"
-        meta["after"] = 0
-        return [], meta
 
     if scored:
         scored.sort(key=lambda pair: pair[0], reverse=True)
@@ -2239,7 +2498,9 @@ def filter_docs_cited_by_answer(
         max_score = 0.0
         min_keep = 0.12
         kept = []
-        meta["mode"] = "answer_span_keep_only"
+        meta["mode"] = (
+            "answer_span_keep_only" if span_keep else "pending_query_section_anchor"
+        )
     if span_keep:
         answer_spans = _answer_image_span_targets(query or "", answer)
         if len(answer_spans) >= 2:
@@ -2247,7 +2508,7 @@ def filter_docs_cited_by_answer(
             for span in answer_spans:
                 best_doc: dict[str, Any] | None = None
                 best_score = 0.0
-                for doc in search_pool:
+                for doc in pool_for_spans:
                     content = _doc_content(doc).strip()
                     if (
                         not content
@@ -2291,12 +2552,49 @@ def filter_docs_cited_by_answer(
                     kept_ids.add(id(best_doc))
             meta["listing_span_keep"] = True
     kept = _supplement_cross_manual_figure_chunks(
-        search_pool, kept, query=query, answer=answer
+        pool_for_spans, kept, query=query, answer=answer
     )
     kept = _supplement_answer_topic_figure_chunks(
-        search_pool, kept, answer=answer, query=query
+        pool_for_spans, kept, answer=answer, query=query
     )
-    kept = _supplement_query_topic_figure_chunks(search_pool, kept, query=query or "")
+    if (
+        not _is_listing_scope_query(query or "")
+        and not _is_multi_machine_comparison_query(query or "")
+        and kept
+    ):
+        query_aligned: list[dict[str, Any]] = []
+        for doc in kept:
+            content = _doc_content(doc).strip()
+            if extract_image_refs_from_context(content):
+                if _chunk_figure_context_aligns_query(query or "", content):
+                    query_aligned.append(doc)
+            else:
+                query_aligned.append(doc)
+        kept = query_aligned
+    if not _is_listing_scope_query(query or ""):
+        kept_has_figures = any(
+            extract_image_refs_from_context(_doc_content(doc).strip())
+            for doc in kept
+        )
+        if not kept or not kept_has_figures:
+            anchored, qsec_meta = _anchor_chunks_by_query_section(
+                query or "",
+                section_pool,
+                answer=answer,
+                kept=[],
+            )
+            if qsec_meta.get("picked"):
+                kept = anchored
+                meta["mode"] = "query_section_anchor"
+                meta["query_section_anchor"] = qsec_meta
+            elif meta.get("mode") == "pending_query_section_anchor":
+                meta["query_section_anchor"] = qsec_meta
+    if re.search(r"开机前", query or "") and not span_keep:
+        kept = [
+            doc
+            for doc in kept
+            if not extract_image_refs_from_context(_doc_content(doc).strip())
+        ]
     if not kept:
         meta["mode"] = "answer_no_chunk_match"
         meta["after"] = 0

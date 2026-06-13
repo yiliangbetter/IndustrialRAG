@@ -31,6 +31,9 @@ _llm_chunks_for_images: ContextVar[list[dict] | None] = ContextVar(
     "llm_chunks_for_images", default=None
 )
 _rerank_docs: ContextVar[list[dict] | None] = ContextVar("rerank_docs", default=None)
+_rerank_figure_pool: ContextVar[list[dict] | None] = ContextVar(
+    "rerank_figure_pool", default=None
+)
 _llm_chunks_rerank_figure_supplement: ContextVar[int] = ContextVar(
     "llm_chunks_rerank_figure_supplement", default=0
 )
@@ -120,8 +123,11 @@ def finalize_inline_images(
     """Resolve inline figures cited by the generated answer (Plan A + placements)."""
     from image_query_refs import (  # noqa: WPS433
         _dedupe_doc_list,
+        _doc_content,
+        _is_multi_machine_comparison_query,
         build_inline_placements,
         default_image_selection_limit,
+        extract_image_refs_from_context,
         filter_docs_cited_by_answer,
         resolve_query_images,
         text_from_retrieved_docs,
@@ -165,15 +171,31 @@ def finalize_inline_images(
     if answer:
         cite_pool = list(docs_before_cite)
         rerank_pool = list(_rerank_docs.get() or [])
+        figure_pool = list(_rerank_figure_pool.get() or [])
         if rerank_pool:
             cite_pool = _dedupe_doc_list(cite_pool + rerank_pool)
+        anchor_pool = cite_pool
+        if figure_pool:
+            anchor_pool = _dedupe_doc_list(cite_pool + figure_pool)
+        if _is_multi_machine_comparison_query(q) and rerank_pool:
+            multi_fig = [
+                doc
+                for doc in rerank_pool
+                if extract_image_refs_from_context(_doc_content(doc).strip())
+            ]
+            if multi_fig:
+                anchor_pool = _dedupe_doc_list(anchor_pool + multi_fig)
         docs, cite_meta = filter_docs_cited_by_answer(
             answer,
             docs,
             query=q,
             pool=cite_pool,
+            anchor_pool=anchor_pool,
         )
         cite_meta["cite_pool_size"] = len(cite_pool)
+        if figure_pool:
+            cite_meta["anchor_pool_size"] = len(anchor_pool)
+            cite_meta["cite_figure_pool_size"] = len(figure_pool)
     docs_text = text_from_retrieved_docs(docs).strip() if docs else ""
     if not docs_text:
         debug = {
@@ -337,6 +359,29 @@ async def query_progress_hooks() -> AsyncIterator[asyncio.Queue[dict[str, str]]]
         except Exception:
             final_docs = docs
         _sync_retrieved_docs_after_rerank(final_docs)
+        try:
+            from image_query_refs import (  # noqa: WPS433
+                _chunk_figure_context_aligns_query,
+                _chunk_subject_score,
+                _doc_content,
+                extract_image_refs_from_context,
+            )
+
+            fig_candidates: list[tuple[float, dict]] = []
+            for doc in retrieved_docs or []:
+                content = _doc_content(doc).strip()
+                if not content or not extract_image_refs_from_context(content):
+                    continue
+                if not _chunk_figure_context_aligns_query(query, content):
+                    continue
+                score = _chunk_subject_score(query, content)
+                if score < 0.25:
+                    continue
+                fig_candidates.append((score, doc))
+            fig_candidates.sort(key=lambda pair: pair[0], reverse=True)
+            _rerank_figure_pool.set([doc for _, doc in fig_candidates[:16]])
+        except Exception:
+            _rerank_figure_pool.set([])
         return final_docs
 
     async def _process_chunks_unified(*args: Any, **kwargs: Any):
@@ -408,6 +453,7 @@ async def query_progress_hooks() -> AsyncIterator[asyncio.Queue[dict[str, str]]]
         _retrieved_docs.set(None)
         _llm_chunks_for_images.set(None)
         _rerank_docs.set(None)
+        _rerank_figure_pool.set(None)
         _llm_chunks_rerank_figure_supplement.set(0)
         _related_images_selected.set(None)
         _inline_placements.set(None)
