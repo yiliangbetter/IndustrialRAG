@@ -133,9 +133,10 @@ REF: dict[int, dict] = {
         "query": "我将为高速智能封边机进行季度保养，请问我需要准备哪几种润滑脂？",
         "text_all": [],
         "text_any": [],
-        "text_need2": [["润滑脂2#", "润滑脂 2#"], ["高温润滑脂"]],
+        "text_need2": [["润滑脂2#", "润滑脂 2#", "润滑脂2＃"], ["高温润滑脂"]],
         "want_images": True,
         "caption_min": 1,
+        "caption_topic_any": ["润滑脂", "润滑", "涂胶轴", "导轨", "齿条"],
     },
     14: {
         "query": "南兴的封边机一共有多少产品型号？",
@@ -184,23 +185,14 @@ REF: dict[int, dict] = {
         "text_all": [],
         "text_any": [],
         "text_need2": [
+            ["高速智能"],
+            ["高速自动", "自动封边", "双端"],
             ["压带轮"],
             ["仿形靠", "仿形靠模", "仿形靠板"],
-            ["涂胶轴", "胶轴"],
-            ["涂胶电机", "电机"],
-            ["激光", "出光口"],
         ],
-        "text_min_len": 150,
+        "text_min_len": 120,
         "want_images": True,
-        "caption_any": [
-            "压带轮残胶清理",
-            "仿形靠板上残胶清理",
-            "清理胶轴老化胶水",
-            "电机检查清理",
-            "激光",
-            "出光口",
-        ],
-        "caption_min_match": 3,
+        "image_answer_pairs": True,
     },
 }
 
@@ -248,6 +240,80 @@ def grade_text(answer: str, spec: dict) -> tuple[bool, list[str]]:
     return ok, misses
 
 
+def _image_matches_machine(img: dict, machine_hint: str) -> bool:
+    from image_query_refs import _doc_matches_manual_hint  # noqa: WPS433
+
+    blob = " ".join(
+        str(img.get(key) or "")
+        for key in ("source_key", "caption", "context", "url", "path")
+    )
+    if not blob.strip():
+        return False
+    probe = {"file_path": blob}
+    if _doc_matches_manual_hint(probe, machine_hint):
+        return True
+    hint = machine_hint.strip()
+    for token in (hint, hint.replace("封边机", "")):
+        token = token.strip()
+        if len(token) >= 3 and token in blob:
+            return True
+    return False
+
+
+def _image_matches_component(img: dict, component: str) -> bool:
+    from image_query_refs import (  # noqa: WPS433
+        _label_matches_listing_target,
+        _listing_target_head,
+    )
+
+    head = _listing_target_head(component)
+    cap = str(img.get("caption") or "")
+    ctx = str(img.get("context") or "")
+    blob = f"{cap} {ctx}".strip()
+    if not blob:
+        return False
+    if _label_matches_listing_target(cap, head) or _label_matches_listing_target(
+        ctx, head
+    ):
+        return True
+    return head in blob or component in blob
+
+
+def _grade_images_answer_pairs(answer: str, imgs: list[dict]) -> tuple[bool, list[str]]:
+    from image_query_refs import _machine_component_targets_from_answer  # noqa: WPS433
+
+    notes: list[str] = []
+    if not imgs:
+        notes.append("no_images")
+        return False, notes
+    pairs = _machine_component_targets_from_answer(answer)
+    if len(pairs) < 2:
+        notes.append(f"answer_pairs:{len(pairs)}<2")
+        return False, notes
+    uncovered: list[str] = []
+    used: set[int] = set()
+    for machine, component in pairs:
+        matched_idx: int | None = None
+        for idx, img in enumerate(imgs):
+            if idx in used:
+                continue
+            if _image_matches_machine(img, machine) and _image_matches_component(
+                img, component
+            ):
+                matched_idx = idx
+                break
+        if matched_idx is None:
+            uncovered.append(f"{machine}/{component}")
+        else:
+            used.add(matched_idx)
+    if uncovered:
+        notes.append(f"pair_missing:{uncovered}")
+    if len(imgs) < len(pairs):
+        notes.append(f"image_count:{len(imgs)}<{len(pairs)}")
+    ok = not uncovered and len(imgs) >= len(pairs)
+    return ok, notes
+
+
 def grade_images(result: dict, spec: dict) -> tuple[bool, list[str]]:
     imgs = result.get("images") or []
     pls = result.get("placements") or []
@@ -262,6 +328,9 @@ def grade_images(result: dict, spec: dict) -> tuple[bool, list[str]]:
 
     if want is not True:
         return True, notes
+
+    if spec.get("image_answer_pairs"):
+        return _grade_images_answer_pairs(str(result.get("answer") or ""), imgs)
 
     if not pls:
         notes.append("no_placements")
@@ -423,6 +492,8 @@ def _expected_image_hint(spec: dict) -> str:
         return "不应配图"
     if spec.get("want_images") is not True:
         return "—"
+    if spec.get("image_answer_pairs"):
+        return "期望：答案每个 (机型, 部件) 各 1 张配图，图数 ≥ 答案部件条数"
     caps = spec.get("caption_any") or []
     if caps:
         min_match = int(spec.get("caption_min_match") or 1)

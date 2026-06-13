@@ -235,6 +235,7 @@ def _answer_text_for_listing() -> str:
 def _listing_target_head(span: str) -> str:
     """Component name before generic qualifiers (e.g. 涂胶轴及其周围 → 涂胶轴)."""
     span = (span or "").strip().rstrip("：:")
+    span = re.sub(r"[（(][^）)]*[）)]", "", span).strip()
     for sep in ("及其", "及"):
         if sep in span:
             span = span.split(sep, 1)[0].strip()
@@ -481,6 +482,8 @@ def _machine_component_targets_from_answer(answer: str) -> list[tuple[str, str]]
                 current_machine = machine
             continue
         comp_match = re.match(r"^\s*[*\-•]\s*\*\*([^*]+)\*\*", line)
+        if not comp_match:
+            comp_match = re.match(r"^\s*\d+\.\s*\*\*([^*]+)\*\*", line)
         if comp_match and current_machine:
             comp_raw = _listing_target_head(comp_match.group(1))
             parts = re.split(r"[与和、及]", comp_raw)
@@ -489,6 +492,33 @@ def _machine_component_targets_from_answer(answer: str) -> list[tuple[str, str]]
                 if part:
                     pairs.append((current_machine, part))
     return pairs
+
+
+def _machine_component_listing_pair_targets(
+    query: str,
+    answer: str,
+    pool: list[dict[str, Any]],
+    *,
+    kept: list[dict[str, Any]] | None = None,
+) -> list[tuple[str, str]]:
+    """Ordered (machine, component) pairs for cross-manual listings (Q17)."""
+    _ = query, pool, kept
+    pairs = _machine_component_targets_from_answer(answer)
+    if len(pairs) < 2:
+        return []
+    out: list[tuple[str, str]] = []
+    seen: set[tuple[str, str]] = set()
+    for machine, comp in pairs:
+        machine = machine.strip()
+        comp = _listing_target_head(comp)
+        if not machine or not comp:
+            continue
+        key = (_normalize_label_key(machine), _normalize_label_key(comp))
+        if key in seen:
+            continue
+        seen.add(key)
+        out.append((machine, comp))
+    return out[:16]
 
 
 def _manual_hint_for_component(
@@ -688,34 +718,31 @@ def _supplement_component_listing_figure_chunks(
     query: str | None,
     answer: str,
 ) -> list[dict[str, Any]]:
-    """One inline-figure chunk per listing target, scoped to cited manuals (phase 3)."""
-    targets = _component_listing_span_targets(
+    """One inline-figure chunk per (machine, component) pair, scoped to cited manuals."""
+    pairs = _machine_component_listing_pair_targets(
         query or "", answer, pool, kept=kept
     )
-    if len(targets) < 2:
+    if len(pairs) < 2:
         return kept
     cited_hints = _cited_manual_hints_from_answer(answer)
     answer_blob = _answer_body_for_citation_match(answer)
     expanded = _expand_pool_with_same_section_neighbors(pool, kept)
     out = list(kept)
     kept_ids = {id(doc) for doc in out}
-    seen_components: set[str] = set()
-    for component in targets:
-        comp_key = _normalize_label_key(component)
-        if comp_key in seen_components:
-            continue
-        seen_components.add(comp_key)
-        manual_hint = _manual_hint_for_component(
-            component,
-            answer,
-            pool=expanded,
-            cited_hints=cited_hints,
+    seen_pairs: set[tuple[str, str]] = set()
+    for machine_hint, component in pairs:
+        pair_key = (
+            _normalize_label_key(machine_hint),
+            _normalize_label_key(component),
         )
+        if pair_key in seen_pairs:
+            continue
+        seen_pairs.add(pair_key)
         best_doc = _best_figure_doc_for_component(
             component,
             expanded,
             answer_blob=answer_blob,
-            manual_hint=manual_hint,
+            manual_hint=machine_hint,
             cited_hints=cited_hints,
             query=query or "",
         )
@@ -3078,19 +3105,38 @@ def filter_docs_cited_by_answer(
             if _is_component_listing_across_machines(query or "")
             else pool_for_spans
         )
-        if len(answer_spans) >= 2:
+        if len(answer_spans) >= 2 or (
+            _is_component_listing_across_machines(query or "")
+            and len(
+                _machine_component_listing_pair_targets(
+                    query or "", answer, pool_for_spans, kept=kept
+                )
+            )
+            >= 2
+        ):
             kept_ids = {id(doc) for doc in kept}
-            for span in answer_spans:
-                manual_hint = (
-                    _manual_hint_for_component(
+            pair_targets = (
+                _machine_component_listing_pair_targets(
+                    query or "", answer, pool_for_spans, kept=kept
+                )
+                if _is_component_listing_across_machines(query or "")
+                else []
+            )
+            span_items: list[tuple[str, str]] = (
+                pair_targets
+                if pair_targets
+                else [( "", span) for span in answer_spans]
+            )
+            for manual_hint, span in span_items:
+                if not manual_hint and _is_component_listing_across_machines(
+                    query or ""
+                ):
+                    manual_hint = _manual_hint_for_component(
                         span,
                         answer,
                         pool=expanded_spans_pool,
                         cited_hints=cited_hints,
                     )
-                    if _is_component_listing_across_machines(query or "")
-                    else ""
-                )
                 best_doc: dict[str, Any] | None = None
                 best_score = 0.0
                 for doc in expanded_spans_pool:
@@ -3397,6 +3443,76 @@ def _build_listing_inline_placements(
     return placements
 
 
+def _build_machine_component_inline_placements(
+    answer: str,
+    images: list[dict[str, Any]],
+    pairs: list[tuple[str, str]],
+    min_score: float,
+) -> list[dict[str, Any]]:
+    """One figure per (machine, component) answer pair for cross-manual listings."""
+    placements: list[dict[str, Any]] = []
+    used_indices: set[int] = set()
+
+    for machine, component in pairs:
+        if not machine or not component:
+            continue
+        start, end, span_score = _find_anchor_in_answer(answer, component)
+        anchor_text = component
+        if start < 0:
+            head = _listing_target_head(component)
+            if head and head != component:
+                start, end, span_score = _find_anchor_in_answer(answer, head)
+                if start >= 0:
+                    anchor_text = head
+        if start < 0 or span_score < min_score:
+            continue
+
+        best_idx = -1
+        best_align = -1.0
+        for idx, img in enumerate(images):
+            if idx in used_indices:
+                continue
+            if not _ref_matches_manual_hint(img, machine):
+                continue
+            caption = str(img.get("caption") or "").strip()
+            ctx = str(img.get("context") or "").strip()
+            if _label_matches_listing_target(caption, component) or _label_matches_listing_target(
+                ctx, component
+            ):
+                align = 1.0
+            else:
+                align = max(
+                    text_term_alignment_symmetric(component, caption),
+                    text_term_alignment_symmetric(component, ctx),
+                )
+            if align < 0.35:
+                continue
+            if align > best_align:
+                best_align = align
+                best_idx = idx
+        if best_idx < 0:
+            continue
+        used_indices.add(best_idx)
+        body = _answer_text_for_placement(answer)
+        display_anchor = anchor_text
+        if 0 <= start < end <= len(body):
+            snippet = body[start:end].strip()
+            if snippet:
+                display_anchor = snippet
+        placements.append(
+            {
+                "anchor_text": display_anchor,
+                "match_start": start,
+                "match_end": end,
+                "image_index": best_idx,
+                "score": round(span_score, 3),
+            }
+        )
+
+    placements.sort(key=lambda item: item["match_start"])
+    return placements
+
+
 def _source_key_from_image(img: dict[str, Any]) -> str:
     sk = str(img.get("source_key") or "").strip()
     if sk:
@@ -3507,6 +3623,13 @@ def build_inline_placements(
     min_score = _inline_min_place_score()
     answer_body = _answer_text_for_placement(answer)
     listing_spans = _answer_listing_spans(answer)
+    pair_targets = _machine_component_listing_pair_targets("", answer, [])
+    if len(pair_targets) >= 2 and len({m for m, _ in pair_targets}) >= 2:
+        pair_placements = _build_machine_component_inline_placements(
+            answer, images, pair_targets, min_score
+        )
+        if len(pair_placements) >= 2:
+            return _apply_placement_reindex(images, pair_placements)
     source_keys = {
         sk
         for sk in (_source_key_from_image(img) for img in images)
@@ -4898,6 +5021,49 @@ def _select_scored_refs_for_listing(
     )
 
 
+def _select_scored_refs_for_listing_pairs(
+    scored: list[tuple[int, dict[str, Any]]],
+    *,
+    pairs: list[tuple[str, str]],
+    limit: int,
+    min_absolute: int = 1,
+) -> list[dict[str, Any]]:
+    """One on-manual figure per (machine, component) answer pair (Q17)."""
+    selected: list[dict[str, Any]] = []
+    used_keys: set[str] = set()
+    for machine, component in pairs:
+        best_score = 0
+        best_ref: dict[str, Any] | None = None
+        for score, ref in scored:
+            if score < min_absolute:
+                continue
+            key = _figure_label_key(ref)
+            if key in used_keys:
+                continue
+            if not _ref_matches_manual_hint(ref, machine):
+                continue
+            label = _ref_effective_label(ref)
+            ctx = str(ref.get("context") or "")
+            if not (
+                _label_matches_listing_target(label, component)
+                or _label_matches_listing_target(ctx, component)
+            ):
+                continue
+            if score > best_score:
+                best_score = score
+                best_ref = ref
+        if best_ref is not None:
+            used_keys.add(_figure_label_key(best_ref))
+            selected.append(best_ref)
+        if len(selected) >= limit:
+            break
+    if selected:
+        return selected
+    return _select_scored_refs_by_label(
+        scored, limit=limit, min_absolute=min_absolute
+    )
+
+
 def _ref_topic_overlaps_query(query: str, ref: dict[str, Any]) -> bool:
     blob = " ".join(
         str(ref.get(key) or "") for key in ("caption", "context", "label")
@@ -4992,8 +5158,24 @@ def _select_scored_refs(
         if _is_component_listing_across_machines(query or "") and (answer or "").strip()
         else _component_spans_from_answer(answer or "")
     )
+    pair_targets = (
+        _machine_component_listing_pair_targets(query or "", answer or "", [])
+        if _is_component_listing_across_machines(query or "") and (answer or "").strip()
+        else []
+    )
     machine_spans = _machine_spans_from_answer(answer or "")
     targets = _listing_target_phrases(query or "", retrieved_text or "")
+    if (
+        _is_component_listing_across_machines(query or "")
+        and len(pair_targets) >= 2
+    ):
+        cap = _multi_figure_image_limit()
+        return _select_scored_refs_for_listing_pairs(
+            scored,
+            pairs=pair_targets,
+            limit=cap,
+            min_absolute=1,
+        )
     if _is_listing_scope_query(query or "") and len(component_spans) >= 2:
         cap = _multi_figure_image_limit()
         cross_manual = _is_component_listing_across_machines(query or "")
@@ -5251,15 +5433,16 @@ def explain_query_images(
         _is_component_listing_across_machines(query or "")
         and (answer or "").strip()
     ):
-        targets = _component_listing_span_targets(
+        pair_targets = _machine_component_listing_pair_targets(
             query or "", answer or "", span_pool, kept=kept_docs
         )
-        if len(targets) >= 2:
+        if len(pair_targets) >= 2:
             extra = _supplement_cited_listing_refs_from_content_lists(
                 media_roots,
                 query=query or "",
                 answer=answer or "",
-                targets=targets,
+                targets=[],
+                pair_targets=pair_targets,
                 source_hints=source_hints,
                 existing_refs=refs,
             )
@@ -5395,18 +5578,20 @@ def images_for_api(
         _is_component_listing_across_machines(query or "")
         and (answer or "").strip()
     ):
-        targets = _component_listing_span_targets(
+        span_pool = list(figure_pool or retrieved_docs or [])
+        pair_targets = _machine_component_listing_pair_targets(
             query or "",
             answer or "",
-            list(figure_pool or retrieved_docs or []),
+            span_pool,
             kept=list(retrieved_docs or []),
         )
-        if len(targets) >= 2:
+        if len(pair_targets) >= 2:
             refs = refs + _supplement_cited_listing_refs_from_content_lists(
                 media_roots,
                 query=query or "",
                 answer=answer or "",
-                targets=targets,
+                targets=[],
+                pair_targets=pair_targets,
                 source_hints=source_hints,
                 existing_refs=refs,
             )
@@ -5587,6 +5772,48 @@ def _append_content_list_image_ref(
     refs.append(ref)
 
 
+def _listing_pair_targets_missing_refs(
+    pairs: list[tuple[str, str]],
+    refs: list[dict[str, Any]],
+) -> list[tuple[str, str]]:
+    covered: set[tuple[str, str]] = set()
+    for ref in refs:
+        lab = _ref_effective_label(ref)
+        ctx = str(ref.get("context") or "")
+        for machine, target in pairs:
+            if not _ref_matches_manual_hint(ref, machine):
+                continue
+            if _label_matches_listing_target(lab, target) or _label_matches_listing_target(
+                ctx, target
+            ):
+                covered.add(
+                    (
+                        _normalize_label_key(machine),
+                        _normalize_label_key(target),
+                    )
+                )
+    return [
+        pair
+        for pair in pairs
+        if (
+            _normalize_label_key(pair[0]),
+            _normalize_label_key(pair[1]),
+        )
+        not in covered
+    ]
+
+
+def _ref_matches_manual_hint(ref: dict[str, Any], manual_hint: str) -> bool:
+    hint = (manual_hint or "").strip()
+    if not hint:
+        return True
+    blob = " ".join(
+        str(ref.get(key) or "")
+        for key in ("path", "caption", "context", "label")
+    )
+    return _doc_matches_manual_hint({"file_path": blob}, hint)
+
+
 def _listing_targets_missing_refs(
     targets: list[str],
     refs: list[dict[str, Any]],
@@ -5612,16 +5839,22 @@ def _supplement_cited_listing_refs_from_content_lists(
     targets: list[str],
     source_hints: set[str],
     existing_refs: list[dict[str, Any]],
+    pair_targets: list[tuple[str, str]] | None = None,
 ) -> list[dict[str, Any]]:
     """Phase 3.3: bounded content_list figures for cited manuals + listing targets."""
-    missing = _listing_targets_missing_refs(targets, existing_refs)
-    if not missing:
+    pairs = list(pair_targets or [])
+    if not pairs and targets:
+        pairs = [
+            (_manual_hint_for_component(t, answer), t)
+            for t in targets
+        ]
+    missing_pairs = _listing_pair_targets_missing_refs(pairs, existing_refs)
+    if not missing_pairs:
         return []
     answer_blob = _answer_body_for_citation_match(answer)
     out: list[dict[str, Any]] = []
     seen = {Path(str(ref.get("path") or "")).name for ref in existing_refs}
-    for target in missing:
-        manual_hint = _manual_hint_for_component(target, answer)
+    for manual_hint, target in missing_pairs:
         head = _listing_target_head(target)
         in_answer = head in answer_blob or target in answer_blob
         if not in_answer and not _topic_overlaps_query(target, query):
@@ -5701,7 +5934,15 @@ def _supplement_cited_listing_refs_from_content_lists(
                     )
                     break
                 if any(
-                    _label_matches_listing_target(_ref_effective_label(ref), target)
+                    _ref_matches_manual_hint(ref, manual_hint)
+                    and (
+                        _label_matches_listing_target(
+                            _ref_effective_label(ref), target
+                        )
+                        or _label_matches_listing_target(
+                            str(ref.get("context") or ""), target
+                        )
+                    )
                     for ref in out
                 ):
                     break
