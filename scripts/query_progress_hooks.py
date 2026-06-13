@@ -187,6 +187,24 @@ def finalize_inline_images(
             ]
             if multi_fig:
                 anchor_pool = _dedupe_doc_list(anchor_pool + multi_fig)
+        from image_query_refs import (  # noqa: WPS433
+            _cited_manual_hints_from_answer,
+            _doc_basename,
+            _is_component_listing_across_machines,
+            _load_figure_chunks_for_manual_paths,
+        )
+
+        if _is_component_listing_across_machines(q):
+            cited = _cited_manual_hints_from_answer(answer)
+            allowed: set[str] = set(cited)
+            for doc in cite_pool + rerank_pool + figure_pool:
+                fp = _doc_basename(doc)
+                if fp:
+                    allowed.add(fp)
+            if allowed:
+                kv_extra = _load_figure_chunks_for_manual_paths(allowed, q)
+                if kv_extra:
+                    anchor_pool = _dedupe_doc_list(anchor_pool + kv_extra)
         docs, cite_meta = filter_docs_cited_by_answer(
             answer,
             docs,
@@ -236,13 +254,14 @@ def finalize_inline_images(
         placements = build_inline_placements(
             answer,
             images_copy,
+            query=q,
             retrieved_docs=docs,
         )
         if placements:
             images = images_copy
         else:
-            images = []
-            debug["gate"] = {"ok": False, "reason": "no_inline_placements"}
+            images = images_copy
+            debug["placement_fallback"] = "gallery_no_inline_anchors"
 
     supplement = int(snap.get("llm_chunks_rerank_figure_supplement") or 0)
     if cite_meta.get("mode") == "answer_citation":
@@ -382,7 +401,33 @@ async def query_progress_hooks() -> AsyncIterator[asyncio.Queue[dict[str, str]]]
                     continue
                 fig_candidates.append((score, doc))
             fig_candidates.sort(key=lambda pair: pair[0], reverse=True)
-            _rerank_figure_pool.set([doc for _, doc in fig_candidates[:16]])
+            fig_docs = [doc for _, doc in fig_candidates[:16]]
+            try:
+                from query_doc_steering import _is_cross_manual_listing_query  # noqa: WPS433
+
+                if _is_cross_manual_listing_query(query):
+                    from image_query_refs import (  # noqa: WPS433
+                        _doc_basename,
+                        _load_figure_chunks_for_manual_paths,
+                    )
+
+                    allowed = {
+                        fp
+                        for doc in retrieved_docs or []
+                        if (fp := _doc_basename(doc))
+                    }
+                    kv_fig = _load_figure_chunks_for_manual_paths(
+                        allowed, query, max_per_manual=8
+                    )
+                    if kv_fig:
+                        seen_ids = {id(d) for d in fig_docs}
+                        for doc in kv_fig:
+                            if id(doc) not in seen_ids:
+                                fig_docs.append(doc)
+                                seen_ids.add(id(doc))
+            except Exception:
+                pass
+            _rerank_figure_pool.set(fig_docs)
         except Exception:
             _rerank_figure_pool.set([])
         return final_docs

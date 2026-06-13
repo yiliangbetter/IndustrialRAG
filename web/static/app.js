@@ -249,17 +249,38 @@ function figureHtml(img) {
 }
 
 function anchorNeedles(anchor) {
-  const bare = (anchor || "").replace(/\*\*/g, "").trim();
+  let bare = (anchor || "").replace(/\*\*/g, "").trim();
+  bare = bare.replace(/^[*\-•]\s+/, "").trim();
   const needles = [];
   if (bare) needles.push(bare);
-  const head = bare.split(/[（(]/)[0].trim();
-  if (head && head.length >= 2 && head !== bare) needles.push(head);
+  const bold = (anchor || "").match(/\*\*([^*]+)\*\*/);
+  if (bold) {
+    const term = bold[1].trim();
+    if (term.length >= 2 && !needles.includes(term)) needles.push(term);
+  }
+  const head = bare.split(/[：:（(]/)[0].trim();
+  if (head && head.length >= 2 && !needles.includes(head)) needles.push(head);
   return needles;
 }
 
-function findBlockForAnchor(root, anchor) {
+function lineAtMatchStart(rawText, matchStart) {
+  if (!rawText || matchStart == null || matchStart < 0) return "";
+  const lineStart = rawText.lastIndexOf("\n", matchStart) + 1;
+  const lineEnd = rawText.indexOf("\n", matchStart);
+  return rawText
+    .slice(lineStart, lineEnd < 0 ? rawText.length : lineEnd)
+    .trim();
+}
+
+function findBlockForAnchor(root, anchor, matchStart, rawText) {
   if (!root) return null;
+  const lineAnchor = lineAtMatchStart(rawText, matchStart);
+  const needles = [];
+  if (lineAnchor && lineAnchor.length >= 4) needles.push(lineAnchor);
   for (const needle of anchorNeedles(anchor)) {
+    if (!needles.includes(needle)) needles.push(needle);
+  }
+  for (const needle of needles) {
     const candidates = root.querySelectorAll("li, p");
     for (const el of candidates) {
       if ((el.textContent || "").includes(needle)) return el;
@@ -292,7 +313,12 @@ function applyInlineImages(ui, ev) {
   for (const pl of ordered) {
     const img = ev.images[pl.image_index];
     if (!img || !pl.anchor_text) continue;
-    const block = findBlockForAnchor(ui.answerMd, pl.anchor_text);
+    const block = findBlockForAnchor(
+      ui.answerMd,
+      pl.anchor_text,
+      pl.match_start,
+      ui.answerRaw || ""
+    );
     if (!block) continue;
     const wrapper = document.createElement("div");
     wrapper.innerHTML = figureHtml(img);
@@ -302,6 +328,10 @@ function applyInlineImages(ui, ev) {
     inserted += 1;
   }
   ui.inlineFiguresApplied = inserted > 0;
+  if (!ui.inlineFiguresApplied && ui.imagesEl && ev.images?.length) {
+    ui.imagesEl.hidden = false;
+    ui.imagesEl.innerHTML = ev.images.map(figureHtml).join("");
+  }
   scrollMessages();
 }
 

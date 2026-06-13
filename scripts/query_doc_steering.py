@@ -878,12 +878,115 @@ def supplement_query_aligned_chunks(
     return merged + rest
 
 
+def _is_cross_manual_listing_query(query: str) -> bool:
+    q = (query or "").strip()
+    if not q:
+        return False
+    return bool(
+        re.search(r"部件|零件|组件", q)
+        and re.search(r"哪些|有什么|有哪|各自|所有机型", q)
+    )
+
+
+def supplement_multi_manual_listing_chunks(
+    query: str,
+    docs: list[dict],
+    *,
+    rerank_pool: list[dict] | None = None,
+) -> list[dict]:
+    """Pre-answer: boost per-manual figure chunks for cross-manual listings (plan C)."""
+    if not _env_bool("RAG_QUERY_MULTI_MANUAL_LISTING_BOOST", True):
+        return docs
+    if not _is_cross_manual_listing_query(query):
+        return docs
+    pool = list(docs) + list(rerank_pool or [])
+    allowed_paths = {p for p in (_doc_path(d) for d in pool) if p}
+    if len(allowed_paths) < 2:
+        return docs
+    try:
+        from image_query_refs import (  # noqa: WPS433
+            _chunk_figure_context_aligns_query,
+            _chunk_subject_score,
+            _doc_basename,
+            _doc_content,
+            _term_overlap_ratio,
+            extract_image_refs_from_context,
+        )
+    except ImportError:
+        return docs
+    deny, _ = active_deny_substrings(query)
+    loaded = _load_manual_chunks_for_paths(allowed_paths, deny)
+    if not loaded:
+        return docs
+    q_terms = list(dict.fromkeys(_query_discriminative_terms(query)))
+    focus_terms = sorted(
+        {t for t in q_terms if 2 <= len(t) <= 8},
+        key=len,
+        reverse=True,
+    )
+    by_manual: dict[str, list[tuple[float, dict]]] = {}
+    for doc in loaded:
+        content = _doc_content(doc).strip()
+        if not content or not extract_image_refs_from_context(content):
+            continue
+        term_hit = focus_terms and any(term in content for term in focus_terms)
+        if q_terms and not term_hit and not _chunk_figure_context_aligns_query(
+            query, content
+        ):
+            continue
+        manual = _doc_basename(doc)
+        if not manual:
+            continue
+        score = max(
+            _term_overlap_ratio(query, content),
+            _chunk_subject_score(query, content),
+        )
+        if term_hit:
+            score = max(score, 0.2)
+        if _chunk_figure_context_aligns_query(query, content):
+            score += 0.2
+        if score < 0.08 and not term_hit:
+            continue
+        by_manual.setdefault(manual, []).append((score, doc))
+    if len(by_manual) < 2:
+        return docs
+    boost_score = _query_align_rerank_score()
+    boosted_ids: set[str] = set()
+    merged: list[dict] = []
+    for items in by_manual.values():
+        items.sort(key=lambda pair: pair[0], reverse=True)
+        for _, doc in items[:2]:
+            cid = str(doc.get("id") or "")
+            if cid in boosted_ids:
+                continue
+            boosted_ids.add(cid)
+            boosted = dict(doc)
+            boosted["rerank_score"] = max(
+                float(boosted.get("rerank_score") or 0),
+                boost_score,
+            )
+            merged.append(boosted)
+    if not merged:
+        return docs
+    rest = [d for d in docs if str(d.get("id") or "") not in boosted_ids]
+    return merged + rest
+
+
 def _stash_query_align_boost_stats(count: int) -> None:
     if count <= 0:
         return
     prev = _last_filter_report.get()
     payload = dict(prev) if isinstance(prev, dict) else {}
     payload["query_align_boost"] = {"chunks_added": count}
+    _last_filter_report.set(payload)
+
+
+def _stash_multi_manual_listing_boost_stats(count: int) -> None:
+    if count <= 0:
+        return
+    prev = _last_filter_report.get()
+    payload = dict(prev) if isinstance(prev, dict) else {}
+    payload["multi_manual_listing_boost"] = {"chunks_added": count}
     _last_filter_report.set(payload)
 
 
@@ -987,6 +1090,50 @@ def build_catalog_model_listing_prompt(query: str) -> str:
     )
 
 
+def build_maintenance_supply_listing_prompt(query: str) -> str:
+    """Q13-style: list every supply category named in manual chunks (e.g. grease types)."""
+    if not _env_bool("RAG_QUERY_MAINTENANCE_SUPPLY_LIST", True):
+        return ""
+    q = (query or "").strip()
+    if not re.search(r"季度保养|半年保养|保养", q):
+        return ""
+    if not re.search(r"几种|哪些|准备|需要", q):
+        return ""
+    if not re.search(r"润滑脂|润滑油|油品|工具|材料", q):
+        return ""
+    return (
+        "用户问保养前需准备哪些指定品类（如润滑脂等）。"
+        "须据正文列举正文已出现的全部相关品类，并说明各自适用部位；"
+        "若正文区分通用品类与专用品类，须一并列出，不得只答其一。"
+        "仅据 chunk 正文作答；References 只列实际引用的手册。"
+    )
+
+
+def build_cross_manual_listing_answer_prompt(query: str) -> str:
+    """Cross-manual part listings: group by machine, cite all manuals used."""
+    if not _is_cross_manual_listing_query(query):
+        return ""
+    extra = ""
+    if re.search(r"残胶", query):
+        extra = (
+            "仅列出正文 chunk 字面写明需清理残胶（或「老化胶水」等同类表述）的部件；"
+            "勿根据知识图谱或其它机型类推增加条目；"
+            "某机型正文无残胶清理描述时写明未提及，勿编造部件。"
+            "同一手册内各有独立「保养内容：」行的条目须各占一条 bullet、禁止合并："
+            "若正文同时出现「保养内容：涂胶轴检查清理」与「保养内容：电机检查清理」，"
+            "须分别写 **涂胶轴**（清理轴周老化胶水/残胶，对应涂胶轴保养条目）"
+            "与 **涂胶电机**（电机检查清理、含清理涂胶轴掉下残胶，对应涂胶电机保养条目），"
+            "不得只写「涂胶轴掉下的残胶」并挂在电机条目下而漏掉涂胶轴独立条。"
+            "每条格式：**部件名**：该部件/保养内容对应的残胶清理要求（一句即可）。"
+        )
+    return (
+        "跨机型列举题：按机型分组列出部件；同一部件在不同机型须分开写。"
+        "每条须能在所引用手册正文 chunk 中找到依据；"
+        "References 须列出作答时实际依据的全部机型手册。"
+        + (f" {extra}" if extra else "")
+    )
+
+
 def build_query_user_prompt(query: str) -> str:
     """Merge catalog listing + profile steering hints for LightRAG ``user_prompt``."""
     parts: list[str] = []
@@ -999,6 +1146,12 @@ def build_query_user_prompt(query: str) -> str:
     concise = build_concise_fact_answer_prompt(query)
     if concise:
         parts.append(concise)
+    supply = build_maintenance_supply_listing_prompt(query)
+    if supply:
+        parts.append(supply)
+    cross_list = build_cross_manual_listing_answer_prompt(query)
+    if cross_list:
+        parts.append(cross_list)
     steer = build_steering_user_prompt(query)
     if steer:
         parts.append(steer)
@@ -1055,6 +1208,10 @@ def install_doc_filter_on_rerank() -> None:
         docs = supplement_query_aligned_chunks(query, docs, rerank_pool=docs)
         if len(docs) > before_align:
             _stash_query_align_boost_stats(len(docs) - before_align)
+        before_multi = len(docs)
+        docs = supplement_multi_manual_listing_chunks(query, docs, rerank_pool=docs)
+        if len(docs) > before_multi:
+            _stash_multi_manual_listing_boost_stats(len(docs) - before_multi)
         kept, _report = filter_retrieved_docs_with_report(query, docs)
         return kept
 

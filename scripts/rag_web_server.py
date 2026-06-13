@@ -836,6 +836,8 @@ async def _query_stream_events(q: str, mode: str) -> AsyncIterator[str]:
                                 "placements": placements,
                             }
                         )
+                    elif related:
+                        yield _sse({"type": "related_images", "images": related})
                     dump_path = _persist_query_debug_dump(
                         query=q,
                         mode=mode,
