@@ -174,7 +174,7 @@ Query 辅助锚定 **仅允许** 在以下集合内选 chunk（优先级从高�
 | 2026-06-12 | `1d3b5f4` | Plan B + citation 扩池 + span 策略基线；全量 14/17；**本方案起点** |
 | 2026-06-12 | `4837143` | 阶段 1：query 节锚、figure 扫描 query 回退、多机型 anchor_pool / 跳过 query_aligned 过滤 |
 | 2026-06-12 | — | 阶段 1 批测：`20260612_161319_all.md` **17/17**（基线 14/17；修 Q5/Q9/Q17 配图，无 Q1–Q16 回归） |
-| 2026-06-13 | （待提交） | 轻量去硬编码：删保养 query 词表→`_pool_has_query_aligned_figure_chunks`；`封边机 in topic`→`topic in machine_names`；多候选才启用 subject_needles |
+| 2026-06-13 | `ab4ed96` | 轻量去硬编码：删保养 query 词表→`_pool_has_query_aligned_figure_chunks`；`封边机 in topic`→`topic in machine_names`；多候选才启用 subject_needles |
 | 2026-06-13 | — | 去硬编码批测：子集 `20260613_004822` **5/5**；全量 `20260613_010606` **15/17** |
 | （待填） | — | 阶段 2：span 收敛 |
 | （待填） | — | 阶段 3：Q17 跨手册 |
