@@ -404,10 +404,145 @@ def _answer_image_span_targets(query: str, answer: str) -> list[str]:
             return machines
     if len(components) >= 2:
         return components
-    spans = _answer_listing_spans(answer)
+    spans = _answer_listing_spans(_answer_primary_listing_body(answer))
     if len(spans) >= 2:
         return spans
     return _answer_section_topics(answer)
+
+
+def _order_listing_targets_by_hints(
+    targets: list[str],
+    hints: list[str],
+) -> list[str]:
+    """Reorder pool-derived listing targets using answer item order as a hint only."""
+    if not targets or not hints:
+        return targets
+    ordered: list[str] = []
+    used: set[str] = set()
+    for hint in hints:
+        head = _listing_target_head(hint)
+        hint_key = _normalize_label_key(head)
+        for topic in targets:
+            tkey = _normalize_label_key(topic)
+            if tkey in used:
+                continue
+            if (
+                hint_key in tkey
+                or tkey in hint_key
+                or _label_matches_listing_target(topic, head)
+                or _label_matches_listing_target(head, topic)
+            ):
+                ordered.append(topic)
+                used.add(tkey)
+    for topic in targets:
+        tkey = _normalize_label_key(topic)
+        if tkey not in used:
+            ordered.append(topic)
+    return ordered
+
+
+def _topic_has_figure_support_in_pool(
+    topic: str,
+    pool: list[dict[str, Any]],
+) -> bool:
+    for doc in pool:
+        content = _doc_content(doc).strip()
+        if not content or not extract_image_refs_from_context(content):
+            continue
+        labels = [
+            lab
+            for ref in extract_image_refs_from_context(content)
+            if (lab := _ref_effective_label(ref))
+        ]
+        if any(_label_matches_listing_target(lab, topic) for lab in labels):
+            return True
+        if _chunk_matches_answer_topic(content, topic):
+            return True
+    return False
+
+
+def _topic_supported_by_kept_chunks(
+    topic: str,
+    kept: list[dict[str, Any]],
+) -> bool:
+    for doc in kept:
+        content = _doc_content(doc).strip()
+        if not content:
+            continue
+        if topic in content or _chunk_matches_answer_topic(content, topic):
+            return True
+        for ref in extract_image_refs_from_context(content):
+            lab = _ref_effective_label(ref)
+            if lab and _label_matches_listing_target(lab, topic):
+                return True
+    return False
+
+
+def _listing_topics_from_pool(
+    query: str,
+    pool: list[dict[str, Any]],
+) -> list[str]:
+    """``保养内容：`` topics and figure labels in pool that overlap the query."""
+    q = (query or "").strip()
+    if not q or not pool:
+        return []
+    pool_text = text_from_retrieved_docs(pool)
+    topics: list[str] = []
+    seen: set[str] = set()
+
+    def add(topic: str) -> None:
+        topic = topic.strip()
+        if len(topic) < 4:
+            return
+        key = _normalize_label_key(topic)
+        if key in seen:
+            return
+        seen.add(key)
+        topics.append(topic)
+
+    for topic in _maintenance_topics_in_text(pool_text, q):
+        add(topic)
+    for doc in pool:
+        content = _doc_content(doc).strip()
+        for ref in extract_image_refs_from_context(content):
+            lab = _ref_effective_label(ref)
+            if lab and len(lab) >= 4 and _topic_overlaps_query(lab, q):
+                add(lab)
+    return [t for t in topics if _topic_has_figure_support_in_pool(t, pool)]
+
+
+def _span_keep_listing_targets(
+    query: str,
+    answer: str,
+    pool: list[dict[str, Any]],
+    *,
+    kept: list[dict[str, Any]] | None = None,
+) -> list[str]:
+    """Span targets for span_keep: pool/query maintenance entries first; answer bold for order."""
+    q = (query or "").strip()
+    kept_docs = list(kept or [])
+    if _is_multi_machine_comparison_query(q) and not _is_component_listing_across_machines(
+        q
+    ):
+        machines = _machine_spans_from_answer(answer)
+        if len(machines) >= 2:
+            return machines
+    if _is_listing_scope_query(q) and not _is_catalog_or_model_listing_query(q):
+        topics = _listing_topics_from_pool(q, pool)
+        if kept_docs:
+            anchored = [
+                t for t in topics if _topic_supported_by_kept_chunks(t, kept_docs)
+            ]
+            if len(anchored) >= 2:
+                topics = anchored
+        if len(topics) >= 2:
+            hints = _component_spans_from_answer(answer)
+            if len(hints) < 2:
+                hints = _answer_listing_spans(_answer_primary_listing_body(answer))
+            if len(hints) >= 2:
+                topics = _order_listing_targets_by_hints(topics, hints)
+            return topics[:12]
+    return _answer_image_span_targets(q, answer)
 
 
 def _listing_mode_active(query: str, listing_targets: list[str]) -> bool:
@@ -436,9 +571,12 @@ def _listing_target_phrases(query: str, retrieved_text: str) -> list[str]:
     if _is_listing_scope_query(query):
         answer = _answer_text_for_listing()
         if answer:
-            spans = _answer_listing_spans(answer)
-            if len(spans) >= 2:
-                return spans[:12]
+            hints = _component_spans_from_answer(answer)
+            if len(hints) < 2:
+                hints = _answer_listing_spans(_answer_primary_listing_body(answer))
+            pool_topics = _maintenance_topics_in_text(text, query)
+            if len(pool_topics) >= 2:
+                return _order_listing_targets_by_hints(pool_topics, hints)[:12]
 
     for topic in _maintenance_topics_in_text(text, query):
         add(topic)
@@ -493,7 +631,9 @@ def _listing_targets_with_query_line_overlap(
     focus_norm = normalize_context_for_image_parse(focus)
     answer = _answer_text_for_listing()
     if _is_listing_scope_query(query) and answer:
-        bold = _answer_listing_spans(answer)
+        bold = _component_spans_from_answer(answer)
+        if len(bold) < 2:
+            bold = _answer_listing_spans(_answer_primary_listing_body(answer))
         if len(bold) >= 2:
             return bold
 
@@ -2167,7 +2307,9 @@ def _supplement_answer_topic_figure_chunks(
     query: str | None = None,
 ) -> list[dict[str, Any]]:
     """Add one inline-figure chunk per answer component topic from the search pool."""
-    topics = _answer_image_span_targets(query or "", answer)
+    topics = _span_keep_listing_targets(
+        query or "", answer, pool, kept=kept
+    )
     if len(topics) < 2:
         return kept
     answer_blob = _answer_body_for_citation_match(answer)
@@ -2561,7 +2703,12 @@ def filter_docs_cited_by_answer(
             "answer_span_keep_only" if span_keep else "pending_query_section_anchor"
         )
     if span_keep:
-        answer_spans = _answer_image_span_targets(query or "", answer)
+        answer_spans = _span_keep_listing_targets(
+            query or "",
+            answer,
+            pool_for_spans,
+            kept=kept,
+        )
         if len(answer_spans) >= 2:
             kept_ids = {id(doc) for doc in kept}
             for span in answer_spans:
