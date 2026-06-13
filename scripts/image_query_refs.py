@@ -1329,6 +1329,59 @@ def _answer_weak_consistency_gate(answer_blob: str, content: str) -> bool:
     return text_term_alignment_symmetric(answer_blob, content) >= 0.12
 
 
+def _pool_has_query_aligned_figure_chunks(
+    query: str,
+    pool: list[dict[str, Any]],
+    *,
+    answer: str | None = None,
+    require_answer_gate: bool = False,
+) -> bool:
+    """Pool has inline figures aligned to query; optional answer weak-consistency."""
+    return bool(
+        _query_aligned_figure_candidate_docs(
+            query,
+            pool,
+            answer=answer,
+            require_answer_gate=require_answer_gate,
+        )
+    )
+
+
+def _query_aligned_figure_candidate_docs(
+    query: str,
+    pool: list[dict[str, Any]],
+    *,
+    answer: str | None = None,
+    require_answer_gate: bool = False,
+) -> list[dict[str, Any]]:
+    q = (query or "").strip()
+    if not q:
+        return []
+    answer_blob = (
+        _answer_body_for_citation_match(answer or "") if require_answer_gate else ""
+    )
+    if require_answer_gate and not answer_blob.strip():
+        return []
+    out: list[dict[str, Any]] = []
+    for doc in pool:
+        content = _doc_content(doc).strip()
+        if (
+            not content
+            or _chunk_is_toc_heavy(content)
+            or _chunk_is_title_only(content)
+            or not extract_image_refs_from_context(content)
+        ):
+            continue
+        if not _chunk_figure_context_aligns_query(q, content):
+            continue
+        if require_answer_gate and not _answer_weak_consistency_gate(
+            answer_blob, content
+        ):
+            continue
+        out.append(doc)
+    return out
+
+
 def _chunk_query_section_score(
     query: str,
     content: str,
@@ -1385,11 +1438,8 @@ def _anchor_chunks_by_query_section(
     if re.search(r"开机前", q) and not _is_listing_scope_query(q):
         meta["reason"] = "preflight_query"
         return out, meta
-    if not re.search(
-        r"清理|残胶|润滑|保养|油量|液压油|工具|步骤|周期|清洁|涂胶|电控|注油",
-        q,
-    ):
-        meta["reason"] = "no_procedure_figure_query"
+    if not _pool_has_query_aligned_figure_chunks(q, pool):
+        meta["reason"] = "no_query_aligned_figure_in_pool"
         return out, meta
     anchor_sections = _pick_anchor_sections(q, pool_primary, pool)
     meta["anchor_sections"] = anchor_sections
@@ -1398,6 +1448,10 @@ def _anchor_chunks_by_query_section(
     best_score = 0.0
     min_score = _query_section_anchor_min_score()
     subject_needles = [n for n in _query_subject_needles(q) if len(n) >= 4]
+    align_candidates = _query_aligned_figure_candidate_docs(
+        q, pool, answer=answer, require_answer_gate=True
+    )
+    needles_required = len(align_candidates) > 1
 
     for doc in pool:
         content = _doc_content(doc).strip()
@@ -1410,7 +1464,11 @@ def _anchor_chunks_by_query_section(
             continue
         if not _answer_weak_consistency_gate(answer_blob, content):
             continue
-        if subject_needles and not any(needle in content for needle in subject_needles):
+        if (
+            needles_required
+            and subject_needles
+            and not any(needle in content for needle in subject_needles)
+        ):
             continue
         if not _chunk_figure_context_aligns_query(q, content):
             continue
@@ -1441,8 +1499,12 @@ def _anchor_chunks_by_query_section(
                 or not _answer_weak_consistency_gate(answer_blob, content)
             ):
                 continue
-            if subject_needles and not any(
-                needle in content for needle in subject_needles
+            if (
+                needles_required
+                and subject_needles
+                and not any(
+                    needle in content for needle in subject_needles
+                )
             ):
                 continue
             score = _chunk_subject_score(q, content)
@@ -1756,13 +1818,14 @@ def _figure_context_from_answer_docs(
     min_cite = 0.12
     q = (query or "").strip()
     machines = _machine_spans_from_answer(answer)
+    machine_names = set(machines)
     multi_machine = _is_multi_machine_comparison_query(q) and len(machines) >= 2
     seen_parts: set[str] = set()
 
     def _topic_matches_chunk(topic: str, content: str, doc: dict[str, Any]) -> bool:
         if _chunk_matches_answer_topic(content, topic):
             return True
-        if multi_machine and "封边机" in topic:
+        if multi_machine and topic in machine_names:
             manual = _doc_basename(doc)
             return bool(manual and topic in manual)
         return False
@@ -1834,22 +1897,13 @@ def _figure_context_from_answer_docs(
                     best_score = score
                     best_content = content
             _add_part(best_content)
-    _procedure_q = bool(
-        q
-        and re.search(
-            r"清理|残胶|润滑|保养|油量|液压油|工具|步骤|周期|清洁|涂胶|注油",
-            q,
-        )
-    )
     query_aligned = [p for p in parts if _chunk_figure_context_aligns_query(q, p)]
     if (
-        _procedure_q
-        and not query_aligned
+        not query_aligned
         and not _is_listing_scope_query(q)
         and not multi_machine
     ):
-        parts = []
-        seen_parts = set()
+        replacement = ""
         for doc in docs:
             content = _doc_content(doc).strip()
             if not content or not extract_image_refs_from_context(content):
@@ -1861,8 +1915,12 @@ def _figure_context_from_answer_docs(
                 or _chunk_citation_score(body, content) >= min_cite
             ):
                 continue
-            _add_part(content)
+            replacement = content
             break
+        if replacement:
+            parts = []
+            seen_parts = set()
+            _add_part(replacement)
 
     meta["anchor_chunks"] = len(parts)
     meta["anchor_chars"] = sum(len(p) for p in parts)
@@ -2076,7 +2134,7 @@ def _supplement_query_topic_figure_chunks(
     if kept or _is_listing_scope_query(query):
         return kept
     q = (query or "").strip()
-    if not q or not re.search(r"保养|清洁|清理|残胶|润滑|检查|更换|步骤|周期|工具|加注", q):
+    if not q or not _pool_has_query_aligned_figure_chunks(q, pool):
         return kept
     best_doc: dict[str, Any] | None = None
     best_score = 0.0
@@ -2113,6 +2171,7 @@ def _supplement_answer_topic_figure_chunks(
     if len(topics) < 2:
         return kept
     answer_blob = _answer_body_for_citation_match(answer)
+    machine_names = set(_machine_spans_from_answer(answer))
     out = list(kept)
     kept_ids = {id(doc) for doc in out}
     for topic in topics:
@@ -2139,7 +2198,7 @@ def _supplement_answer_topic_figure_chunks(
             manual = _doc_basename(doc)
             machine_match = (
                 _is_multi_machine_comparison_query(query or "")
-                and "封边机" in topic
+                and topic in machine_names
                 and bool(manual and topic in manual)
             )
             if not topic_match and not label_hit and not machine_match:
