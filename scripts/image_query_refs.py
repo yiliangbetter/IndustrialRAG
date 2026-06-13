@@ -6131,7 +6131,7 @@ def explain_retrieval_supports_images(
     scan_for_gate = primary
     if (answer or "").strip() and retrieved_docs:
         scan_for_gate, _topic_meta = _figure_context_from_answer_docs(
-            answer, list(retrieved_docs or [])
+            answer, list(retrieved_docs or []), query=q
         )
     if not _eligible_figure_refs(scan_for_gate):
         return {
