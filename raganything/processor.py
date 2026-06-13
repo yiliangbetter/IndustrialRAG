@@ -2006,8 +2006,21 @@ class ProcessorMixin:
             if doc_id is None:
                 doc_id = content_based_doc_id
 
+            normalized_content_list = self._normalize_nested_content_list(content_list)
+
             # Step 2: Separate text and multimodal content
-            text_content, multimodal_items = separate_content(content_list)
+            text_content, multimodal_items = separate_content(normalized_content_list)
+            if not text_content.strip():
+                text_content = self._plaintext_from_mineru_blocks(
+                    normalized_content_list
+                )
+            if not text_content.strip():
+                text_parts = []
+                for item in normalized_content_list:
+                    candidate = item.get("text")
+                    if isinstance(candidate, str) and candidate.strip():
+                        text_parts.append(candidate.strip())
+                text_content = "\n\n".join(text_parts)
 
             # Step 2.5: Set content source for context extraction in multimodal processing
             if hasattr(self, "set_content_source_for_context") and multimodal_items:
@@ -2015,7 +2028,7 @@ class ProcessorMixin:
                     "Setting content source for context-aware multimodal processing..."
                 )
                 self.set_content_source_for_context(
-                    content_list, self.config.content_format
+                    normalized_content_list, self.config.content_format
                 )
 
             # Step 3: Insert pure text content and multimodal content with all parameters
