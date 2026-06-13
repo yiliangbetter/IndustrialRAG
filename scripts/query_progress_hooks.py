@@ -167,6 +167,8 @@ def finalize_inline_images(
         return {**empty, "debug": debug}
 
     docs_before_cite = list(docs)
+    cite_pool = list(docs_before_cite)
+    anchor_pool = list(docs_before_cite)
     cite_meta: dict[str, Any] = {}
     if answer:
         cite_pool = list(docs_before_cite)
@@ -214,6 +216,7 @@ def finalize_inline_images(
         roots,
         query=q,
         retrieved_docs=docs,
+        figure_pool=anchor_pool,
         limit=limit,
         answer=answer or None,
     )

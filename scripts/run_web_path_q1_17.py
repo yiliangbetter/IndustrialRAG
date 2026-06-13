@@ -11,7 +11,7 @@ import os
 import re
 import sys
 import time
-from datetime import datetime, timezone
+from datetime import datetime
 from pathlib import Path
 from urllib.parse import parse_qs, urlparse
 
@@ -448,7 +448,7 @@ def write_report(
     lines = [
         f"# Web 路径批测（{ids_label}）",
         "",
-        f"- 时间：{datetime.now(timezone.utc).isoformat()}",
+        f"- 时间：{datetime.now().astimezone().isoformat()}",
         f"- 模式：{mode}",
         f"- 工作目录：`{wd}`",
         f"- 媒体根：`{media_root}`",
@@ -582,7 +582,7 @@ def main() -> None:
     label = ", ".join(f"Q{i}" for i in ids)
     print(f"Running {label} web path, wd={wd}", flush=True)
     rows = asyncio.run(run_cases(ids, mode=mode, wd=wd, pod=pod))
-    stamp = datetime.now(timezone.utc).strftime("%Y%m%d_%H%M%S")
+    stamp = datetime.now().astimezone().strftime("%Y%m%d_%H%M%S")
     report_dir = _ROOT / "logs" / "web_path_q1_17"
     report_dir.mkdir(parents=True, exist_ok=True)
     suffix = f"q{'_'.join(str(i) for i in ids)}" if len(ids) < 17 else "all"
