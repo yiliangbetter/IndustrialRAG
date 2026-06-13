@@ -167,6 +167,7 @@ async def test_async_main_returns_0_on_successful_ingest(bicl, monkeypatch, tmp_
     call = mock_rag.insert_content_list.await_args
     assert call.args[0] == [{"type": "text", "text": "hello"}]
     assert call.kwargs.get("file_path", "").endswith("doc_content_list_v2.json")
+    mock_rag.finalize_storages.assert_awaited_once()
 
 
 @pytest.mark.asyncio
