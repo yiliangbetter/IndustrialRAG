@@ -30,7 +30,7 @@ git revert <later-commits>
 
 | 项 | 内容 |
 |----|------|
-| **Git commit** | （提交后填入） |
+| **Git commit** | `4837143` — `feat(images): phase 1 query-section anchor for terse-answer figures` |
 | **批测结果** | 全量 Q1–Q17：**17/17**；报告 `logs/web_path_q1_17/20260612_161319_all.md` |
 | **相对基线** | 修 Q5/Q9/Q17 配图；Q1–Q16 无回归 |
 | **主要改动** | `_anchor_chunks_by_query_section`、`cite_pool`/`anchor_pool` 分离、`figure_pool`、`_figure_context_from_answer_docs` query 回退、多机型手册名 span |
@@ -170,7 +170,7 @@ Query 辅助锚定 **仅允许** 在以下集合内选 chunk（优先级从高�
 | 日期 | Commit | 说明 |
 |------|--------|------|
 | 2026-06-12 | `1d3b5f4` | Plan B + citation 扩池 + span 策略基线；全量 14/17；**本方案起点** |
-| 2026-06-12 | （待提交） | 阶段 1：query 节锚、figure 扫描 query 回退、多机型 anchor_pool / 跳过 query_aligned 过滤 |
+| 2026-06-12 | `4837143` | 阶段 1：query 节锚、figure 扫描 query 回退、多机型 anchor_pool / 跳过 query_aligned 过滤 |
 | 2026-06-12 | — | 阶段 1 批测：`20260612_161319_all.md` **17/17**（基线 14/17；修 Q5/Q9/Q17 配图，无 Q1–Q16 回归） |
 | （待填） | — | 阶段 2：span 收敛 |
 | （待填） | — | 阶段 3：Q17 跨手册 |
