@@ -89,7 +89,20 @@ git revert <phase-A-commit>
 | **收敛** | `findInsertPointForPlacement` | offset 优先；失败再 `findBlockForAnchor` 兜底 |
 | **收敛** | `applyInlineImages` | 只调 `findInsertPointForPlacement` |
 
-**不改**：`image_query_refs.py` 及 placement 产出逻辑。
+**不改**（阶段 B 初版）：`image_query_refs.py` 及 placement 产出逻辑。
+
+**后续（tag `OK0614_no_clarify`）**：后端 placement 与前端贴图均有增量修复，见下方 Checkpoint C。
+
+---
+
+## Checkpoint C（Q3/Q4/Q11 回归 · 2026-06-14）
+
+| 项 | 内容 |
+|----|------|
+| **Git tag** | `OK0614_no_clarify`（commit `fe9bf94`） |
+| **后端** | 周期/步骤 query 门控；`_cycle_caption_block_placement`；Q11 单手册列举 |
+| **前端** | `insertFigureAfterAnchor` 段落级插入；三层兜底 |
+| **验收** | Q3/Q4/Q11 dump replay + Web 手测 Q3 |
 
 ---
 
@@ -121,6 +134,9 @@ python scripts/replay_placement_dumps.py --glob "*残胶*"
 |------|------|
 | Q15 | ≥4 placement；含高速智能；`anchor_text` 为整行 |
 | Q16 | 3 placement；无 bullet dump 与有 bullet dump 均整行锚点 |
+| Q11 | 3 placement；压带轮/仿形靠板/涂胶轴各 1；涂胶电机可选 |
+| Q3 | 周期短答：整段或 bullet 锚点；非括号内子串 |
+| Q4 | 步骤题：首条编号步骤或 query 主题配对；非段首导语 |
 | Q17 | 每 (机型, 部件) 1 placement；高速智能 3 部件不抢图 |
 
 ### 2. Web 批测
@@ -162,7 +178,8 @@ python scripts/run_web_path_q1_17.py
 
 ## 实施记录
 
-| 日期 | 内容 | commit |
-|------|------|--------|
+| 日期 | 内容 | commit / tag |
+|------|------|----------------|
 | 2026-06-14 | 文档创建 | — |
 | 2026-06-14 | 阶段 B：Web `match_start` 偏移优先插入 | `625af82` |
+| 2026-06-14 | Q3/Q4 周期·步骤 placement + Web 块级插入兜底 | `OK0614_no_clarify` |
