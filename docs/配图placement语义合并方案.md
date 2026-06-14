@@ -133,4 +133,4 @@ python scripts/run_web_path_q1_17.py
 | 日期 | 内容 | commit |
 |------|------|--------|
 | 2026-06-14 | 文档创建 | — |
-| 2026-06-14 | 阶段 A 实施：`_answer_logic_lines`、`_build_semantic_inline_placements`、`replay_placement_dumps.py`；`build_inline_placements` 单路径 | （本 commit） |
+| 2026-06-14 | 阶段 A 实施：`_answer_logic_lines`、`_build_semantic_inline_placements`、`replay_placement_dumps.py`；`build_inline_placements` 单路径 | `b0590cc` |
