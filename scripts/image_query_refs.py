@@ -59,6 +59,7 @@ _SECTION_HEADING_RE = re.compile(r"^[\d\.]+\s*\S")
 _SECTION_NUM_RE = re.compile(r"^(\d+(?:\.\d+)*)")
 # Ingest / manual section templates (document structure, not product vocabulary).
 _GENERIC_CYCLE_LABEL_RE = re.compile(r"^保养周期[：:].+$")
+_MAINT_CYCLE_VALUE_RE = re.compile(r"^每.{1,16}(?:一次|保养一次|/次|一遍)$")
 
 try:
     from query_doc_steering import (  # noqa: WPS433
@@ -549,6 +550,42 @@ def _cited_manual_hints_from_answer(answer: str) -> set[str]:
     return {h for h in hints if h and len(h) >= 4}
 
 
+def _cited_manual_pdf_stems(answer: str) -> list[str]:
+    """Distinct PDF stems from answer References (one entry per cited manual)."""
+    text = (answer or "").strip()
+    if not text:
+        return []
+    parts = re.split(r"\n###\s*References\b", text, maxsplit=1, flags=re.I)
+    ref_blob = parts[1] if len(parts) > 1 else ""
+    stems: list[str] = []
+    seen: set[str] = set()
+    for match in _REF_LINE_RE.finditer(ref_blob):
+        title = match.group(2).strip()
+        if not title:
+            continue
+        stem = title.split(".pdf")[0].split(".PDF")[0].strip()
+        key = re.sub(r"\s+", "", stem)
+        if key and key not in seen:
+            seen.add(key)
+            stems.append(stem)
+    return stems
+
+
+def _should_expand_cited_manual_kv_pool(query: str, answer: str) -> bool:
+    """True when answer cites multiple manuals and likely needs per-manual figures."""
+    if len(_cited_manual_pdf_stems(answer)) < 2:
+        return False
+    if len(_machine_spans_from_answer(answer)) >= 2:
+        return True
+    if _is_component_listing_across_machines(query or ""):
+        return True
+    if _is_multi_machine_comparison_query(query or ""):
+        return True
+    if _answer_has_multi_section_markdown(answer):
+        return True
+    return False
+
+
 def _source_hints_for_images(
     query: str,
     answer: str | None,
@@ -603,6 +640,15 @@ _COMPONENT_FIELD_KEYS = frozenset(
 def _is_answer_structural_label(span: str) -> bool:
     """Answer-template field names (cross-manual listing prompts), not figure subjects."""
     return _normalize_label_key(span) in _ANSWER_STRUCTURAL_LABEL_KEYS
+
+
+def _is_maintenance_cycle_value(span: str) -> bool:
+    """Answer cadence phrases (每季度一次), not maintainable components."""
+    span = (span or "").strip()
+    if not span:
+        return False
+    compact = re.sub(r"\s+", "", span)
+    return bool(_MAINT_CYCLE_VALUE_RE.match(span) or _MAINT_CYCLE_VALUE_RE.match(compact))
 
 
 def _pair_component_spans_from_answer(answer: str, *, query: str = "") -> list[str]:
@@ -696,6 +742,7 @@ def _components_from_machine_line_value(value: str, query: str) -> list[str]:
             not comp
             or _machine_from_section_title(comp)
             or _is_answer_structural_label(comp)
+            or _is_maintenance_cycle_value(comp)
             or _is_query_subject_echo(comp, query)
         ):
             return
@@ -708,7 +755,7 @@ def _components_from_machine_line_value(value: str, query: str) -> list[str]:
     for pat in _MACHINE_LINE_COMPONENT_PATTERNS:
         for match in re.finditer(pat, value):
             add(match.group(1))
-    if not out:
+    if not out and "保养周期" not in value:
         for extra in re.findall(r"\*\*([^*]+)\*\*", value):
             add(extra)
     return out
@@ -749,6 +796,44 @@ def _machine_component_targets_from_answer(
             if machine:
                 current_machine = machine
             continue
+        standalone_machine = re.match(r"^\*\*(?:\d+\.\s*)?([^*]+)\*\*\s*$", line)
+        if standalone_machine:
+            machine = _machine_from_section_title(standalone_machine.group(1).strip())
+            if machine:
+                current_machine = machine
+            continue
+        bare_field_match = re.match(
+            r"^\s*\*\*([^*]+)\*\*[：:]\s*(.+)$",
+            line,
+        )
+        if bare_field_match:
+            field_name = bare_field_match.group(1).strip()
+            value = bare_field_match.group(2).strip()
+            machine = _machine_from_section_title(field_name)
+            if machine:
+                inline_added = False
+                for comp in _components_from_machine_line_value(value, q):
+                    pairs.append((machine, comp))
+                    inline_added = True
+                if not inline_added and "**" not in value:
+                    plain = re.sub(r"\*\*([^*]+)\*\*", r"\1", value)
+                    plain = plain.strip().rstrip("。")
+                    plain = re.split(r"[（(]", plain, maxsplit=1)[0].strip()
+                    if (
+                        plain
+                        and len(plain) <= 32
+                        and not _is_query_subject_echo(plain, q)
+                    ):
+                        comp = _listing_target_head(plain)
+                        if (
+                            comp
+                            and not _machine_from_section_title(comp)
+                            and not _is_answer_structural_label(comp)
+                            and not _is_maintenance_cycle_value(comp)
+                            and not _is_query_subject_echo(comp, q)
+                        ):
+                            pairs.append((machine, comp))
+                continue
         prefix_match = re.match(r"^\*\*(?:\d+\.\s*)?([^*]+)\*\*", line)
         if prefix_match:
             machine = _machine_from_section_title(prefix_match.group(1).strip())
@@ -961,6 +1046,8 @@ def _filter_cross_listing_pair_targets(
         comp = _listing_target_head(comp)
         if not machine or not comp or _is_answer_structural_label(comp):
             continue
+        if _is_maintenance_cycle_value(comp):
+            continue
         if _is_query_subject_echo(comp, query):
             continue
         if cited and not any(
@@ -1013,24 +1100,17 @@ def _manual_hint_for_component(
     return ""
 
 
-def _normalize_machine_alias(name: str) -> str:
-    if name == "高速智能封边机":
-        return "高速自动封边机"
-    return name
-
-
 def _resolve_known_machine_name(text: str) -> str:
     """Longest known machine name in *text* (avoids 自动封边机 ⊂ 高速自动封边机 false positives)."""
     blob = (text or "").strip()
     if not blob:
         return ""
     compact = re.sub(r"\s+", "", blob)
-    best = ""
     for name in sorted(_KNOWN_MACHINE_NAMES, key=len, reverse=True):
         nc = re.sub(r"\s+", "", name)
         if nc in compact or name in blob:
-            return _normalize_machine_alias(name)
-    return best
+            return name
+    return ""
 
 
 def _source_hint_matches_doc(hint: str, doc_hint: str) -> bool:
@@ -1041,8 +1121,15 @@ def _source_hint_matches_doc(hint: str, doc_hint: str) -> bool:
         return False
     hint_compact = re.sub(r"\s+", "", hint)
     doc_compact = re.sub(r"\s+", "", doc_hint)
-    hint_machine = _normalize_machine_alias(_resolve_known_machine_name(hint))
-    doc_machine = _normalize_machine_alias(_resolve_known_machine_name(doc_hint))
+    if "高速智能" in hint_compact and "高速自动" in doc_compact and "高速智能" not in doc_compact:
+        return False
+    if "高速自动" in hint_compact and "高速智能" in doc_compact and "高速自动" not in doc_compact:
+        return False
+    if hint_compact in ("自动封边机", "自动封边") or hint == "自动封边机":
+        if "高速自动" in doc_compact or "高速智能" in doc_compact:
+            return False
+    hint_machine = _resolve_known_machine_name(hint)
+    doc_machine = _resolve_known_machine_name(doc_hint)
     if hint_machine and doc_machine:
         return hint_machine == doc_machine
     if hint_machine:
@@ -1065,8 +1152,15 @@ def _doc_matches_manual_hint(doc: dict[str, Any], manual_hint: str) -> bool:
     hint_compact = re.sub(r"\s+", "", hint)
     if not fp_compact:
         return False
-    hint_machine = _normalize_machine_alias(_resolve_known_machine_name(hint))
-    fp_machine = _normalize_machine_alias(_resolve_known_machine_name(fp))
+    if "高速智能" in hint_compact and "高速自动" in fp_compact and "高速智能" not in fp_compact:
+        return False
+    if "高速自动" in hint_compact and "高速智能" in fp_compact and "高速自动" not in fp_compact:
+        return False
+    if hint_compact in ("自动封边机", "自动封边") or hint == "自动封边机":
+        if "高速自动" in fp_compact or "高速智能" in fp_compact:
+            return False
+    hint_machine = _resolve_known_machine_name(hint)
+    fp_machine = _resolve_known_machine_name(fp)
     if hint_machine and fp_machine:
         return hint_machine == fp_machine
     if hint_machine:
@@ -3718,7 +3812,7 @@ def filter_docs_cited_by_answer(
         list(anchor_pool or pool or docs or [])
     )
     pool_for_spans = section_pool
-    if _is_component_listing_across_machines(query or ""):
+    if _should_expand_cited_manual_kv_pool(query or "", answer):
         cited_early = _cited_manual_hints_from_answer(answer)
         allowed: set[str] = set(cited_early)
         for doc in section_pool:
@@ -4341,6 +4435,84 @@ def _section_matches_source(title: str, source_key: str) -> bool:
     return text_term_alignment_symmetric(title, source_key) >= 0.28
 
 
+def _machine_bullet_subject(line: str) -> str:
+    """Topic phrase from a ``- **机型**：…保养周期…`` answer bullet."""
+    m = re.match(r"^[-*•]\s*\*\*[^*]+\*\*[：:]\s*(.+)$", (line or "").strip())
+    if not m:
+        return ""
+    tail = re.split(r"保养周期", m.group(1), maxsplit=1)[0].strip()
+    tail = re.sub(r"\*\*([^*]+)\*\*", r"\1", tail).strip().rstrip("。")
+    tail = re.split(r"[（(]", tail, maxsplit=1)[0].strip()
+    return _listing_target_head(tail)
+
+
+def _build_machine_bullet_manual_placements(
+    answer: str,
+    images: list[dict[str, Any]],
+    min_score: float,
+) -> list[dict[str, Any]]:
+    """Pair each machine-named bullet with a figure from the cited manual (Q15-style)."""
+    body = _answer_text_for_placement(answer)
+    placements: list[dict[str, Any]] = []
+    used_indices: set[int] = set()
+    used_ranges: list[tuple[int, int]] = []
+
+    for raw_line in body.splitlines():
+        line = raw_line.strip()
+        bullet = re.match(r"^[-*•]\s*\*\*([^*]+)\*\*[：:].+$", line)
+        if not bullet:
+            continue
+        machine = _machine_from_section_title(bullet.group(1).strip())
+        if not machine:
+            continue
+        start = body.find(line)
+        if start < 0:
+            continue
+        end = start + len(line)
+        span_score = min(1.0, 0.85 + 0.15 * min(1.0, len(machine) / 12.0))
+        if span_score < min_score:
+            continue
+        subject = _machine_bullet_subject(line)
+        best_idx = -1
+        best_align = -1.0
+        for idx, img in enumerate(images):
+            if idx in used_indices:
+                continue
+            if not _ref_matches_manual_hint(img, machine):
+                continue
+            caption = str(img.get("caption") or "").strip()
+            align = 0.35
+            if subject and caption:
+                align = max(
+                    align,
+                    text_term_alignment_symmetric(subject, caption),
+                )
+                if _label_matches_listing_target(caption, subject):
+                    align = max(align, 1.0)
+            if align > best_align:
+                best_align = align
+                best_idx = idx
+        if best_idx < 0:
+            continue
+        overlap = any(not (end <= u0 or start >= u1) for u0, u1 in used_ranges)
+        if overlap:
+            continue
+        used_indices.add(best_idx)
+        used_ranges.append((start, end))
+        placements.append(
+            {
+                "anchor_text": line,
+                "match_start": start,
+                "match_end": end,
+                "image_index": best_idx,
+                "score": round(span_score, 3),
+            }
+        )
+
+    placements.sort(key=lambda item: item["match_start"])
+    return placements
+
+
 def _build_cross_manual_inline_placements(
     answer: str,
     images: list[dict[str, Any]],
@@ -4399,7 +4571,11 @@ def build_inline_placements(
     pair_targets = _machine_component_listing_pair_targets(
         query or "", answer, list(retrieved_docs or [])
     )
-    if len(pair_targets) >= 2 and len({m for m, _ in pair_targets}) >= 2:
+    if (
+        len(pair_targets) >= 2
+        and len({m for m, _ in pair_targets}) >= 2
+        and _is_component_listing_across_machines(query or "")
+    ):
         pair_placements = _build_machine_component_inline_placements(
             answer, images, pair_targets, min_score
         )
@@ -4407,6 +4583,13 @@ def build_inline_placements(
             return _apply_placement_reindex(
                 images, pair_placements, keep_unplaced=True
             )
+    machine_bullet_placements = _build_machine_bullet_manual_placements(
+        answer, images, min_score
+    )
+    if len(machine_bullet_placements) >= 2:
+        return _apply_placement_reindex(
+            images, machine_bullet_placements, keep_unplaced=True
+        )
     source_keys = {
         sk
         for sk in (_source_key_from_image(img) for img in images)
@@ -6281,15 +6464,16 @@ def explain_query_images(
     )
 
     refs = from_context
-    if (
-        _is_component_listing_across_machines(query or "")
-        and (answer or "").strip()
-    ):
+    if _should_expand_cited_manual_kv_pool(query or "", answer or ""):
         span_pool = _expand_pool_with_cited_manual_figure_chunks(
             list(span_pool),
             _cited_manual_hints_from_answer(answer or ""),
             query or "",
         )
+    if (
+        _is_component_listing_across_machines(query or "")
+        and (answer or "").strip()
+    ):
         pair_targets = _machine_component_listing_pair_targets(
             query or "", answer or "", span_pool, kept=kept_docs
         )
@@ -6426,6 +6610,7 @@ def images_for_api(
         logger.info("Skip related images: no answer-topic inline figures")
         return []
 
+    span_pool = list(figure_pool or retrieved_docs or [])
     component_spans = (
         _component_listing_span_targets(
             query or "",
@@ -6455,15 +6640,16 @@ def images_for_api(
         retrieved_docs=retrieved_docs,
         full_context=primary_text,
     )
-    if (
-        _is_component_listing_across_machines(query or "")
-        and (answer or "").strip()
-    ):
+    if _should_expand_cited_manual_kv_pool(query or "", answer or ""):
         span_pool = _expand_pool_with_cited_manual_figure_chunks(
             list(figure_pool or retrieved_docs or []),
             _cited_manual_hints_from_answer(answer or ""),
             query or "",
         )
+    if (
+        _is_component_listing_across_machines(query or "")
+        and (answer or "").strip()
+    ):
         pair_targets = _machine_component_listing_pair_targets(
             query or "",
             answer or "",

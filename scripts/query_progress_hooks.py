@@ -190,11 +190,11 @@ def finalize_inline_images(
         from image_query_refs import (  # noqa: WPS433
             _cited_manual_hints_from_answer,
             _doc_basename,
-            _is_component_listing_across_machines,
             _load_figure_chunks_for_manual_paths,
+            _should_expand_cited_manual_kv_pool,
         )
 
-        if _is_component_listing_across_machines(q):
+        if _should_expand_cited_manual_kv_pool(q, answer):
             cited = _cited_manual_hints_from_answer(answer)
             allowed: set[str] = set(cited)
             for doc in cite_pool + rerank_pool + figure_pool:

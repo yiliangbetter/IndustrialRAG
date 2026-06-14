@@ -302,12 +302,44 @@ function findBlockForAnchor(root, anchor, matchStart, rawText) {
   return null;
 }
 
+function lineSegmentMatches(segment, lineAnchor) {
+  const seg = (segment || "").replace(/\*\*/g, "").trim();
+  const line = (lineAnchor || "").replace(/\*\*/g, "").trim();
+  if (!seg || !line) return false;
+  if (seg.includes(line) || line.includes(seg)) return true;
+  const head = line.split(/[：:（(]/)[0].trim();
+  return head.length >= 4 && seg.includes(head);
+}
+
+/** Insert after a logical line inside a single <p> (marked breaks:true), else after block. */
+function findInsertAfterForPlacement(block, matchStart, rawText) {
+  if (!block) return null;
+  if (block.matches("li")) return block;
+  const lineAnchor = lineAtMatchStart(rawText, matchStart);
+  if (!lineAnchor || !block.matches("p")) return block;
+
+  let segment = "";
+  for (const child of block.childNodes) {
+    if (child.nodeName === "BR") {
+      if (lineSegmentMatches(segment, lineAnchor)) return child;
+      segment = "";
+      continue;
+    }
+    segment += child.textContent || "";
+  }
+  if (lineSegmentMatches(segment, lineAnchor)) {
+    const last = block.lastChild;
+    return last && last.nodeType === Node.TEXT_NODE ? last : block;
+  }
+  return block;
+}
+
 function applyInlineImages(ui, ev) {
   if (!ui?.answerMd || !ev?.placements?.length || !ev?.images?.length) return;
   if (ui.imagesEl) ui.imagesEl.hidden = true;
   renderMarkdown(ui.answerMd, ui.answerRaw || "");
   const ordered = [...ev.placements].sort(
-    (a, b) => (b.match_start || 0) - (a.match_start || 0)
+    (a, b) => (a.match_start || 0) - (b.match_start || 0)
   );
   let inserted = 0;
   for (const pl of ordered) {
@@ -320,11 +352,17 @@ function applyInlineImages(ui, ev) {
       ui.answerRaw || ""
     );
     if (!block) continue;
+    const insertAfter = findInsertAfterForPlacement(
+      block,
+      pl.match_start,
+      ui.answerRaw || ""
+    );
+    if (!insertAfter) continue;
     const wrapper = document.createElement("div");
     wrapper.innerHTML = figureHtml(img);
     const fig = wrapper.firstElementChild;
     if (!fig) continue;
-    block.insertAdjacentElement("afterend", fig);
+    insertAfter.insertAdjacentElement("afterend", fig);
     inserted += 1;
   }
   ui.inlineFiguresApplied = inserted > 0;
