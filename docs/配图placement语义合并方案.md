@@ -79,10 +79,29 @@ git revert <phase-A-commit>
 
 ---
 
-## 阶段 B（未实施）：前端偏移优先
+## 阶段 B（已完成）：前端偏移优先
 
-- `findInsertPointByOffset(root, rawText, matchStart)` 为主
-- `findBlockForAnchor` 降为 fallback
+| 动作 | 文件 | 说明 |
+|------|------|------|
+| **新增** | `normalizePlacementLine` / `placementLinesMatch` | 比对时去掉 `**`、`-`、`1.` 等排版差异 |
+| **新增** | `lineAtPlacementOffset` | 以 `match_start` 从 `answerRaw` 取逻辑行 |
+| **新增** | `findInsertPointByOffset` | 在 `li` / `p>br` 中找对应行，在其后插入 |
+| **收敛** | `findInsertPointForPlacement` | offset 优先；失败再 `findBlockForAnchor` 兜底 |
+| **收敛** | `applyInlineImages` | 只调 `findInsertPointForPlacement` |
+
+**不改**：`image_query_refs.py` 及 placement 产出逻辑。
+
+---
+
+## Checkpoint（阶段 B 完成）
+
+| 项 | 内容 |
+|----|------|
+| **Git commit** | （本 commit 后填写） |
+| **前置** | `b0590cc` 阶段 A |
+| **改动文件** | `web/static/app.js` |
+
+回退阶段 B：`git revert <phase-B-commit>`
 
 ---
 
@@ -146,4 +165,4 @@ python scripts/run_web_path_q1_17.py
 | 日期 | 内容 | commit |
 |------|------|--------|
 | 2026-06-14 | 文档创建 | — |
-| 2026-06-14 | 阶段 A 实施：`_answer_logic_lines`、`_build_semantic_inline_placements`、`replay_placement_dumps.py`；`build_inline_placements` 单路径 | `b0590cc` |
+| 2026-06-14 | 阶段 B：Web `match_start` 偏移优先插入 | （待填） |

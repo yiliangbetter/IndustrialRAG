@@ -272,6 +272,78 @@ function lineAtMatchStart(rawText, matchStart) {
     .trim();
 }
 
+function normalizePlacementLine(text) {
+  return (text || "")
+    .replace(/\*\*/g, "")
+    .replace(/^\s*(?:\d+\.\s*)?[-*•]\s+/, "")
+    .replace(/\s+/g, " ")
+    .trim();
+}
+
+function placementLinesMatch(domText, rawLine) {
+  const a = normalizePlacementLine(domText);
+  const b = normalizePlacementLine(rawLine);
+  if (!a || !b) return false;
+  if (a === b || a.includes(b) || b.includes(a)) return true;
+  const head = b.split(/[：:（(]/)[0].trim();
+  return head.length >= 4 && a.includes(head);
+}
+
+/** Resolve the answer line at placement.match_start (offset-primary). */
+function lineAtPlacementOffset(rawText, placement) {
+  const matchStart = placement?.match_start;
+  if (rawText && matchStart != null && matchStart >= 0) {
+    const line = lineAtMatchStart(rawText, matchStart);
+    if (line) return line;
+  }
+  return (placement?.anchor_text || "").trim();
+}
+
+/**
+ * Phase B: insert after the DOM line that corresponds to match_start in answerRaw.
+ * Falls back to anchor_text block search when offset line cannot be located.
+ */
+function findInsertPointByOffset(root, rawText, placement) {
+  if (!root) return null;
+  const rawLine = lineAtPlacementOffset(rawText, placement);
+  if (!rawLine) return null;
+
+  for (const li of root.querySelectorAll("li")) {
+    if (placementLinesMatch(li.textContent || "", rawLine)) return li;
+  }
+
+  for (const p of root.querySelectorAll("p")) {
+    let segment = "";
+    for (const child of p.childNodes) {
+      if (child.nodeName === "BR") {
+        if (placementLinesMatch(segment, rawLine)) return child;
+        segment = "";
+        continue;
+      }
+      segment += child.textContent || "";
+    }
+    if (placementLinesMatch(segment, rawLine)) {
+      const last = p.lastChild;
+      return last && last.nodeType === Node.TEXT_NODE ? last : p;
+    }
+  }
+
+  return null;
+}
+
+function findInsertPointForPlacement(root, rawText, placement) {
+  const byOffset = findInsertPointByOffset(root, rawText, placement);
+  if (byOffset) return byOffset;
+  const block = findBlockForAnchor(
+    root,
+    placement.anchor_text,
+    placement.match_start,
+    rawText
+  );
+  if (!block) return null;
+  return findInsertAfterForPlacement(block, placement.match_start, rawText);
+}
+
 function findBlockForAnchor(root, anchor, matchStart, rawText) {
   if (!root) return null;
   const lineAnchor = lineAtMatchStart(rawText, matchStart);
@@ -345,17 +417,10 @@ function applyInlineImages(ui, ev) {
   for (const pl of ordered) {
     const img = ev.images[pl.image_index];
     if (!img || !pl.anchor_text) continue;
-    const block = findBlockForAnchor(
+    const insertAfter = findInsertPointForPlacement(
       ui.answerMd,
-      pl.anchor_text,
-      pl.match_start,
-      ui.answerRaw || ""
-    );
-    if (!block) continue;
-    const insertAfter = findInsertAfterForPlacement(
-      block,
-      pl.match_start,
-      ui.answerRaw || ""
+      ui.answerRaw || "",
+      pl
     );
     if (!insertAfter) continue;
     const wrapper = document.createElement("div");
