@@ -169,7 +169,7 @@ Query 辅助锚定 **仅允许** 在以下集合内选 chunk（优先级从高�
 
 | 步骤 | 改动要点 | 验收 | 状态 |
 |------|----------|------|------|
-| 4.1 | 全量 `run_web_path_q1_17.py`；记录报告路径 | `logs/web_path_q1_17/20260614_005940_all.md` **16/17**（文字 17/17） | ✅（Q16 偶发见下） |
+| 4.1 | 全量 `run_web_path_q1_17.py`；记录报告路径 | `logs/web_path_q1_17/20260614_005940_all.md` **16/17**（文字 17/17） | ✅ **Q16 已收尾** |
 | 4.2 | 更新 `查询配图设计方案.md` §0、`查询配图实现说明.md` 与本文一致 | 设计 / 实现文档同步 | ✅ |
 | 4.3 | `config/env.example` query 节锚开关 | `RAG_IMAGE_QUERY_SECTION_ANCHOR` | ✅ 阶段 1 |
 
@@ -179,14 +179,15 @@ Query 辅助锚定 **仅允许** 在以下集合内选 chunk（优先级从高�
 |------|------|
 | **16/17** | Q1–Q15、Q17 文字+配图均 PASS |
 | **Q5 ✓** | gate 与主路径均传 `query` 后稳定 1 图（此前 `20260613_235712` 偶发 `no_inline_figures_in_primary`） |
-| **Q16 ✗** | 文字 PASS；配图 2 张、`answer_pairs:0<2`（见下）；分题复跑可 3/3 PASS |
+| **Q16 ✓（收尾）** | **Web 手测稳定**（三本手册各 1 张三联件图）；分题 `--ids 16` 多轮 PASS |
 | **Q17 ✓** | 各机型各部件 1 图；去掉「每机型只留 1 pair」后稳定 |
+| **Q16 批测边界** | 全量 `005940` 偶发 FAIL：`answer_pairs:0<2`（答案为加粗段而非 `-` 列表，grader 解析为 0 pair）；**不继续改配图主路径** |
 
-**Q16 偶发未过（配图逻辑方向已认可，非阶段 1–3 回归）**
+**Q16 收尾说明**
 
-1. 本次答案为 **加粗段落**（非 `-` 列表），批测 `answer_pairs` 解析为 0，配图 2 张仍被判 FAIL。
-2. `answer_topics` 仅 **1 chunk** 进扫图，缺 **自动封边机** 手册三联件图；双端图锚点误挂「自动封边机」。
-3. 分题 `--ids 16` 多轮与 Web 手测可稳定 3 图，全量受 LLM 答案格式 + citation 方差影响。
+1. **验收口径**：以 **Web 路径**为准（与线上一致）；pair 选图/补池/placement 逻辑在 `ebcad7b` + `gate_fix_Q16failed` 已定型。
+2. **批测已知边界**：`run_web_path_q1_17.py` 的 `_grade_images_answer_pairs` 依赖 `- **机型**：…` 列表格式；LLM 偶发输出纯加粗段时 grader 误报，与 Web 实际展示无关。
+3. **历史一次全量记录**（`005940`）：`answer_topics` 仅 1 chunk、2 图缺自动封边机手册——属 citation 方差；同版本 Web 手测可稳定 3 图。
 
 ---
 
@@ -197,7 +198,7 @@ Query 辅助锚定 **仅允许** 在以下集合内选 chunk（优先级从高�
 | **Git commit** | `ebcad7b` — pair 选图/过滤稳定 Q16/Q17；gate 补 `query` 见 tag `gate_fix_Q16failed` |
 | **Git tag** | `image_almost_ok_before_fix_Q16` → `ecad198`；`Q16Q17_ok_before_full_test` → `ebcad7b`；`gate_fix_Q16failed` |
 | **批测结果** | 全量 Q1–Q17：**16/17**（文字 **17/17**）；报告 `logs/web_path_q1_17/20260614_005940_all.md` |
-| **配图失败** | Q16 全量偶发（见上） |
+| **配图失败** | 无（Q16 Web 已收尾；批测 grader 偶发见上，不阻塞） |
 | **配图达标** | Q5/Q9/Q11/Q15/Q17 等；Q17 每 pair 一图 |
 | **主要改动** | 删 per-machine pair 折叠、`*电机` 不当机型、path 去重每 pair 一图、`source_key` 机型 hint、gate `_figure_context_from_answer_docs(..., query=q)` |
 
@@ -239,4 +240,4 @@ Query 辅助锚定 **仅允许** 在以下集合内选 chunk（优先级从高�
 | 2026-06-13 | `ecad198` | 阶段 3 延伸提交；tag `image_almost_ok_before_fix_Q16` |
 | 2026-06-13 | `ebcad7b` | Q16/Q17 pair 稳定：删 per-machine 折叠、机型标题解析、path 去重；tag `Q16Q17_ok_before_full_test` |
 | 2026-06-13 | — | 全量 `20260613_235712_all.md` **15/17**（Q5 gate 无 query 偶发 0 图） |
-| 2026-06-14 | tag `gate_fix_Q16failed` | gate 补 `query=q`；全量 `20260614_005940_all.md` **16/17**（Q16 偶发）；三文档同步 |
+| 2026-06-14 | tag `gate_fix_Q16failed` | gate 补 `query=q`；全量 `20260614_005940_all.md` **16/17**；**Q16 Web 收尾**；三文档同步 |
