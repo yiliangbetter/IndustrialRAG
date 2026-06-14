@@ -1,0 +1,797 @@
+{
+  "schema": "voice_script_tests_v1",
+  "source_xlsx": "d:\\dev\\docs\\AI智能语音话术 解析.xlsx",
+  "count": 29,
+  "cases": [
+    {
+      "id": 1,
+      "group": "技术",
+      "nav": "",
+      "category": "封边",
+      "standard_question": "修边不好？",
+      "utterances": [
+        "修边修的效果不怎么好?",
+        "修边不好？"
+      ],
+      "standard_answer": "检查各部位，进行调试。",
+      "system_fallback": "",
+      "sms_template": "",
+      "coverage": "N；N",
+      "expect": "technical",
+      "skip": false,
+      "grade": {
+        "text_any": [
+          "检查各部位，进行调试"
+        ],
+        "text_all": [],
+        "accept_fallback": false
+      }
+    },
+    {
+      "id": 2,
+      "group": "技术",
+      "nav": "",
+      "category": "封边",
+      "standard_question": "漏胶",
+      "utterances": [
+        "胶水往外流",
+        "涂胶不好?",
+        "漏胶"
+      ],
+      "standard_answer": "1.建议清洗机头部分，更换易损件。   2.胶轴磨损，送带轴轴承损坏。",
+      "system_fallback": "",
+      "sms_template": "",
+      "coverage": "Y；N",
+      "expect": "technical",
+      "skip": false,
+      "grade": {
+        "text_any": [
+          "建议清洗机头部分，更换易损件",
+          "胶轴磨损，送带轴轴承损坏"
+        ],
+        "text_all": [
+          "建议清洗机头部分，更换易损件"
+        ],
+        "accept_fallback": false
+      }
+    },
+    {
+      "id": 3,
+      "group": "技术",
+      "nav": "",
+      "category": "封边",
+      "standard_question": "齐头烂板",
+      "utterances": [
+        "齐头磕坏板",
+        "齐头烂板"
+      ],
+      "standard_answer": "检查齐头部位是否有配件损坏。",
+      "system_fallback": "",
+      "sms_template": "",
+      "coverage": "N；N",
+      "expect": "technical",
+      "skip": false,
+      "grade": {
+        "text_any": [
+          "检查齐头部位是否有配件损坏"
+        ],
+        "text_all": [],
+        "accept_fallback": false
+      }
+    },
+    {
+      "id": 4,
+      "group": "技术",
+      "nav": "",
+      "category": "封边",
+      "standard_question": "仿形效果不好",
+      "utterances": [
+        "仿形问题",
+        "仿形效果不好"
+      ],
+      "standard_answer": "1.仿形靠模损坏。  2.调整仿形。",
+      "system_fallback": "",
+      "sms_template": "",
+      "coverage": "Y；Y",
+      "expect": "technical",
+      "skip": false,
+      "grade": {
+        "text_any": [
+          "仿形靠模损坏",
+          "调整仿形"
+        ],
+        "text_all": [
+          "仿形靠模损坏"
+        ],
+        "accept_fallback": false
+      }
+    },
+    {
+      "id": 5,
+      "group": "技术",
+      "nav": "",
+      "category": "封边",
+      "standard_question": "温控器坏了",
+      "utterances": [
+        "温控器接触不好",
+        "不升温",
+        "温控器坏了"
+      ],
+      "standard_answer": "温控器损坏。",
+      "system_fallback": "",
+      "sms_template": "",
+      "coverage": "N；N",
+      "expect": "technical",
+      "skip": false,
+      "grade": {
+        "text_any": [
+          "温控器损坏"
+        ],
+        "text_all": [],
+        "accept_fallback": false
+      }
+    },
+    {
+      "id": 6,
+      "group": "技术",
+      "nav": "",
+      "category": "所有",
+      "standard_question": "气压报警？",
+      "utterances": [
+        "气压报警？"
+      ],
+      "standard_answer": "1.气压是否达到压力值。2.检查压力开关信号。",
+      "system_fallback": "",
+      "sms_template": "",
+      "coverage": "Y；Y",
+      "expect": "technical",
+      "skip": false,
+      "grade": {
+        "text_any": [
+          "气压是否达到压力值",
+          "检查压力开关信号"
+        ],
+        "text_all": [
+          "气压是否达到压力值"
+        ],
+        "accept_fallback": false
+      }
+    },
+    {
+      "id": 7,
+      "group": "技术",
+      "nav": "",
+      "category": "电脑锯",
+      "standard_question": "靠板上限？",
+      "utterances": [
+        "靠板上限位报警",
+        "靠板上限？"
+      ],
+      "standard_answer": "1.检查靠板上感应灯是否感应到。",
+      "system_fallback": "",
+      "sms_template": "",
+      "coverage": "Y；N",
+      "expect": "technical",
+      "skip": false,
+      "grade": {
+        "text_any": [
+          "检查靠板上感应灯是否感应到"
+        ],
+        "text_all": [],
+        "accept_fallback": false
+      }
+    },
+    {
+      "id": 8,
+      "group": "技术",
+      "nav": "",
+      "category": "电脑锯",
+      "standard_question": "标签问题",
+      "utterances": [
+        "标签不对",
+        "标签问题"
+      ],
+      "standard_answer": "优化/指导做标签。",
+      "system_fallback": "",
+      "sms_template": "",
+      "coverage": "N；N",
+      "expect": "technical",
+      "skip": false,
+      "grade": {
+        "text_any": [
+          "优化/指导做标签"
+        ],
+        "text_all": [],
+        "accept_fallback": false
+      }
+    },
+    {
+      "id": 9,
+      "group": "技术",
+      "nav": "",
+      "category": "电脑锯",
+      "standard_question": "尺寸有误差",
+      "utterances": [
+        "开料时大时小",
+        "尺寸有误差"
+      ],
+      "standard_answer": "水平或工夹部分间隙大",
+      "system_fallback": "",
+      "sms_template": "",
+      "coverage": "N；N",
+      "expect": "technical",
+      "skip": false,
+      "grade": {
+        "text_any": [
+          "水平或工夹部分间隙大"
+        ],
+        "text_all": [],
+        "accept_fallback": false
+      }
+    },
+    {
+      "id": 10,
+      "group": "技术",
+      "nav": "",
+      "category": "排钻",
+      "standard_question": "打孔深浅不一",
+      "utterances": [
+        "打的孔深不一样",
+        "打孔深浅不一"
+      ],
+      "standard_answer": "接触器缺相，电磁阀坏",
+      "system_fallback": "",
+      "sms_template": "",
+      "coverage": "N；N",
+      "expect": "technical",
+      "skip": false,
+      "grade": {
+        "text_any": [
+          "接触器缺相，电磁阀坏"
+        ],
+        "text_all": [],
+        "accept_fallback": false
+      }
+    },
+    {
+      "id": 11,
+      "group": "技术",
+      "nav": "",
+      "category": "数控",
+      "standard_question": "三相电异常",
+      "utterances": [
+        "相序报警？",
+        "三相电异常"
+      ],
+      "standard_answer": "1.检查输入三相电源顺序是否接反。        2.检查电源相序保护继电器输入点是否正常。 3.线路问题(D100）  4.模块点位损坏。",
+      "system_fallback": "",
+      "sms_template": "",
+      "coverage": "N；Y",
+      "expect": "technical",
+      "skip": false,
+      "grade": {
+        "text_any": [
+          "检查输入三相电源顺序是否接反",
+          "检查电源相序保护继电器输入点是否正常",
+          "线路问题(D",
+          "模块点位损坏"
+        ],
+        "text_all": [
+          "检查输入三相电源顺序是否接反"
+        ],
+        "accept_fallback": false
+      }
+    },
+    {
+      "id": 12,
+      "group": "技术",
+      "nav": "",
+      "category": "数控",
+      "standard_question": "空压机压力不足",
+      "utterances": [
+        "压缩空气机异常",
+        "空压机压力不足"
+      ],
+      "standard_answer": "1.检查输入气源压力是否在0.6Mpa以上。    2.检查气源压力继电器输入点是否正常。     3.线路问题(D101）  4.模块点位损坏。",
+      "system_fallback": "",
+      "sms_template": "",
+      "coverage": "N；N",
+      "expect": "technical",
+      "skip": false,
+      "grade": {
+        "text_any": [
+          "检查输入气源压力是否在",
+          "检查气源压力继电器输入点是否正常",
+          "线路问题(D",
+          "模块点位损坏"
+        ],
+        "text_all": [
+          "检查输入气源压力是否在"
+        ],
+        "accept_fallback": false
+      }
+    },
+    {
+      "id": 13,
+      "group": "技术",
+      "nav": "",
+      "category": "数控",
+      "standard_question": "推料未到位，请检查推料到位行程开关",
+      "utterances": [
+        "推料未到位",
+        "推料未到位，请检查推料到位行程开关"
+      ],
+      "standard_answer": "1.检查板材有没有推料到位，压到行程开关。2.检查推料到位行程开关输入点是否正常。   3.线路问题(D105）  4.模块点位损坏。",
+      "system_fallback": "",
+      "sms_template": "",
+      "coverage": "N；N",
+      "expect": "technical",
+      "skip": false,
+      "grade": {
+        "text_any": [
+          "检查板材有没有推料到位，压到行程开关",
+          "检查推料到位行程开关输入点是否正常",
+          "线路问题(D",
+          "模块点位损坏"
+        ],
+        "text_all": [
+          "检查板材有没有推料到位，压到行程开关"
+        ],
+        "accept_fallback": false
+      }
+    },
+    {
+      "id": 14,
+      "group": "技术",
+      "nav": "",
+      "category": "数控",
+      "standard_question": "变频器异常报警",
+      "utterances": [
+        "变频器报警",
+        "变频器异常报警"
+      ],
+      "standard_answer": "1.按主轴变频器显示故障代码排查。        2.检查主轴变频器故障输入点是否正常。     3.线路问题(D106）  4.模块点位损坏。",
+      "system_fallback": "",
+      "sms_template": "",
+      "coverage": "Y；Y",
+      "expect": "technical",
+      "skip": false,
+      "grade": {
+        "text_any": [
+          "按主轴变频器显示故障代码排查",
+          "检查主轴变频器故障输入点是否正常",
+          "线路问题(D",
+          "模块点位损坏"
+        ],
+        "text_all": [
+          "按主轴变频器显示故障代码排查"
+        ],
+        "accept_fallback": false
+      }
+    },
+    {
+      "id": 15,
+      "group": "技术",
+      "nav": "",
+      "category": "数控",
+      "standard_question": "主轴正转转速异常",
+      "utterances": [
+        "主轴转速到达报警",
+        "主轴正转转速异常"
+      ],
+      "standard_answer": "1.变频器是否正常。                      2.线路是否短路(DI07)。                   3.模块点位损坏。",
+      "system_fallback": "",
+      "sms_template": "",
+      "coverage": "N；N",
+      "expect": "technical",
+      "skip": false,
+      "grade": {
+        "text_any": [
+          "变频器是否正常",
+          "线路是否短路(DI",
+          "模块点位损坏"
+        ],
+        "text_all": [
+          "变频器是否正常"
+        ],
+        "accept_fallback": false
+      }
+    },
+    {
+      "id": 16,
+      "group": "技术",
+      "nav": "",
+      "category": "数控",
+      "standard_question": "主轴停止，转速不为0",
+      "utterances": [
+        "主轴停止",
+        "主轴停止，转速不为0"
+      ],
+      "standard_answer": "1.变频器是否正常。                      2.线路是否短路(DI08)。                   3.模块点位损坏。",
+      "system_fallback": "",
+      "sms_template": "",
+      "coverage": "N；N",
+      "expect": "technical",
+      "skip": false,
+      "grade": {
+        "text_any": [
+          "变频器是否正常",
+          "线路是否短路(DI",
+          "模块点位损坏"
+        ],
+        "text_all": [
+          "变频器是否正常"
+        ],
+        "accept_fallback": false
+      }
+    },
+    {
+      "id": 17,
+      "group": "技术",
+      "nav": "",
+      "category": "数控",
+      "standard_question": "主轴过热",
+      "utterances": [
+        "主轴发烫、发热",
+        "主轴过热"
+      ],
+      "standard_answer": "1.主轴风扇书否运行正常。                2.主轴内部线路或感应器损坏。             3.线路是否短路(DI09）          4.模块点位损坏。",
+      "system_fallback": "",
+      "sms_template": "",
+      "coverage": "N；N",
+      "expect": "technical",
+      "skip": false,
+      "grade": {
+        "text_any": [
+          "主轴风扇书否运行正常",
+          "主轴内部线路或感应器损坏",
+          "线路是否短路(DI",
+          "模块点位损坏"
+        ],
+        "text_all": [
+          "主轴风扇书否运行正常"
+        ],
+        "accept_fallback": false
+      }
+    },
+    {
+      "id": 18,
+      "group": "技术",
+      "nav": "",
+      "category": "数控",
+      "standard_question": "主轴松刀异常",
+      "utterances": [
+        "主轴弹出",
+        "主轴松刀异常"
+      ],
+      "standard_answer": "1.松刀按钮是否损坏。                    2.主轴内部线路或感应器损坏。             3.线裤是否短路(DI10）(DI12）   4.模块点位损坏。",
+      "system_fallback": "",
+      "sms_template": "",
+      "coverage": "N；N",
+      "expect": "technical",
+      "skip": false,
+      "grade": {
+        "text_any": [
+          "松刀按钮是否损坏",
+          "主轴内部线路或感应器损坏",
+          "线裤是否短路(DI",
+          "模块点位损坏"
+        ],
+        "text_all": [
+          "松刀按钮是否损坏"
+        ],
+        "accept_fallback": false
+      }
+    },
+    {
+      "id": 19,
+      "group": "技术",
+      "nav": "",
+      "category": "数控",
+      "standard_question": "主轴夹刀异常",
+      "utterances": [
+        "主轴锁定",
+        "主轴夹刀异常"
+      ],
+      "standard_answer": "1.主轴内部线路或感应器损坏。            2.线路是否短路(DI11）。                  3.桥接板模块点位损坏。",
+      "system_fallback": "",
+      "sms_template": "",
+      "coverage": "N；N",
+      "expect": "technical",
+      "skip": false,
+      "grade": {
+        "text_any": [
+          "主轴内部线路或感应器损坏",
+          "线路是否短路(DI",
+          "桥接板模块点位损坏"
+        ],
+        "text_all": [
+          "主轴内部线路或感应器损坏"
+        ],
+        "accept_fallback": false
+      }
+    },
+    {
+      "id": 20,
+      "group": "技术",
+      "nav": "",
+      "category": "数控",
+      "standard_question": "主轴上升位置错误警报",
+      "utterances": [
+        "主轴气缸上升警报",
+        "主轴上升位置错误警报"
+      ],
+      "standard_answer": "1.检查主轴气缸上下活动是否顺畅，气缸伸缩是否到位。    2.检查主轴旗杆电磁阀动作是否正常。   3.检查主轴气缸上的感应器感应是否正常。\n4.检查感应器信号输入是否正常。                        5.线路是否短路(DI13）。              6.模块点位损坏。",
+      "system_fallback": "",
+      "sms_template": "",
+      "coverage": "N；N",
+      "expect": "technical",
+      "skip": false,
+      "grade": {
+        "text_any": [
+          "检查主轴气缸上下活动是否顺畅，气缸伸缩是否到位",
+          "检查主轴旗杆电磁阀动作是否正常",
+          "检查主轴气缸上的感应器感应是否正常",
+          "检查感应器信号输入是否正常"
+        ],
+        "text_all": [
+          "检查主轴气缸上下活动是否顺畅，气缸伸缩是否到位"
+        ],
+        "accept_fallback": false
+      }
+    },
+    {
+      "id": 21,
+      "group": "技术",
+      "nav": "",
+      "category": "数控",
+      "standard_question": "主轴下降位置错误警报",
+      "utterances": [
+        "主轴气缸下降报警",
+        "主轴下降位置错误警报"
+      ],
+      "standard_answer": "1.检查主轴气缸上下活动是否顺畅，气缸伸缩是否到位。    2.检查主轴旗杆电磁阀动作是否正常。   3.检查主轴气缸上的感应器感应是否正常。\n4.检查感应器信号输入是否正常。                        5.线路是否短路(DI14）。              6.模块点位损坏。",
+      "system_fallback": "",
+      "sms_template": "",
+      "coverage": "N；N",
+      "expect": "technical",
+      "skip": false,
+      "grade": {
+        "text_any": [
+          "检查主轴气缸上下活动是否顺畅，气缸伸缩是否到位",
+          "检查主轴旗杆电磁阀动作是否正常",
+          "检查主轴气缸上的感应器感应是否正常",
+          "检查感应器信号输入是否正常"
+        ],
+        "text_all": [
+          "检查主轴气缸上下活动是否顺畅，气缸伸缩是否到位"
+        ],
+        "accept_fallback": false
+      }
+    },
+    {
+      "id": 22,
+      "group": "技术",
+      "nav": "",
+      "category": "数控",
+      "standard_question": "吸尘罩信号异常",
+      "utterances": [
+        "吸尘罩处气缸感应器异常",
+        "吸尘罩信号异常"
+      ],
+      "standard_answer": "1.检查主轴气缸上下活动是否顺畅，气缸伸缩是否到位。    2.检查主轴旗杆电磁阀动作是否正常。   3.检查主轴气缸上的感应器感应是否正常。\n4.检查感应器信号输入是否正常。                        5.线路是否短路(DI15）。              6.模块点位损坏。",
+      "system_fallback": "",
+      "sms_template": "",
+      "coverage": "N；N",
+      "expect": "technical",
+      "skip": false,
+      "grade": {
+        "text_any": [
+          "检查主轴气缸上下活动是否顺畅，气缸伸缩是否到位",
+          "检查主轴旗杆电磁阀动作是否正常",
+          "检查主轴气缸上的感应器感应是否正常",
+          "检查感应器信号输入是否正常"
+        ],
+        "text_all": [
+          "检查主轴气缸上下活动是否顺畅，气缸伸缩是否到位"
+        ],
+        "accept_fallback": false
+      }
+    },
+    {
+      "id": 23,
+      "group": "技术",
+      "nav": "",
+      "category": "数控",
+      "standard_question": "刀库轴电压过大",
+      "utterances": [
+        "A轴电压过大",
+        "刀库轴电压过大"
+      ],
+      "standard_answer": "调整模拟器参数444，加减速加大。",
+      "system_fallback": "",
+      "sms_template": "",
+      "coverage": "N；N",
+      "expect": "technical",
+      "skip": false,
+      "grade": {
+        "text_any": [
+          "调整模拟器参数444，加减速加大"
+        ],
+        "text_all": [],
+        "accept_fallback": false
+      }
+    },
+    {
+      "id": 24,
+      "group": "技术",
+      "nav": "",
+      "category": "数控",
+      "standard_question": "换刀报警输入错误的刀具设定",
+      "utterances": [
+        "刀号对不上",
+        "换刀报警输入错误的刀具设定"
+      ],
+      "standard_answer": "1.更换T0000文件。     2.检查3401参数是否正确。",
+      "system_fallback": "",
+      "sms_template": "",
+      "coverage": "N；N",
+      "expect": "technical",
+      "skip": false,
+      "grade": {
+        "text_any": [
+          "更换T0000文件",
+          "检查3401参数是否正确"
+        ],
+        "text_all": [
+          "更换T0000文件"
+        ],
+        "accept_fallback": false
+      }
+    },
+    {
+      "id": 25,
+      "group": "技术",
+      "nav": "",
+      "category": "数控",
+      "standard_question": "W轴尚未原点复归",
+      "utterances": [
+        "W轴正极限与原点报警检修",
+        "W轴尚未原点复归"
+      ],
+      "standard_answer": "1.感应器是否正常。    2.线路问题(I015）。        3.模块点位损坏。",
+      "system_fallback": "",
+      "sms_template": "",
+      "coverage": "N；N",
+      "expect": "technical",
+      "skip": false,
+      "grade": {
+        "text_any": [
+          "感应器是否正常",
+          "线路问题(I",
+          "模块点位损坏"
+        ],
+        "text_all": [
+          "感应器是否正常"
+        ],
+        "accept_fallback": false
+      }
+    },
+    {
+      "id": 26,
+      "group": "技术",
+      "nav": "",
+      "category": "数控",
+      "standard_question": "未检测到工作（板材）",
+      "utterances": [
+        "板材检测",
+        "未检测到工作（板材）"
+      ],
+      "standard_answer": "1.感应器是否正常。    2.线路是否短路(I008）。     3.CAM参数4572不正确。      4.模块点位损坏。",
+      "system_fallback": "",
+      "sms_template": "",
+      "coverage": "N；Y",
+      "expect": "technical",
+      "skip": false,
+      "grade": {
+        "text_any": [
+          "感应器是否正常",
+          "线路是否短路(I",
+          "CAM参数",
+          "模块点位损坏"
+        ],
+        "text_all": [
+          "感应器是否正常"
+        ],
+        "accept_fallback": false
+      }
+    },
+    {
+      "id": 27,
+      "group": "技术",
+      "nav": "",
+      "category": "数控",
+      "standard_question": "出料台电机过载",
+      "utterances": [
+        "出料台滚筒变频器故障",
+        "出料台电机过载"
+      ],
+      "standard_answer": "1.接触器是否正常(-12KM1）。     2.断路器是否正常(-12F1）。    3.电机或减速机卡死或损坏。   4.线路问题(I063)。  5.模块点位损坏。",
+      "system_fallback": "",
+      "sms_template": "",
+      "coverage": "N；N",
+      "expect": "technical",
+      "skip": false,
+      "grade": {
+        "text_any": [
+          "接触器是否正常(-",
+          "断路器是否正常(-",
+          "电机或减速机卡死或损坏",
+          "线路问题(I"
+        ],
+        "text_all": [
+          "接触器是否正常(-"
+        ],
+        "accept_fallback": false
+      }
+    },
+    {
+      "id": 28,
+      "group": "技术",
+      "nav": "",
+      "category": "数控",
+      "standard_question": "未检测到工件",
+      "utterances": [
+        "板材检测报警解除",
+        "未检测到工件"
+      ],
+      "standard_answer": "1.感应器是否正常。    2.线路是否短路(I010）。     3.CAM参数20300不正确。      4.模块点位损坏。",
+      "system_fallback": "",
+      "sms_template": "",
+      "coverage": "N；Y",
+      "expect": "technical",
+      "skip": false,
+      "grade": {
+        "text_any": [
+          "感应器是否正常",
+          "线路是否短路(I",
+          "CAM参数",
+          "模块点位损坏"
+        ],
+        "text_all": [
+          "感应器是否正常"
+        ],
+        "accept_fallback": false
+      }
+    },
+    {
+      "id": 29,
+      "group": "技术",
+      "nav": "",
+      "category": "数控",
+      "standard_question": "气浮台电机过载",
+      "utterances": [
+        "鼓风机电机过载",
+        "气浮台电机过载"
+      ],
+      "standard_answer": "1.接触器是否正常(-1KM1）。     2.断路器是否正常(-1Q1）。    3.电机卡死或损坏。   4.线路问题(I001)。  5.模块点位损坏。",
+      "system_fallback": "",
+      "sms_template": "",
+      "coverage": "N；N",
+      "expect": "technical",
+      "skip": false,
+      "grade": {
+        "text_any": [
+          "接触器是否正常(-",
+          "断路器是否正常(-",
+          "电机卡死或损坏",
+          "线路问题(I"
+        ],
+        "text_all": [
+          "接触器是否正常(-"
+        ],
+        "accept_fallback": false
+      }
+    }
+  ]
+}

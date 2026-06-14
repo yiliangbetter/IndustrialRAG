@@ -454,6 +454,24 @@ def _is_listing_scope_query(query: str) -> bool:
     )
 
 
+def _is_procedure_steps_query(query: str) -> bool:
+    """How-to / procedure steps, not multi-item component listings."""
+    q = (query or "").strip()
+    if not q:
+        return False
+    return bool(
+        re.search(r"步骤|怎么做|如何操作|操作方法|操作流程|怎样|如何进行", q)
+    )
+
+
+def _is_maintenance_cycle_query(query: str) -> bool:
+    """Cadence / frequency questions (not component listings)."""
+    q = (query or "").strip()
+    if not q:
+        return False
+    return bool(re.search(r"多长时间|多久|周期|频率|多少次|几次", q))
+
+
 def _is_multi_machine_comparison_query(query: str) -> bool:
     """Cross-manual answers comparing several machine lines (e.g. Q15)."""
     q = (query or "").strip()
@@ -572,17 +590,27 @@ def _cited_manual_pdf_stems(answer: str) -> list[str]:
 
 
 def _should_expand_cited_manual_kv_pool(query: str, answer: str) -> bool:
-    """True when answer cites multiple manuals and likely needs per-manual figures."""
-    if len(_cited_manual_pdf_stems(answer)) < 2:
+    """True when cited manuals need KV figure chunks beyond LLM retrieval."""
+    stems = _cited_manual_pdf_stems(answer)
+    q = (query or "").strip()
+    if len(stems) >= 2:
+        if len(_machine_spans_from_answer(answer)) >= 2:
+            return True
+        if _is_component_listing_across_machines(q):
+            return True
+        if _is_multi_machine_comparison_query(q):
+            return True
+        if _answer_has_multi_section_markdown(answer):
+            return True
         return False
-    if len(_machine_spans_from_answer(answer)) >= 2:
-        return True
-    if _is_component_listing_across_machines(query or ""):
-        return True
-    if _is_multi_machine_comparison_query(query or ""):
-        return True
-    if _answer_has_multi_section_markdown(answer):
-        return True
+    if len(stems) == 1 and _is_listing_scope_query(q):
+        components = [
+            c
+            for c in _component_spans_from_answer(answer)
+            if c and not _machine_from_section_title(c)
+        ]
+        if len(components) >= 2 and not _machine_spans_from_answer(answer):
+            return True
     return False
 
 
@@ -3939,9 +3967,14 @@ def filter_docs_cited_by_answer(
                         for ref in extract_image_refs_from_context(content)
                         if (lab := _ref_effective_label(ref))
                     ]
+                    figure_refs = extract_image_refs_from_context(content)
                     manual = _doc_basename(doc)
                     matched = (
                         any(_label_matches_listing_target(lab, span) for lab in labels)
+                        or any(
+                            _pair_component_ref_align(span, ref) >= 0.45
+                            for ref in figure_refs
+                        )
                         or span in content
                         or span in manual
                         or _chunk_matches_answer_topic(content, span)
@@ -4461,11 +4494,12 @@ class _LogicLine(NamedTuple):
     subject: str = ""
 
 
+_BULLET_ALIAS_SUFFIX = r"(?:[（(][^）)]*[）)])?"
 _MACHINE_FIELD_LINE_RE = re.compile(
-    r"^(?:\d+\.\s*)?[-*•]?\s*\*\*([^*]+)\*\*[：:]\s*(.+)$"
+    rf"^(?:\d+\.\s*)?[-*•]?\s*\*\*([^*]+)\*\*{_BULLET_ALIAS_SUFFIX}[：:]\s*(.+)$"
 )
 _COMPONENT_BULLET_RE = re.compile(
-    r"^[-*•]\s*\*\*([^*]+)\*\*(?:[：:]\s*(.*))?$"
+    rf"^[-*•]\s*\*\*([^*]+)\*\*{_BULLET_ALIAS_SUFFIX}(?:[：:]\s*(.*))?$"
 )
 
 
@@ -4505,6 +4539,63 @@ def _subjects_from_machine_field_value(value: str, query: str) -> list[str]:
     return []
 
 
+def _infer_listing_machine_context(query: str, answer: str) -> str:
+    """Infer machine for single-manual component listings when answer omits ### headers."""
+    q = (query or "").strip()
+    if not q or not (answer or "").strip():
+        return ""
+    if _is_procedure_steps_query(q) or _is_maintenance_cycle_query(q):
+        return ""
+    if len(_cited_manual_pdf_stems(answer)) != 1:
+        return ""
+    components = [
+        c
+        for c in _answer_listing_spans(_answer_primary_listing_body(answer))
+        if c and not _machine_from_section_title(c)
+    ]
+    if len(components) < 2:
+        return ""
+    if _machine_spans_from_answer(answer):
+        return ""
+    cited = _cited_manual_hints_from_answer(answer)
+    for name in _KNOWN_MACHINE_NAMES:
+        if name not in q:
+            continue
+        for hint in cited:
+            compact_hint = re.sub(r"\s+", "", hint)
+            compact_name = re.sub(r"\s+", "", name)
+            if compact_name in compact_hint or name in hint:
+                return name
+        machine = _machine_from_section_title(name)
+        if machine:
+            return machine
+    machine = _machine_from_section_title(q)
+    if machine:
+        return machine
+    return ""
+
+
+def _procedure_step_spans(answer: str) -> list[str]:
+    """Bold titles from numbered procedure steps in the answer body."""
+    body = _answer_text_for_placement(answer)
+    spans: list[str] = []
+    seen: set[str] = set()
+    for raw_line in body.splitlines():
+        line = raw_line.strip()
+        match = re.match(r"^\d+\.\s*\*\*([^*]+)\*\*", line)
+        if not match:
+            continue
+        head = _listing_target_head(match.group(1).strip())
+        if not head:
+            continue
+        key = _normalize_label_key(head)
+        if key in seen:
+            continue
+        seen.add(key)
+        spans.append(head)
+    return spans
+
+
 def _append_logic_line(
     out: list[_LogicLine],
     seen: set[tuple[str, str, int, int]],
@@ -4535,7 +4626,7 @@ def _answer_logic_lines(answer: str, *, query: str = "") -> list[_LogicLine]:
     q = (query or "").strip()
     out: list[_LogicLine] = []
     seen: set[tuple[str, str, int, int]] = set()
-    current_machine = ""
+    current_machine = _infer_listing_machine_context(q, answer)
 
     for start, end, line in _line_spans_in_body(body):
         if line.startswith("#"):
@@ -4635,9 +4726,20 @@ def _answer_logic_lines(answer: str, *, query: str = "") -> list[_LogicLine]:
             continue
 
         num_comp = re.match(r"^\d+\.\s*\*\*([^*]+)\*\*", line)
-        if num_comp and current_machine:
+        if num_comp:
             comp = _listing_target_head(num_comp.group(1).strip())
-            if comp and not _is_answer_structural_label(comp):
+            if not comp or _is_answer_structural_label(comp):
+                continue
+            if _is_procedure_steps_query(q):
+                _append_logic_line(
+                    out,
+                    seen,
+                    start=start,
+                    end=end,
+                    text=line,
+                    subject=comp,
+                )
+            elif current_machine:
                 _append_logic_line(
                     out,
                     seen,
@@ -4652,7 +4754,21 @@ def _answer_logic_lines(answer: str, *, query: str = "") -> list[_LogicLine]:
     return out
 
 
-def _image_score_for_logic_line(line: _LogicLine, img: dict[str, Any]) -> float:
+def _image_score_for_logic_line(
+    line: _LogicLine, img: dict[str, Any], *, query: str = ""
+) -> float:
+    q = (query or "").strip()
+    if _is_procedure_steps_query(q) and (line.subject or line.machine):
+        caption = str(img.get("caption") or "").strip()
+        label = str(img.get("label") or caption).strip()
+        best = 0.0
+        for needle in _query_subject_needles(q):
+            best = max(best, text_term_alignment_symmetric(needle, caption))
+            if label:
+                best = max(best, text_term_alignment_symmetric(needle, label))
+        if caption and _line_has_query_subject_hit(q, line.text):
+            best = max(best, 0.45)
+        return best if best >= 0.35 else -1.0
     if line.machine and not _ref_matches_manual_hint(img, line.machine):
         return -1.0
     caption = str(img.get("caption") or "").strip()
@@ -4683,40 +4799,145 @@ def _image_score_for_logic_line(line: _LogicLine, img: dict[str, Any]) -> float:
     return -1.0
 
 
+def _answer_paragraph_blocks(answer: str) -> list[tuple[str, int, int]]:
+    """Non-empty paragraphs in placement body as (text, start, end) char spans."""
+    body = _answer_text_for_placement(answer)
+    if not body:
+        return []
+    blocks: list[tuple[str, int, int]] = []
+    pos = 0
+    for raw in re.split(r"\n\s*\n", body):
+        chunk = raw.strip()
+        if not chunk:
+            continue
+        idx = body.find(chunk, pos)
+        if idx < 0:
+            idx = body.find(chunk)
+        if idx < 0:
+            continue
+        blocks.append((chunk, idx, idx + len(chunk)))
+        pos = idx + len(chunk)
+    return blocks
+
+
+def _cycle_caption_block_placement(
+    answer: str, caption: str
+) -> tuple[int, int, str] | None:
+    """Cycle answers: anchor figure after a full paragraph, not a parenthetical aside."""
+    caption = (caption or "").strip()
+    if not caption:
+        return None
+    body = _answer_text_for_placement(answer)
+    blocks = _answer_paragraph_blocks(answer)
+    if not blocks:
+        return None
+
+    def chunk_matches_caption(chunk: str) -> bool:
+        return caption in chunk or text_term_alignment_symmetric(caption, chunk) >= 0.4
+
+    for chunk, bstart, bend in reversed(blocks):
+        for line in chunk.splitlines():
+            stripped = line.strip()
+            bullet = re.match(r"^[-*•]\s*\*\*([^*]+)\*\*", stripped)
+            if not bullet:
+                continue
+            title = _listing_target_head(bullet.group(1).strip())
+            if not title or not _label_matches_listing_target(caption, title):
+                continue
+            line_start = body.find(stripped, bstart, bend)
+            if line_start < 0:
+                line_start = body.find(stripped)
+            if line_start < 0:
+                continue
+            line_end = line_start + len(stripped)
+            return line_start, line_end, stripped
+
+    for chunk, bstart, bend in reversed(blocks):
+        if not chunk_matches_caption(chunk):
+            continue
+        if len(blocks) > 1 and chunk == blocks[0][0]:
+            lead = chunk.splitlines()[0].strip()
+            if re.search(r"保养一次|每[天周月季年]", lead) and caption in lead:
+                tail = chunk[chunk.find(caption) + len(caption) :]
+                if not tail.strip() or tail.strip().startswith("）") or tail.strip().startswith(")"):
+                    continue
+        return bstart, bend, chunk
+
+    chunk, bstart, bend = blocks[-1]
+    return bstart, bend, chunk
+
+
 def _build_caption_fallback_placements(
     answer: str,
     images: list[dict[str, Any]],
     listing_spans: list[str],
     min_score: float,
+    *,
+    query: str = "",
 ) -> list[dict[str, Any]]:
     """Single-entry answers: pair each image with best caption/listing anchor."""
     answer_body = _answer_text_for_placement(answer)
     placements: list[dict[str, Any]] = []
     used_ranges: list[tuple[int, int]] = []
+    q = (query or "").strip()
+    procedure_steps = _procedure_step_spans(answer) if _is_procedure_steps_query(q) else []
+    cycle_query = _is_maintenance_cycle_query(q)
 
     for image_index, img in enumerate(images):
         caption = str(img.get("caption") or "").strip()
+        if cycle_query and caption:
+            block_hit = _cycle_caption_block_placement(answer, caption)
+            if block_hit:
+                bstart, bend, display_anchor = block_hit
+                overlap = any(
+                    not (bend <= u0 or bstart >= u1) for u0, u1 in used_ranges
+                )
+                if not overlap:
+                    used_ranges.append((bstart, bend))
+                    placements.append(
+                        {
+                            "anchor_text": display_anchor,
+                            "match_start": bstart,
+                            "match_end": bend,
+                            "image_index": image_index,
+                            "score": 0.88,
+                        }
+                    )
+                    continue
         anchors: list[str] = []
         if caption:
             anchors.append(caption)
-        for span in listing_spans:
-            if not span:
-                continue
-            head = _listing_target_head(span)
-            if head and head not in anchors:
-                anchors.append(head)
-            if caption and _label_matches_listing_target(caption, span):
-                anchors.insert(0, span)
-            elif caption and (
-                span in caption
-                or caption in span
-                or text_term_alignment_symmetric(span, caption) >= 0.35
-            ):
-                anchors.append(span)
-        if not anchors and listing_spans:
-            anchors.extend(listing_spans)
+        if procedure_steps:
+            for step in procedure_steps:
+                if step not in anchors:
+                    anchors.append(step)
+        elif cycle_query:
+            for needle in _query_subject_needles(q):
+                if needle not in anchors:
+                    anchors.append(needle)
+            for span in listing_spans:
+                if span and not _is_maintenance_cycle_value(span) and span not in anchors:
+                    anchors.append(span)
+        else:
+            for span in listing_spans:
+                if not span:
+                    continue
+                head = _listing_target_head(span)
+                if head and head not in anchors:
+                    anchors.append(head)
+                if caption and _label_matches_listing_target(caption, span):
+                    anchors.insert(0, span)
+                elif caption and (
+                    span in caption
+                    or caption in span
+                    or text_term_alignment_symmetric(span, caption) >= 0.35
+                ):
+                    anchors.append(span)
+            if not anchors and listing_spans:
+                anchors.extend(listing_spans)
 
-        best_start, best_end, best_score, best_anchor = -1, -1, 0.0, ""
+        best_start, best_end, best_effective, best_anchor = -1, -1, -1.0, ""
+        best_label_match = False
         seen_anchor: set[str] = set()
         for anchor in anchors:
             key = _normalize_label_key(anchor)
@@ -4724,6 +4945,8 @@ def _build_caption_fallback_placements(
                 continue
             seen_anchor.add(key)
             start, end, score = _find_anchor_in_answer(answer, anchor)
+            if start < 0:
+                continue
             label_match = bool(
                 caption
                 and (
@@ -4734,15 +4957,38 @@ def _build_caption_fallback_placements(
                 )
             )
             effective = score + (0.5 if label_match else 0.0)
-            if effective > best_score:
-                best_start, best_end, best_score, best_anchor = (
+            if caption:
+                head = _listing_target_head(anchor)
+                if text_term_alignment_symmetric(head or anchor, caption) >= 0.45:
+                    effective += 0.08
+            if cycle_query and _is_maintenance_cycle_value(anchor):
+                effective -= 0.6
+            elif cycle_query and caption:
+                for needle in _query_subject_needles(q):
+                    if needle in anchor and text_term_alignment_symmetric(
+                        needle, caption
+                    ) >= 0.35:
+                        effective += 0.15
+                        break
+            if procedure_steps and anchor not in procedure_steps:
+                first_step = procedure_steps[0]
+                step_pos = answer_body.find(f"**{first_step}**")
+                if step_pos > 0 and 0 <= start < step_pos:
+                    continue
+            if effective > best_effective or (
+                abs(effective - best_effective) < 1e-6
+                and label_match
+                and not best_label_match
+            ):
+                best_start, best_end, best_effective, best_anchor = (
                     start,
                     end,
-                    score,
+                    effective,
                     anchor,
                 )
+                best_label_match = label_match
 
-        if best_start < 0 or best_score < min_score:
+        if best_start < 0 or best_effective < min_score:
             continue
         overlap = any(
             not (best_end <= u0 or best_start >= u1) for u0, u1 in used_ranges
@@ -4761,7 +5007,7 @@ def _build_caption_fallback_placements(
                 "match_start": best_start,
                 "match_end": best_end,
                 "image_index": image_index,
-                "score": round(best_score, 3),
+                "score": round(best_effective, 3),
             }
         )
 
@@ -4791,7 +5037,7 @@ def _build_semantic_inline_placements(
         for idx, img in enumerate(images):
             if idx in used_indices:
                 continue
-            align = _image_score_for_logic_line(line, img)
+            align = _image_score_for_logic_line(line, img, query=query or "")
             if align > best_align:
                 best_align = align
                 best_idx = idx
@@ -4820,7 +5066,7 @@ def _build_semantic_inline_placements(
 
     listing_spans = _answer_listing_spans(answer)
     return _build_caption_fallback_placements(
-        answer, images, listing_spans, min_score
+        answer, images, listing_spans, min_score, query=query or ""
     )
 
 
@@ -6284,19 +6530,26 @@ def _select_scored_refs_for_listing(
     selected: list[dict[str, Any]] = []
     used_keys: set[str] = set()
     for target in targets:
+        head = _listing_target_head(target)
         best_score = 0
         best_ref: dict[str, Any] | None = None
         for score, ref in scored:
             if score < min_absolute:
                 continue
             label = _ref_effective_label(ref)
-            if not _label_matches_listing_target(label, target):
+            align = _pair_component_ref_align(head, ref)
+            if align < 0.38 and not _label_matches_listing_target(label, target):
                 continue
+            effective = (
+                int(score * (0.45 + align * 0.55))
+                if align >= 0.38
+                else score
+            )
             key = _figure_label_key(ref)
             if key in used_keys:
                 continue
-            if score > best_score:
-                best_score = score
+            if effective > best_score:
+                best_score = effective
                 best_ref = ref
         if best_ref is not None:
             used_keys.add(_figure_label_key(best_ref))

@@ -263,12 +263,19 @@ function anchorNeedles(anchor) {
   return needles;
 }
 
+function answerBodyForPlacement(rawText) {
+  const text = (rawText || "").trim();
+  const cut = text.search(/\n###\s*References\b/i);
+  return cut >= 0 ? text.slice(0, cut).trim() : text;
+}
+
 function lineAtMatchStart(rawText, matchStart) {
   if (!rawText || matchStart == null || matchStart < 0) return "";
-  const lineStart = rawText.lastIndexOf("\n", matchStart) + 1;
-  const lineEnd = rawText.indexOf("\n", matchStart);
-  return rawText
-    .slice(lineStart, lineEnd < 0 ? rawText.length : lineEnd)
+  const body = answerBodyForPlacement(rawText);
+  const lineStart = body.lastIndexOf("\n", matchStart) + 1;
+  const lineEnd = body.indexOf("\n", matchStart);
+  return body
+    .slice(lineStart, lineEnd < 0 ? body.length : lineEnd)
     .trim();
 }
 
@@ -323,8 +330,7 @@ function findInsertPointByOffset(root, rawText, placement) {
       segment += child.textContent || "";
     }
     if (placementLinesMatch(segment, rawLine)) {
-      const last = p.lastChild;
-      return last && last.nodeType === Node.TEXT_NODE ? last : p;
+      return p;
     }
   }
 
@@ -334,6 +340,13 @@ function findInsertPointByOffset(root, rawText, placement) {
 function findInsertPointForPlacement(root, rawText, placement) {
   const byOffset = findInsertPointByOffset(root, rawText, placement);
   if (byOffset) return byOffset;
+  const rawLine = lineAtPlacementOffset(rawText, placement);
+  if (rawLine && (placement?.match_start || 0) <= 1) {
+    const firstP = root.querySelector("p");
+    if (firstP && placementLinesMatch(firstP.textContent || "", rawLine)) {
+      return firstP;
+    }
+  }
   const block = findBlockForAnchor(
     root,
     placement.anchor_text,
@@ -400,10 +413,50 @@ function findInsertAfterForPlacement(block, matchStart, rawText) {
     segment += child.textContent || "";
   }
   if (lineSegmentMatches(segment, lineAnchor)) {
-    const last = block.lastChild;
-    return last && last.nodeType === Node.TEXT_NODE ? last : block;
+    return block;
   }
   return block;
+}
+
+/** Insert block figure after a paragraph/list item, not inside inline text nodes. */
+function insertFigureAfterAnchor(anchor, fig) {
+  if (!anchor || !fig) return false;
+  let el = anchor;
+  if (el.nodeType === Node.TEXT_NODE) {
+    el = el.parentElement;
+  }
+  if (el?.nodeName === "BR" && el.parentElement) {
+    el = el.parentElement;
+  }
+  if (el?.matches?.("p, li")) {
+    el.insertAdjacentElement("afterend", fig);
+    return true;
+  }
+  if (el) {
+    el.insertAdjacentElement("afterend", fig);
+    return true;
+  }
+  return false;
+}
+
+function appendFiguresToAnswerEnd(answerMd, images) {
+  if (!answerMd || !images?.length) return 0;
+  let count = 0;
+  for (const img of images) {
+    const wrapper = document.createElement("div");
+    wrapper.innerHTML = figureHtml(img);
+    const fig = wrapper.firstElementChild;
+    if (!fig) continue;
+    answerMd.appendChild(fig);
+    count += 1;
+  }
+  return count;
+}
+
+function showAnswerImageFallback(ui, images) {
+  if (!ui?.imagesEl || !images?.length) return;
+  ui.imagesEl.hidden = false;
+  ui.imagesEl.innerHTML = images.map(figureHtml).join("");
 }
 
 function applyInlineImages(ui, ev) {
@@ -427,13 +480,15 @@ function applyInlineImages(ui, ev) {
     wrapper.innerHTML = figureHtml(img);
     const fig = wrapper.firstElementChild;
     if (!fig) continue;
-    insertAfter.insertAdjacentElement("afterend", fig);
-    inserted += 1;
+    if (insertFigureAfterAnchor(insertAfter, fig)) inserted += 1;
   }
   ui.inlineFiguresApplied = inserted > 0;
-  if (!ui.inlineFiguresApplied && ui.imagesEl && ev.images?.length) {
-    ui.imagesEl.hidden = false;
-    ui.imagesEl.innerHTML = ev.images.map(figureHtml).join("");
+  if (!ui.inlineFiguresApplied && ev.images?.length) {
+    const appended = appendFiguresToAnswerEnd(ui.answerMd, ev.images);
+    ui.inlineFiguresApplied = appended > 0;
+  }
+  if (!ui.inlineFiguresApplied && ev.images?.length) {
+    showAnswerImageFallback(ui, ev.images);
   }
   scrollMessages();
 }
