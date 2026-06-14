@@ -12,7 +12,7 @@ import logging
 import os
 import re
 from pathlib import Path
-from typing import Any
+from typing import Any, NamedTuple
 
 from raganything.utils import (
     build_image_ref_block,
@@ -4436,14 +4436,392 @@ def _section_matches_source(title: str, source_key: str) -> bool:
 
 
 def _machine_bullet_subject(line: str) -> str:
-    """Topic phrase from a ``- **机型**：…保养周期…`` answer bullet."""
-    m = re.match(r"^[-*•]\s*\*\*[^*]+\*\*[：:]\s*(.+)$", (line or "").strip())
+    """Topic phrase from a ``[-*•] **机型**：…`` answer line (bullet optional)."""
+    return _subject_from_machine_field_line(line)
+
+
+def _subject_from_machine_field_line(line: str) -> str:
+    m = re.match(
+        r"^(?:\d+\.\s*)?[-*•]?\s*\*\*[^*]+\*\*[：:]\s*(.+)$",
+        (line or "").strip(),
+    )
     if not m:
         return ""
     tail = re.split(r"保养周期", m.group(1), maxsplit=1)[0].strip()
     tail = re.sub(r"\*\*([^*]+)\*\*", r"\1", tail).strip().rstrip("。")
     tail = re.split(r"[（(]", tail, maxsplit=1)[0].strip()
     return _listing_target_head(tail)
+
+
+class _LogicLine(NamedTuple):
+    start: int
+    end: int
+    text: str
+    machine: str = ""
+    subject: str = ""
+
+
+_MACHINE_FIELD_LINE_RE = re.compile(
+    r"^(?:\d+\.\s*)?[-*•]?\s*\*\*([^*]+)\*\*[：:]\s*(.+)$"
+)
+_COMPONENT_BULLET_RE = re.compile(
+    r"^[-*•]\s*\*\*([^*]+)\*\*(?:[：:]\s*(.*))?$"
+)
+
+
+def _line_spans_in_body(body: str) -> list[tuple[int, int, str]]:
+    spans: list[tuple[int, int, str]] = []
+    offset = 0
+    for part in body.splitlines(keepends=True):
+        stripped = part.strip()
+        if not stripped:
+            offset += len(part)
+            continue
+        start = body.find(stripped, offset)
+        if start < 0:
+            start = offset
+        end = start + len(stripped)
+        spans.append((start, end, stripped))
+        offset = end
+    return spans
+
+
+def _subjects_from_machine_field_value(value: str, query: str) -> list[str]:
+    comps = _components_from_machine_line_value(value, query)
+    if comps:
+        return comps
+    tail = re.split(r"保养周期", value, maxsplit=1)[0].strip()
+    tail = re.sub(r"\*\*([^*]+)\*\*", r"\1", tail).strip().rstrip("。")
+    tail = re.split(r"[（(]", tail, maxsplit=1)[0].strip()
+    subj = _listing_target_head(tail)
+    if (
+        subj
+        and not _machine_from_section_title(subj)
+        and not _is_answer_structural_label(subj)
+        and not _is_maintenance_cycle_value(subj)
+        and not _is_query_subject_echo(subj, query)
+    ):
+        return [subj]
+    return []
+
+
+def _append_logic_line(
+    out: list[_LogicLine],
+    seen: set[tuple[str, str, int, int]],
+    *,
+    start: int,
+    end: int,
+    text: str,
+    machine: str = "",
+    subject: str = "",
+) -> None:
+    if not machine and not subject:
+        return
+    key = (
+        _normalize_label_key(machine),
+        _normalize_label_key(subject),
+        start,
+        end,
+    )
+    if key in seen:
+        return
+    seen.add(key)
+    out.append(_LogicLine(start, end, text, machine, subject))
+
+
+def _answer_logic_lines(answer: str, *, query: str = "") -> list[_LogicLine]:
+    """Semantic answer lines for placement (format-agnostic machine / subject rows)."""
+    body = _answer_text_for_placement(answer)
+    q = (query or "").strip()
+    out: list[_LogicLine] = []
+    seen: set[tuple[str, str, int, int]] = set()
+    current_machine = ""
+
+    for start, end, line in _line_spans_in_body(body):
+        if line.startswith("#"):
+            machine = _machine_from_section_title(line.lstrip("#").strip())
+            if machine:
+                current_machine = machine
+            continue
+
+        standalone = re.match(r"^\*\*(?:\d+\.\s*)?([^*]+)\*\*\s*$", line)
+        if standalone:
+            machine = _machine_from_section_title(standalone.group(1).strip())
+            if machine:
+                current_machine = machine
+            continue
+
+        num_bullet_machine = re.match(
+            r"^[-*•]\s*\*\*(?:\d+\.\s*)?([^*]+)\*\*\s*$",
+            line,
+        )
+        if num_bullet_machine:
+            machine = _machine_from_section_title(num_bullet_machine.group(1).strip())
+            if machine:
+                current_machine = machine
+            continue
+
+        mfield = _MACHINE_FIELD_LINE_RE.match(line)
+        if mfield:
+            machine = _machine_from_section_title(mfield.group(1).strip())
+            if machine:
+                current_machine = machine
+                value = mfield.group(2).strip()
+                subjects = _subjects_from_machine_field_value(value, q)
+                if subjects:
+                    for subj in subjects:
+                        if _is_maintenance_cycle_value(subj):
+                            continue
+                        _append_logic_line(
+                            out,
+                            seen,
+                            start=start,
+                            end=end,
+                            text=line,
+                            machine=machine,
+                            subject=subj,
+                        )
+                else:
+                    subj = _subject_from_machine_field_line(line)
+                    _append_logic_line(
+                        out,
+                        seen,
+                        start=start,
+                        end=end,
+                        text=line,
+                        machine=machine,
+                        subject=subj,
+                    )
+                continue
+
+        bullet = _COMPONENT_BULLET_RE.match(line)
+        if bullet:
+            title = bullet.group(1).strip()
+            rest = (bullet.group(2) or "").strip()
+            machine = _machine_from_section_title(title)
+            if machine:
+                current_machine = machine
+                if rest:
+                    for subj in _subjects_from_machine_field_value(rest, q):
+                        if not _is_maintenance_cycle_value(subj):
+                            _append_logic_line(
+                                out,
+                                seen,
+                                start=start,
+                                end=end,
+                                text=line,
+                                machine=machine,
+                                subject=subj,
+                            )
+                continue
+            comp = _listing_target_head(title)
+            if (
+                current_machine
+                and comp
+                and not _machine_from_section_title(comp)
+                and not _is_answer_structural_label(comp)
+                and not _is_maintenance_cycle_value(comp)
+                and not _is_query_subject_echo(comp, q)
+            ):
+                _append_logic_line(
+                    out,
+                    seen,
+                    start=start,
+                    end=end,
+                    text=line,
+                    machine=current_machine,
+                    subject=comp,
+                )
+            continue
+
+        num_comp = re.match(r"^\d+\.\s*\*\*([^*]+)\*\*", line)
+        if num_comp and current_machine:
+            comp = _listing_target_head(num_comp.group(1).strip())
+            if comp and not _is_answer_structural_label(comp):
+                _append_logic_line(
+                    out,
+                    seen,
+                    start=start,
+                    end=end,
+                    text=line,
+                    machine=current_machine,
+                    subject=comp,
+                )
+
+    out.sort(key=lambda row: row.start)
+    return out
+
+
+def _image_score_for_logic_line(line: _LogicLine, img: dict[str, Any]) -> float:
+    if line.machine and not _ref_matches_manual_hint(img, line.machine):
+        return -1.0
+    caption = str(img.get("caption") or "").strip()
+    if line.machine and line.subject:
+        heads: list[str] = []
+        seen: set[str] = set()
+        for cand in (line.subject, _listing_target_head(line.subject)):
+            key = _normalize_label_key(cand)
+            if cand and key not in seen:
+                seen.add(key)
+                heads.append(cand)
+        align = max(_pair_component_ref_align(h, img) for h in heads)
+        min_align = 0.38 if align >= 0.99 else 0.45
+        return align if align >= min_align else -1.0
+    if line.machine:
+        align = 0.35
+        subj = line.subject or _subject_from_machine_field_line(line.text)
+        if subj and caption:
+            align = max(align, text_term_alignment_symmetric(subj, caption))
+            if _label_matches_listing_target(caption, subj):
+                align = max(align, 1.0)
+        return align
+    if line.subject:
+        if caption and _label_matches_listing_target(caption, line.subject):
+            return 1.0
+        sym = text_term_alignment_symmetric(line.subject, caption)
+        return sym if sym >= 0.35 else -1.0
+    return -1.0
+
+
+def _build_caption_fallback_placements(
+    answer: str,
+    images: list[dict[str, Any]],
+    listing_spans: list[str],
+    min_score: float,
+) -> list[dict[str, Any]]:
+    """Single-entry answers: pair each image with best caption/listing anchor."""
+    answer_body = _answer_text_for_placement(answer)
+    placements: list[dict[str, Any]] = []
+    used_ranges: list[tuple[int, int]] = []
+
+    for image_index, img in enumerate(images):
+        caption = str(img.get("caption") or "").strip()
+        anchors: list[str] = []
+        if caption:
+            anchors.append(caption)
+        for span in listing_spans:
+            if not span:
+                continue
+            head = _listing_target_head(span)
+            if head and head not in anchors:
+                anchors.append(head)
+            if caption and _label_matches_listing_target(caption, span):
+                anchors.insert(0, span)
+            elif caption and (
+                span in caption
+                or caption in span
+                or text_term_alignment_symmetric(span, caption) >= 0.35
+            ):
+                anchors.append(span)
+        if not anchors and listing_spans:
+            anchors.extend(listing_spans)
+
+        best_start, best_end, best_score, best_anchor = -1, -1, 0.0, ""
+        seen_anchor: set[str] = set()
+        for anchor in anchors:
+            key = _normalize_label_key(anchor)
+            if not key or key in seen_anchor:
+                continue
+            seen_anchor.add(key)
+            start, end, score = _find_anchor_in_answer(answer, anchor)
+            label_match = bool(
+                caption
+                and (
+                    _label_matches_listing_target(caption, anchor)
+                    or _label_matches_listing_target(
+                        caption, _listing_target_head(anchor)
+                    )
+                )
+            )
+            effective = score + (0.5 if label_match else 0.0)
+            if effective > best_score:
+                best_start, best_end, best_score, best_anchor = (
+                    start,
+                    end,
+                    score,
+                    anchor,
+                )
+
+        if best_start < 0 or best_score < min_score:
+            continue
+        overlap = any(
+            not (best_end <= u0 or best_start >= u1) for u0, u1 in used_ranges
+        )
+        if overlap:
+            continue
+        used_ranges.append((best_start, best_end))
+        display_anchor = best_anchor
+        if 0 <= best_start < best_end <= len(answer_body):
+            snippet = answer_body[best_start:best_end].strip()
+            if snippet:
+                display_anchor = snippet
+        placements.append(
+            {
+                "anchor_text": display_anchor,
+                "match_start": best_start,
+                "match_end": best_end,
+                "image_index": image_index,
+                "score": round(best_score, 3),
+            }
+        )
+
+    placements.sort(key=lambda item: item["match_start"])
+    return placements
+
+
+def _build_semantic_inline_placements(
+    answer: str,
+    images: list[dict[str, Any]],
+    *,
+    query: str | None = None,
+    min_score: float,
+) -> list[dict[str, Any]]:
+    """Format-agnostic placement: one figure per semantic answer line when possible."""
+    logic_lines = _answer_logic_lines(answer, query=query or "")
+    placements: list[dict[str, Any]] = []
+    used_indices: set[int] = set()
+    used_ranges: list[tuple[int, int]] = []
+
+    for line in logic_lines:
+        span_score = min(1.0, 0.85 + 0.15 * min(1.0, len(line.text) / 40.0))
+        if span_score < min_score:
+            continue
+        best_idx = -1
+        best_align = -1.0
+        for idx, img in enumerate(images):
+            if idx in used_indices:
+                continue
+            align = _image_score_for_logic_line(line, img)
+            if align > best_align:
+                best_align = align
+                best_idx = idx
+        if best_idx < 0:
+            continue
+        overlap = any(
+            not (line.end <= u0 or line.start >= u1) for u0, u1 in used_ranges
+        )
+        if overlap:
+            continue
+        used_indices.add(best_idx)
+        used_ranges.append((line.start, line.end))
+        placements.append(
+            {
+                "anchor_text": line.text,
+                "match_start": line.start,
+                "match_end": line.end,
+                "image_index": best_idx,
+                "score": round(span_score, 3),
+            }
+        )
+
+    if placements:
+        placements.sort(key=lambda item: item["match_start"])
+        return placements
+
+    listing_spans = _answer_listing_spans(answer)
+    return _build_caption_fallback_placements(
+        answer, images, listing_spans, min_score
+    )
 
 
 def _build_machine_bullet_manual_placements(
@@ -4563,130 +4941,24 @@ def build_inline_placements(
     retrieved_docs: list[dict[str, Any]] | None = None,
 ) -> list[dict[str, Any]]:
     """Map each selected image to an answer span for inline Web rendering."""
+    del retrieved_docs
     if not (answer or "").strip() or not images:
         return []
     min_score = _inline_min_place_score()
-    answer_body = _answer_text_for_placement(answer)
-    listing_spans = _answer_listing_spans(answer)
-    pair_targets = _machine_component_listing_pair_targets(
-        query or "", answer, list(retrieved_docs or [])
+    placements = _build_semantic_inline_placements(
+        answer,
+        images,
+        query=query,
+        min_score=min_score,
     )
-    if (
-        len(pair_targets) >= 2
-        and len({m for m, _ in pair_targets}) >= 2
-        and _is_component_listing_across_machines(query or "")
-    ):
-        pair_placements = _build_machine_component_inline_placements(
-            answer, images, pair_targets, min_score
-        )
-        if pair_placements:
-            return _apply_placement_reindex(
-                images, pair_placements, keep_unplaced=True
-            )
-    machine_bullet_placements = _build_machine_bullet_manual_placements(
-        answer, images, min_score
-    )
-    if len(machine_bullet_placements) >= 2:
-        return _apply_placement_reindex(
-            images, machine_bullet_placements, keep_unplaced=True
-        )
-    source_keys = {
-        sk
-        for sk in (_source_key_from_image(img) for img in images)
-        if sk
-    }
-    if len(source_keys) >= 2 and _answer_has_multi_section_markdown(answer):
-        cross_placements = _build_cross_manual_inline_placements(
-            answer, images, min_score
-        )
-        if len(cross_placements) >= 2:
-            return _apply_placement_reindex(images, cross_placements)
-    if len(listing_spans) >= 2:
-        listing_placements = _build_listing_inline_placements(
-            answer, images, listing_spans, min_score
-        )
-        if listing_placements:
-            return _apply_placement_reindex(images, listing_placements)
-
-    placements: list[dict[str, Any]] = []
-    used_ranges: list[tuple[int, int]] = []
-
-    for image_index, img in enumerate(images):
-        caption = str(img.get("caption") or "").strip()
-        anchors: list[str] = []
-        if caption:
-            anchors.append(caption)
-        for span in listing_spans:
-            if not span:
-                continue
-            head = _listing_target_head(span)
-            if head and head not in anchors:
-                anchors.append(head)
-            if caption and _label_matches_listing_target(caption, span):
-                anchors.insert(0, span)
-            elif caption and (
-                span in caption
-                or caption in span
-                or text_term_alignment_symmetric(span, caption) >= 0.35
-            ):
-                anchors.append(span)
-        if not anchors and listing_spans:
-            anchors.extend(listing_spans)
-
-        best_start, best_end, best_score, best_anchor = -1, -1, 0.0, ""
-        seen_anchor: set[str] = set()
-        for anchor in anchors:
-            key = _normalize_label_key(anchor)
-            if not key or key in seen_anchor:
-                continue
-            seen_anchor.add(key)
-            start, end, score = _find_anchor_in_answer(answer, anchor)
-            label_match = bool(
-                caption
-                and (
-                    _label_matches_listing_target(caption, anchor)
-                    or _label_matches_listing_target(
-                        caption, _listing_target_head(anchor)
-                    )
-                )
-            )
-            effective = score + (0.5 if label_match else 0.0)
-            if effective > best_score:
-                best_start, best_end, best_score, best_anchor = (
-                    start,
-                    end,
-                    score,
-                    anchor,
-                )
-
-        if best_start < 0 or best_score < min_score:
-            continue
-        overlap = any(not (best_end <= u0 or best_start >= u1) for u0, u1 in used_ranges)
-        if overlap:
-            continue
-        used_ranges.append((best_start, best_end))
-        display_anchor = best_anchor
-        if 0 <= best_start < best_end <= len(answer_body):
-            snippet = answer_body[best_start:best_end].strip()
-            if snippet:
-                display_anchor = snippet
-        placements.append(
-            {
-                "anchor_text": display_anchor,
-                "match_start": best_start,
-                "match_end": best_end,
-                "image_index": image_index,
-                "score": round(best_score, 3),
-            }
-        )
-
     if not placements:
         return _apply_placement_reindex(
             images, _fallback_end_placements(answer, images)
         )
-
-    placements.sort(key=lambda item: item["match_start"])
-    return _apply_placement_reindex(images, placements)
+    keep_unplaced = len(placements) >= 2
+    return _apply_placement_reindex(
+        images, placements, keep_unplaced=keep_unplaced
+    )
 
 
 # --- LEGACY (disabled): focus_text_for_images + helpers — see EOF ---
