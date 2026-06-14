@@ -128,6 +128,19 @@ python scripts/run_web_path_q1_17.py
 
 ---
 
+## Checkpoint（阶段 A 完成）
+
+| 项 | 内容 |
+|----|------|
+| **Git commit** | `b0590cc` — `refactor(images): phase A semantic inline placement merge` |
+| **前置基线** | `345f5c1` — placement 修补 + Web 按行插入 |
+| **主要改动** | `build_inline_placements` 仅调 `_build_semantic_inline_placements`；新增 `_answer_logic_lines` |
+| **回放脚本** | `scripts/replay_placement_dumps.py` |
+
+回退阶段 A：`git revert b0590cc` 或 `git checkout 345f5c1`
+
+---
+
 ## 实施记录
 
 | 日期 | 内容 | commit |
