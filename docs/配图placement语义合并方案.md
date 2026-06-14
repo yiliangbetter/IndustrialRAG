@@ -97,7 +97,7 @@ git revert <phase-A-commit>
 
 | 项 | 内容 |
 |----|------|
-| **Git commit** | （本 commit 后填写） |
+| **Git commit** | `625af82` — `feat(web): phase B offset-primary inline image insertion` |
 | **前置** | `b0590cc` 阶段 A |
 | **改动文件** | `web/static/app.js` |
 
@@ -165,4 +165,4 @@ python scripts/run_web_path_q1_17.py
 | 日期 | 内容 | commit |
 |------|------|--------|
 | 2026-06-14 | 文档创建 | — |
-| 2026-06-14 | 阶段 B：Web `match_start` 偏移优先插入 | （待填） |
+| 2026-06-14 | 阶段 B：Web `match_start` 偏移优先插入 | `625af82` |
