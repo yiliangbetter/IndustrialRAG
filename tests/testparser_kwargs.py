@@ -15,9 +15,12 @@ Usage:
     pytest tests/testparser_kwargs.py
 """
 
-import pytest
-from unittest.mock import patch, MagicMock
 import os
+import subprocess
+from unittest.mock import MagicMock, patch
+
+import pytest
+
 from raganything.parser import MineruParser, DoclingParser
 
 
@@ -62,6 +65,38 @@ def test_mineru_env_propagation(
     assert "env" in kwargs
     assert kwargs["env"]["MY_VAR"] == "test_value"
     assert kwargs["env"]["PATH"] == os.environ["PATH"]
+
+
+@patch("subprocess.Popen")
+@patch("pathlib.Path.exists")
+@patch("pathlib.Path.mkdir")
+def test_mineru_no_proxy_includes_loopback_hosts(
+    mock_mkdir, mock_exists, mock_popen, mineru_parser, dummy_path
+):
+    mock_exists.return_value = True
+    mock_process = MagicMock()
+    mock_process.poll.return_value = 0
+    mock_process.wait.return_value = 0
+    mock_process.stdout.readline.return_value = ""
+    mock_process.stderr.readline.return_value = ""
+    mock_popen.return_value = mock_process
+
+    custom_env = {"NO_PROXY": "internal.service", "HTTP_PROXY": "http://proxy:8080"}
+
+    # Test loopback hosts are merged into proxy bypasses for nested mineru-api.
+    try:
+        mineru_parser._run_mineru_command(dummy_path, "out", env=custom_env)
+    except Exception:
+        pass
+
+    args, kwargs = mock_popen.call_args
+    no_proxy = kwargs["env"]["NO_PROXY"].split(",")
+    assert "internal.service" in no_proxy
+    assert "127.0.0.1" in no_proxy
+    assert "localhost" in no_proxy
+    assert "::1" in no_proxy
+    assert kwargs["env"]["no_proxy"] == kwargs["env"]["NO_PROXY"]
+    assert kwargs["stdin"] is subprocess.DEVNULL
 
 
 @patch("subprocess.run")

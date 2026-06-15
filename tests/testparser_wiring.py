@@ -202,3 +202,77 @@ async def test_parse_document_office_skips_none_method(monkeypatch, tmp_path):
     await dummy.parse_document(str(fake_docx), parse_method=None, method=None)
 
     assert "method" not in captured_kwargs
+
+
+@pytest.mark.asyncio
+async def test_parse_document_office_forwards_configured_parse_method(
+    monkeypatch, tmp_path
+):
+    import raganything.processor as processor_module
+
+    class FakeLogger:
+        def info(self, *args, **kwargs):
+            pass
+
+        def warning(self, *args, **kwargs):
+            pass
+
+        def error(self, *args, **kwargs):
+            pass
+
+        def debug(self, *args, **kwargs):
+            pass
+
+    captured_kwargs = {}
+
+    class FakeParser:
+        def parse_office_doc(self, **kwargs):
+            captured_kwargs.update(kwargs)
+            return [{"type": "text", "text": "office parsed", "page_idx": 0}]
+
+    monkeypatch.setattr(
+        processor_module,
+        "get_parser",
+        lambda parser_name: FakeParser(),
+    )
+
+    class DummyProcessor(processor_module.ProcessorMixin):
+        pass
+
+    dummy = DummyProcessor()
+    dummy.config = type(
+        "Config",
+        (),
+        {
+            "parser": "mineru",
+            "parser_output_dir": str(tmp_path / "output"),
+            "parse_method": "ocr",
+            "display_content_stats": False,
+            "use_full_path": False,
+        },
+    )()
+    dummy.logger = FakeLogger()
+    dummy.parse_cache = None
+
+    async def fake_store_cached_result(*args, **kwargs):
+        return None
+
+    monkeypatch.setattr(
+        DummyProcessor,
+        "_store_cached_result",
+        fake_store_cached_result,
+        raising=False,
+    )
+    monkeypatch.setattr(
+        DummyProcessor,
+        "_generate_content_based_doc_id",
+        lambda self, content_list: "doc-office",
+        raising=False,
+    )
+
+    fake_docx = tmp_path / "sample.docx"
+    fake_docx.write_bytes(b"PK\x03\x04")
+
+    await dummy.parse_document(str(fake_docx), parse_method=None, method=None)
+
+    assert captured_kwargs["method"] == "ocr"
