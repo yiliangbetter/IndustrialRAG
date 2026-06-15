@@ -29,12 +29,7 @@ _ROOT = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(_ROOT))
 load_dotenv(dotenv_path=_ROOT / ".env", override=False)
 
-
-def main() -> None:
-    asyncio.run(async_main())
-
-
-async def async_main() -> None:
+async def async_main() -> int:
     from lightrag import LightRAG
     from lightrag.llm.openai import openai_complete_if_cache, openai_embed
     from lightrag.utils import EmbeddingFunc, logger
@@ -276,6 +271,11 @@ async def async_main() -> None:
 
     logger.info(f"INGEST_DONE::ok={ok}::fail={fail}")
     await rag.finalize_storages()
+    return 0 if fail == 0 else 1
+
+
+def main() -> None:
+    raise SystemExit(asyncio.run(async_main()))
 
 
 if __name__ == "__main__":
