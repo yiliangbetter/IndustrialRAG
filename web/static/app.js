@@ -7,6 +7,7 @@ const composer = $("#composer");
 const btnSend = $("#btn-send");
 const btnClear = $("#btn-clear");
 const btnIngest = $("#btn-ingest");
+const btnIngestLog = $("#btn-ingest-log");
 const btnStopIngest = $("#btn-stop-ingest");
 const fileInput = $("#file-input");
 const uploadZone = $("#upload-zone");
@@ -23,12 +24,17 @@ const enableMultimodal = $("#enable-multimodal");
 const multimodalHint = $("#multimodal-hint");
 const queryDebugDump = $("#query-debug-dump");
 const queryDebugHint = $("#query-debug-hint");
+const kbBaseDir = $("#kb-base-dir");
+const btnKbApply = $("#btn-kb-apply");
+const kbPathStatus = $("#kb-path-status");
+const ingestKbBase = $("#ingest-kb-base");
 
 let pendingFiles = [];
 let ingestBusy = false;
 let ingestStopping = false;
 let multimodalSyncBusy = false;
 let queryDebugSyncBusy = false;
+let kbPathSyncBusy = false;
 let latestSetupStatus = null;
 /** When false, user scrolled up — do not auto-jump to bottom on every token. */
 let scrollPinnedToBottom = true;
@@ -586,13 +592,91 @@ function knowledgeBaseHasData() {
   return Boolean(latestSetupStatus?.knowledge_base_ok || latestSetupStatus?.kb_partial);
 }
 
+function syncKnowledgeBasePathFields(h) {
+  if (!h) return;
+  const base =
+    h.kb_base_dir ||
+    (h.working_dir && h.parser_output_dir
+      ? `${h.working_dir} + ${h.parser_output_dir}`
+      : "");
+  if (kbBaseDir && !kbPathSyncBusy && base && h.kb_base_dir) {
+    kbBaseDir.value = h.kb_base_dir;
+  }
+  const metaKb = $("#meta-kb-base");
+  if (metaKb) {
+    metaKb.textContent = h.kb_base_dir || "（自定义子路径）";
+  }
+  if ($("#meta-wd")) {
+    $("#meta-wd").textContent = h.working_dir || "—";
+  }
+  if ($("#meta-pod")) {
+    $("#meta-pod").textContent = h.parser_output_dir || "—";
+  }
+  if (ingestKbBase) {
+    ingestKbBase.textContent = h.kb_base_dir || h.working_dir || "—";
+  }
+}
+
+async function applyKnowledgeBasePath() {
+  if (!kbBaseDir || kbPathSyncBusy || ingestBusy) return;
+  const base_dir = (kbBaseDir.value || "").trim();
+  if (!base_dir) {
+    if (kbPathStatus) {
+      kbPathStatus.textContent = "请填写知识库根目录，例如 data/kb_new";
+      kbPathStatus.classList.remove("hidden");
+      kbPathStatus.className = "hint status-bad";
+    }
+    return;
+  }
+  kbPathSyncBusy = true;
+  if (btnKbApply) btnKbApply.disabled = true;
+  if (kbPathStatus) {
+    kbPathStatus.textContent = "正在切换知识库并重新加载引擎…";
+    kbPathStatus.classList.remove("hidden", "status-bad", "status-ok");
+  }
+  try {
+    const res = await fetch("/api/knowledge-base/switch", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ base_dir }),
+    });
+    const data = await res.json().catch(() => ({}));
+    if (!res.ok) {
+      const detail = data.detail;
+      const msg =
+        typeof detail === "string"
+          ? detail
+          : Array.isArray(detail)
+            ? detail.map((d) => d.msg || d).join("; ")
+            : data.message || `HTTP ${res.status}`;
+      throw new Error(msg);
+    }
+    if (kbPathStatus) {
+      kbPathStatus.textContent = data.message || "知识库路径已切换。";
+      kbPathStatus.classList.add("status-ok");
+    }
+    appendMessage("system", data.message || `已切换知识库：${base_dir}`);
+    await refreshStatus();
+  } catch (err) {
+    if (kbPathStatus) {
+      kbPathStatus.textContent = `切换失败：${err.message || err}`;
+      kbPathStatus.classList.add("status-bad");
+    }
+    appendMessage("system", `知识库路径切换失败：${err.message || err}`);
+  } finally {
+    kbPathSyncBusy = false;
+    if (btnKbApply) btnKbApply.disabled = false;
+    updateIngestControls();
+  }
+}
+
 async function refreshStatus() {
   try {
     const [h, setup] = await Promise.all([fetchHealth(), fetchSetupStatus().catch(() => null)]);
     latestSetupStatus = setup;
     $("#meta-ready").textContent = h.ready ? "是" : "否";
     $("#meta-ready").className = h.ready ? "status-ok" : "status-bad";
-    $("#meta-wd").textContent = h.working_dir || "—";
+    syncKnowledgeBasePathFields(h);
     $("#meta-mode").textContent = h.query_mode || "—";
     if ($("#meta-multimodal")) {
       $("#meta-multimodal").textContent = h.multimodal_enabled
@@ -647,8 +731,115 @@ function parseSseLines(buffer, onEvent) {
   return rest;
 }
 
-async function streamQuery(query, loadingEl) {
-  const q = (typeof query === "string" ? query : query?.query || "").trim();
+function renderClarificationPanel(loadingEl, data) {
+  stopLoadingMessage(loadingEl);
+  loadingEl.classList.add("clarification-panel");
+  loadingEl.classList.remove("streaming");
+  loadingEl.innerHTML = "";
+
+  const roleEl = document.createElement(`d` + `iv`);
+  roleEl.className = "role";
+  roleEl.textContent = "助手";
+  loadingEl.appendChild(roleEl);
+
+  const bodyEl = document.createElement(`d` + `iv`);
+  bodyEl.className = "body";
+
+  const unanswerable = Boolean(data?.unanswerable);
+  const intro = document.createElement("p");
+  intro.className = unanswerable ? "clarify-intro clarify-unanswerable" : "clarify-intro";
+  if (unanswerable) {
+    intro.textContent =
+      data?.message ||
+      "当前知识库中未找到足够相关的依据，无法对该问题给出合理答案。请换种说法或联系技术支持。";
+  } else {
+    const k = data?.generation?.k_answerable ?? (data?.candidates || []).length;
+    intro.textContent =
+      k > 0
+        ? "您的问题较模糊。请从下列已验证可检索的推荐问法中选择，或坚持原问题继续。"
+        : "暂未生成可检索的推荐问法，您可以坚持原问题继续，或在输入框换种说法重试。";
+  }
+  bodyEl.appendChild(intro);
+
+  const preview = document.createElement(`d` + `iv`);
+  preview.className = "clarify-preview";
+  preview.innerHTML = `原问：<pre>${escapeHtml(data?.original_query || "")}</pre>`;
+  bodyEl.appendChild(preview);
+
+  if (!unanswerable) {
+    const options = document.createElement(`d` + `iv`);
+    options.className = "clarify-options";
+
+    for (const cand of data?.candidates || []) {
+      const btn = document.createElement("button");
+      btn.type = "button";
+      btn.className = "clarify-option";
+      const scoreTxt =
+        cand.max_rerank_score != null
+          ? ` · rerank ${cand.max_rerank_score}`
+          : cand.score != null
+            ? ` · ${cand.score}`
+            : "";
+      const chunkTxt =
+        cand.chunk_count != null ? ` · ${cand.chunk_count} chunks` : "";
+      btn.textContent = `${cand.text}${chunkTxt}${scoreTxt}`;
+      btn.addEventListener("click", () => {
+        void submitClarifiedQuery({
+          query: cand.text,
+          clarify_choice: "use_candidate",
+          clarification_id: data.clarification_id,
+          candidate_id: cand.id,
+        });
+      });
+      options.appendChild(btn);
+    }
+
+    const keep = data?.keep_original;
+    if (keep?.text) {
+      const btn = document.createElement("button");
+      btn.type = "button";
+      btn.className = "clarify-option clarify-keep-original";
+      btn.textContent = keep.label || "坚持原问题";
+      btn.addEventListener("click", () => {
+        void submitClarifiedQuery({
+          query: keep.text,
+          clarify_choice: "keep_original",
+        });
+      });
+      options.appendChild(btn);
+    }
+
+    bodyEl.appendChild(options);
+  }
+
+  loadingEl.appendChild(bodyEl);
+  scrollMessages(true);
+}
+
+async function submitClarifiedQuery(opts) {
+  const q = (opts?.query || "").trim();
+  if (!q) return;
+
+  appendMessage("user", q);
+  scrollPinnedToBottom = true;
+  btnSend.disabled = true;
+  const loading = createLoadingMessage();
+
+  try {
+    await streamQuery(opts, loading);
+  } catch (err) {
+    loading.remove();
+    appendMessage("system", `错误：${err.message || err}`);
+  } finally {
+    btnSend.disabled = false;
+    queryInput.focus();
+  }
+}
+
+async function streamQuery(queryOrOpts, loadingEl) {
+  const opts =
+    typeof queryOrOpts === "string" ? { query: queryOrOpts } : { ...queryOrOpts };
+  const q = (opts.query || "").trim();
   const res = await fetch("/api/query/stream", {
     method: "POST",
     headers: { "Content-Type": "application/json" },
@@ -656,6 +847,9 @@ async function streamQuery(query, loadingEl) {
       query: q,
       mode: queryMode.value,
       stream: true,
+      clarify_choice: opts.clarify_choice || null,
+      clarification_id: opts.clarification_id || null,
+      candidate_id: opts.candidate_id || null,
     }),
   });
 
@@ -707,6 +901,11 @@ async function streamQuery(query, loadingEl) {
       applyInlineImages(ui, ev);
       return;
     }
+    if (ev.type === "clarification_required") {
+      renderClarificationPanel(loadingEl, ev.data);
+      gotContent = true;
+      return;
+    }
     if (ev.type === "error") {
       streamError = new Error(ev.message || "查询失败");
       return;
@@ -737,6 +936,10 @@ async function streamQuery(query, loadingEl) {
     }
     if (ev.type === "done") {
       loadingEl.classList.remove("streaming");
+      if (ev.clarification_only) {
+        scrollMessages(true);
+        return;
+      }
       if (ui?.thinkingBlock && ui.thinkingRaw) {
         ui.thinkingBlock.open = false;
       }
@@ -770,7 +973,7 @@ async function streamQuery(query, loadingEl) {
     bodyEl.textContent = "未收到回答，请查看服务端日志或稍后重试。";
     loadingEl.appendChild(roleEl);
     loadingEl.appendChild(bodyEl);
-  } else {
+  } else if (!loadingEl.classList.contains("clarification-panel")) {
     stopLoadingMessage(loadingEl);
     loadingEl.classList.remove("streaming");
     if (ui?.answerMd && ui.answerRaw && !ui.inlineFiguresApplied) {
@@ -833,12 +1036,28 @@ function updateIngestControls() {
     btnIngest.textContent = hasKb ? "追加灌库" : "开始灌库";
   }
   btnIngest.disabled = !hasFiles || ingestBusy || multimodalSyncBusy;
+  if (btnKbApply) {
+    btnKbApply.disabled = ingestBusy || kbPathSyncBusy;
+  }
+  if (kbBaseDir) {
+    kbBaseDir.disabled = ingestBusy || kbPathSyncBusy;
+  }
   if (enableMultimodal) {
     enableMultimodal.disabled = ingestBusy || multimodalSyncBusy;
   }
   if (btnStopIngest) {
     btnStopIngest.classList.toggle("hidden", !ingestBusy);
     btnStopIngest.disabled = !ingestBusy || ingestStopping;
+  }
+  if (btnIngestLog) {
+    const modal = typeof getIngestTerminalModal === "function" ? getIngestTerminalModal() : null;
+    const hasLog =
+      (ingestLog && (ingestLog.textContent || "").trim().length > 0) ||
+      (modal?.logEl && (modal.logEl.textContent || "").trim().length > 0);
+    btnIngestLog.classList.toggle("hidden", !ingestBusy && !hasLog);
+  }
+  if (typeof updateIngestTerminalStopState === "function") {
+    updateIngestTerminalStopState(ingestBusy, ingestStopping);
   }
 }
 
@@ -890,6 +1109,10 @@ uploadZone.addEventListener("drop", (e) => {
   e.preventDefault();
   uploadZone.classList.remove("dragover");
   if (e.dataTransfer?.files?.length) addFiles(e.dataTransfer.files);
+});
+
+btnIngestLog?.addEventListener("click", () => {
+  if (typeof showIngestTerminalModal === "function") showIngestTerminalModal();
 });
 
 btnIngest.addEventListener("click", async () => {
@@ -958,7 +1181,7 @@ btnIngest.addEventListener("click", async () => {
   }
 });
 
-btnStopIngest?.addEventListener("click", async () => {
+async function handleStopIngest() {
   if (!ingestBusy || ingestStopping) return;
   ingestStopping = true;
   updateIngestControls();
@@ -970,7 +1193,10 @@ btnStopIngest?.addEventListener("click", async () => {
     appendIngestLog(ingestLog, `停止失败：${err.message || err}`);
     ingestStatus.textContent = `停止失败：${err.message || err}`;
   }
-});
+}
+
+btnStopIngest?.addEventListener("click", handleStopIngest);
+document.addEventListener("ingest-stop-request", handleStopIngest);
 
 enableMultimodal?.addEventListener("change", async () => {
   if (multimodalSyncBusy || ingestBusy) return;
@@ -1016,6 +1242,17 @@ queryDebugDump?.addEventListener("change", async () => {
     appendMessage("system", `调试开关保存失败：${err.message || err}`);
   } finally {
     queryDebugSyncBusy = false;
+  }
+});
+
+btnKbApply?.addEventListener("click", () => {
+  void applyKnowledgeBasePath();
+});
+
+kbBaseDir?.addEventListener("keydown", (ev) => {
+  if (ev.key === "Enter") {
+    ev.preventDefault();
+    void applyKnowledgeBasePath();
   }
 });
 

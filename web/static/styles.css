@@ -175,6 +175,37 @@ body {
   font-size: 1rem;
 }
 
+.field input.mono,
+.field input[type="text"].mono {
+  background: var(--bg-elevated);
+  border: 1px solid var(--border);
+  color: var(--text);
+  border-radius: 6px;
+  padding: 0.55rem 0.6rem;
+  font-size: 0.92rem;
+  font-family: ui-monospace, "Cascadia Code", Consolas, monospace;
+}
+
+.kb-path-row {
+  display: flex;
+  gap: 0.5rem;
+  align-items: stretch;
+}
+
+.kb-path-row input {
+  flex: 1;
+  min-width: 0;
+}
+
+.kb-path-row .btn {
+  flex-shrink: 0;
+  white-space: nowrap;
+}
+
+.hint code {
+  font-size: 0.88em;
+}
+
 .hint {
   font-size: 0.95rem;
   color: var(--text-muted);
@@ -227,6 +258,129 @@ body {
 
 .ingest-log:empty {
   display: none;
+}
+
+.ingest-terminal-backdrop {
+  position: fixed;
+  inset: 0;
+  z-index: 1200;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  padding: 1.25rem;
+  background: rgba(15, 23, 42, 0.55);
+  backdrop-filter: blur(2px);
+}
+
+.ingest-terminal-panel {
+  width: min(920px, 96vw);
+  max-height: min(82vh, 720px);
+  display: flex;
+  flex-direction: column;
+  background: var(--bg-elevated, #fff);
+  border: 1px solid var(--border);
+  border-radius: 12px;
+  box-shadow: 0 24px 48px rgba(0, 0, 0, 0.22);
+  overflow: hidden;
+}
+
+.ingest-terminal-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 0.75rem;
+  padding: 0.75rem 1rem;
+  border-bottom: 1px solid var(--border);
+  background: #0f172a;
+  color: #e2e8f0;
+}
+
+.ingest-terminal-title-wrap {
+  display: flex;
+  align-items: center;
+  gap: 0.5rem;
+}
+
+.ingest-terminal-title-wrap h2 {
+  margin: 0;
+  font-size: 1rem;
+  font-weight: 600;
+}
+
+.ingest-terminal-dot {
+  width: 0.55rem;
+  height: 0.55rem;
+  border-radius: 50%;
+  background: #22c55e;
+  box-shadow: 0 0 0 0 rgba(34, 197, 94, 0.5);
+  animation: ingest-terminal-pulse 1.6s ease infinite;
+}
+
+body.ingest-terminal-open .ingest-terminal-dot {
+  animation: ingest-terminal-pulse 1.6s ease infinite;
+}
+
+@keyframes ingest-terminal-pulse {
+  0%,
+  100% {
+    opacity: 1;
+  }
+  50% {
+    opacity: 0.45;
+  }
+}
+
+.ingest-terminal-header-actions {
+  display: flex;
+  align-items: center;
+  gap: 0.5rem;
+  flex-shrink: 0;
+}
+
+.ingest-terminal-header .btn.ghost {
+  color: #e2e8f0;
+  border-color: rgba(226, 232, 240, 0.35);
+}
+
+.ingest-terminal-header .btn.danger {
+  margin-top: 0;
+  padding: 0.35rem 0.75rem;
+  font-size: 0.88rem;
+}
+
+.ingest-terminal-progress {
+  padding: 0.75rem 1rem 0;
+}
+
+.ingest-terminal-log {
+  flex: 1;
+  margin: 0.75rem 1rem;
+  max-height: none;
+  min-height: 16rem;
+  font-size: 0.84rem;
+}
+
+.ingest-terminal-hint {
+  margin: 0 1rem 0.85rem;
+}
+
+.ingest-terminal-reopen {
+  position: fixed;
+  right: 1rem;
+  bottom: 1rem;
+  z-index: 1100;
+  padding: 0.55rem 0.9rem;
+  border-radius: 999px;
+  border: 1px solid var(--border);
+  background: var(--bg-elevated, #fff);
+  color: var(--text);
+  box-shadow: 0 8px 24px rgba(0, 0, 0, 0.12);
+  cursor: pointer;
+  font-size: 0.92rem;
+}
+
+.ingest-terminal-reopen:hover {
+  border-color: var(--accent-dim);
 }
 
 .error {
@@ -412,6 +566,13 @@ body {
   width: auto;
   margin-top: 0;
   min-width: 8rem;
+}
+
+.ingest-actions .btn.ghost {
+  flex: 0 0 auto;
+  width: auto;
+  margin-top: 0;
+  min-width: auto;
 }
 
 .btn.danger {
@@ -871,6 +1032,11 @@ body {
   color: var(--text);
 }
 
+.msg.clarification-panel .clarify-intro.clarify-unanswerable {
+  color: var(--danger);
+  font-weight: 600;
+}
+
 .msg.clarification-panel .clarify-preview {
   margin-bottom: 0.75rem;
   font-size: 0.92rem;
@@ -895,8 +1061,9 @@ body {
 button.clarify-option {
   text-align: left;
   white-space: normal;
-  line-height: 1.4;
-  padding: 0.55rem 0.75rem;
+  font-size: 1.15rem;
+  line-height: 1.5;
+  padding: 0.65rem 0.85rem;
 }
 
 button.clarify-option.clarify-option-selected,

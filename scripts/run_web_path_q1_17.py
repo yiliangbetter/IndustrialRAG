@@ -460,7 +460,11 @@ async def run_cases(ids: list[int], *, mode: str, wd: Path, pod: Path) -> list[d
             if not g["image_ok"]:
                 print(f"  img: {g['image_notes']}", flush=True)
             for c in [i.get("caption") for i in row["images"]]:
-                print(f"  caption: {c}", flush=True)
+                try:
+                    print(f"  caption: {c}", flush=True)
+                except UnicodeEncodeError:
+                    safe = str(c).encode("utf-8", errors="replace").decode("utf-8")
+                    print(f"  caption: {safe}", flush=True)
     finally:
         await rag.finalize_storages()
     return out

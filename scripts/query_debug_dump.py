@@ -12,7 +12,7 @@ from typing import Any
 
 from client_paths import get_app_root, get_logs_dir
 
-_SCHEMA = "rag_query_dump_v1"
+_SCHEMA = "rag_query_dump_v2"
 _MAX_TEXT = 12000
 _MAX_DOC_BODY = 4000
 _MAX_ANSWER = 8000
@@ -78,9 +78,11 @@ def build_query_dump(
     related_images: list[dict[str, Any]] | None = None,
     images_debug: dict[str, Any] | None = None,
     steering_report: dict[str, Any] | None = None,
+    naive_relevance: dict[str, Any] | None = None,
+    clarify_gate: dict[str, Any] | None = None,
     duration_ms: int | None = None,
 ) -> dict[str, Any]:
-    return {
+    payload: dict[str, Any] = {
         "schema": _SCHEMA,
         "saved_at": datetime.now(timezone.utc).isoformat(),
         "app_root": str(get_app_root()),
@@ -101,6 +103,11 @@ def build_query_dump(
         },
         "steering": steering_report or {},
     }
+    if isinstance(naive_relevance, dict) and naive_relevance:
+        payload["naive_relevance"] = naive_relevance
+    if isinstance(clarify_gate, dict) and clarify_gate:
+        payload["clarify_gate"] = clarify_gate
+    return payload
 
 
 def write_query_dump(payload: dict[str, Any]) -> Path:

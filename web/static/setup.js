@@ -476,6 +476,9 @@ function updateIngestControls() {
     btnStopIngest.classList.toggle("hidden", !ingestBusy);
     btnStopIngest.disabled = !ingestBusy || ingestStopping;
   }
+  if (typeof updateIngestTerminalStopState === "function") {
+    updateIngestTerminalStopState(ingestBusy, ingestStopping);
+  }
 
   if (enableMultimodal) {
     enableMultimodal.disabled = ingestBusy || engineLoadBusy || multimodalSyncBusy;
@@ -819,7 +822,7 @@ btnIngestAppend?.addEventListener("click", async () => {
   await startIngest({ clearFirst: false });
 });
 
-btnStopIngest?.addEventListener("click", async () => {
+async function handleStopIngest() {
   if (!ingestBusy || ingestStopping) return;
   ingestStopping = true;
   updateIngestControls();
@@ -831,7 +834,10 @@ btnStopIngest?.addEventListener("click", async () => {
     appendIngestLog(ingestLog, `停止失败：${err.message || err}`);
     ingestStatus.textContent = `停止失败：${err.message || err}`;
   }
-});
+}
+
+btnStopIngest?.addEventListener("click", handleStopIngest);
+document.addEventListener("ingest-stop-request", handleStopIngest);
 
 btnFinish.addEventListener("click", async () => {
   finishStatus.textContent = "正在完成…";

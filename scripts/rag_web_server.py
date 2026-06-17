@@ -87,10 +87,48 @@ def _load_rpc():
 
 def _resolve_path(env_key: str, default: str) -> Path:
     raw = (os.getenv(env_key) or default).strip()
-    p = Path(raw).expanduser()
+    return _resolve_user_path(raw)
+
+
+def _resolve_user_path(raw: str) -> Path:
+    p = Path((raw or "").strip()).expanduser()
     if not p.is_absolute():
         p = (_ROOT / p).resolve()
+    else:
+        p = p.resolve()
     return p
+
+
+def _kb_paths_from_base(base: Path) -> tuple[Path, Path]:
+    return base / "rag_storage", base / "pipeline_parse"
+
+
+def _infer_kb_base_dir(working_dir: Path, parser_output_dir: Path) -> str | None:
+    if (
+        working_dir.name == "rag_storage"
+        and parser_output_dir.name == "pipeline_parse"
+        and working_dir.parent == parser_output_dir.parent
+    ):
+        return str(working_dir.parent)
+    return None
+
+
+def _resolve_kb_paths(
+    *,
+    base_dir: str | None = None,
+    working_dir: str | None = None,
+    parser_output_dir: str | None = None,
+) -> tuple[Path, Path]:
+    base_raw = (base_dir or "").strip()
+    wd_raw = (working_dir or "").strip()
+    pod_raw = (parser_output_dir or "").strip()
+    if base_raw:
+        if wd_raw or pod_raw:
+            raise ValueError("请只填写知识库根目录，或分别填写 rag_storage / pipeline_parse，不要混用。")
+        return _kb_paths_from_base(_resolve_user_path(base_raw))
+    if not wd_raw or not pod_raw:
+        raise ValueError("请填写知识库根目录（推荐），或同时填写 rag_storage 与 pipeline_parse 路径。")
+    return _resolve_user_path(wd_raw), _resolve_user_path(pod_raw)
 
 
 class QueryBody(BaseModel):
@@ -99,6 +137,18 @@ class QueryBody(BaseModel):
     stream: bool = Field(
         True,
         description="When true, prefer /api/query/stream; ignored on non-stream endpoint.",
+    )
+    clarify_choice: str | None = Field(
+        None,
+        description="Bypass gate: use_candidate | keep_original",
+    )
+    clarification_id: str | None = Field(
+        None,
+        description="Required with clarify_choice=use_candidate",
+    )
+    candidate_id: str | None = Field(
+        None,
+        description="Required with clarify_choice=use_candidate",
     )
 
 
@@ -112,6 +162,23 @@ class MultimodalBody(BaseModel):
 
 class QueryDebugBody(BaseModel):
     enabled: bool = Field(..., description="Save structured JSON dumps under logs/query_dumps/")
+
+
+class KnowledgeBaseSwitchBody(BaseModel):
+    """Switch active KB: ``base_dir/rag_storage`` + ``base_dir/pipeline_parse``."""
+
+    base_dir: str | None = Field(
+        None,
+        description="Knowledge-base root containing rag_storage/ and pipeline_parse/",
+    )
+    working_dir: str | None = Field(
+        None,
+        description="LightRAG working dir (advanced; use with parser_output_dir)",
+    )
+    parser_output_dir: str | None = Field(
+        None,
+        description="MinerU parser output root (advanced; use with working_dir)",
+    )
 
 
 def _sse(payload: dict[str, Any]) -> str:
@@ -161,6 +228,51 @@ async def _run_aquery(q: str, mode: str, *, stream: bool) -> str | AsyncIterator
         )
 
 
+async def _resolve_naive_relevance(query: str, mode: str) -> dict[str, Any] | None:
+    from query_progress_hooks import get_naive_relevance  # noqa: WPS433
+
+    cached = get_naive_relevance()
+    if isinstance(cached, dict):
+        return cached
+    from raganything.naive_relevance import (  # noqa: WPS433
+        is_naive_relevance_enabled,
+        score_naive_relevance,
+    )
+
+    if not is_naive_relevance_enabled(mode) or state.rag is None:
+        return None
+    from lightrag import QueryParam  # noqa: WPS433
+
+    return await score_naive_relevance(
+        state.rag.lightrag,
+        query,
+        query_param=QueryParam(mode=mode),
+    )
+
+
+async def _evaluate_clarify_gate(body: QueryBody, mode: str) -> Any:
+    from raganything.clarify_gate import (  # noqa: WPS433
+        ClarifyBypass,
+        ClarifyRequired,
+        ClarifyValidationError,
+        evaluate_clarify_gate,
+    )
+
+    if state.rag is None:
+        raise HTTPException(503, "RAG engine not initialized")
+    try:
+        return await evaluate_clarify_gate(
+            state.rag.lightrag,
+            body.query.strip(),
+            mode=mode,
+            clarify_choice=body.clarify_choice,
+            clarification_id=body.clarification_id,
+            candidate_id=body.candidate_id,
+        )
+    except ClarifyValidationError as exc:
+        raise HTTPException(400, str(exc)) from exc
+
+
 def _persist_query_debug_dump(
     *,
     query: str,
@@ -170,6 +282,8 @@ def _persist_query_debug_dump(
     answer: str | None = None,
     error: str | None = None,
     duration_ms: int | None = None,
+    naive_relevance: dict[str, Any] | None = None,
+    clarify_gate: dict[str, Any] | None = None,
 ) -> Path | None:
     from query_debug_dump import (  # noqa: WPS433
         build_query_dump,
@@ -189,6 +303,10 @@ def _persist_query_debug_dump(
     from query_progress_hooks import finalize_related_images  # noqa: WPS433
 
     hook_state = get_query_debug_state()
+    if naive_relevance is None:
+        naive_relevance = hook_state.get("naive_relevance")
+        if not isinstance(naive_relevance, dict):
+            naive_relevance = None
     retrieved_docs = hook_state.get("retrieved_docs")
     docs_text = hook_state.get("retrieved_docs_text")
     if not docs_text and isinstance(retrieved_docs, list):
@@ -223,6 +341,8 @@ def _persist_query_debug_dump(
         steering_report=hook_state.get("steering_report")
         if isinstance(hook_state.get("steering_report"), dict)
         else None,
+        naive_relevance=naive_relevance,
+        clarify_gate=clarify_gate,
     )
     return write_query_dump(payload)
 
@@ -507,6 +627,49 @@ async def api_setup_reload_rag():
         "rag_ready": state.ready,
         "rag_error": state.init_error,
         "working_dir": state.working_dir,
+        "parser_output_dir": state.parser_output_dir,
+        "kb_base_dir": _infer_kb_base_dir(
+            Path(state.working_dir), Path(state.parser_output_dir)
+        )
+        if state.working_dir and state.parser_output_dir
+        else None,
+    }
+
+
+@app.post("/api/knowledge-base/switch")
+async def api_knowledge_base_switch(body: KnowledgeBaseSwitchBody):
+    """Point ingest + query to another KB directory pair and reload the engine."""
+    _reject_if_ingest_active("切换知识库路径")
+    try:
+        wd, pod = _resolve_kb_paths(
+            base_dir=body.base_dir,
+            working_dir=body.working_dir,
+            parser_output_dir=body.parser_output_dir,
+        )
+    except ValueError as exc:
+        raise HTTPException(400, str(exc)) from exc
+
+    wd.mkdir(parents=True, exist_ok=True)
+    pod.mkdir(parents=True, exist_ok=True)
+
+    patch_env_keys(
+        {
+            "RAG_WEB_WORKING_DIR": str(wd),
+            "RAG_WEB_PARSER_OUTPUT_DIR": str(pod),
+        }
+    )
+    apply_env_to_process()
+    await _shutdown_rag()
+    await _init_rag_engine()
+    kb_base = _infer_kb_base_dir(wd, pod)
+    return {
+        "ok": True,
+        "rag_ready": state.ready,
+        "rag_error": state.init_error,
+        "working_dir": state.working_dir,
+        "parser_output_dir": state.parser_output_dir,
+        "kb_base_dir": kb_base,
+        "message": f"已切换到知识库：{kb_base or wd}",
     }
 
 
@@ -591,11 +754,18 @@ async def api_media_image(token: str = ""):
 async def health():
     from query_debug_dump import get_query_dump_dir, is_query_debug_enabled  # noqa: WPS433
 
+    kb_base: str | None = None
+    if state.working_dir and state.parser_output_dir:
+        kb_base = _infer_kb_base_dir(
+            Path(state.working_dir), Path(state.parser_output_dir)
+        )
+
     return {
         "ready": state.ready,
         "init_error": state.init_error,
         "working_dir": state.working_dir,
         "parser_output_dir": state.parser_output_dir,
+        "kb_base_dir": kb_base,
         "query_mode": state.query_mode,
         "skip_multimodal": state.skip_multimodal,
         "multimodal_enabled": not state.skip_multimodal,
@@ -646,6 +816,30 @@ async def api_query(body: QueryBody):
     mode = (body.mode or state.query_mode or "mix").strip()
     q = body.query.strip()
     parser_root = Path(state.parser_output_dir).resolve()
+
+    from raganything.clarify_gate import ClarifyRequired  # noqa: WPS433
+
+    gate_result = await _evaluate_clarify_gate(body, mode)
+    if isinstance(gate_result, ClarifyRequired):
+        dump_path = _persist_query_debug_dump(
+            query=q,
+            mode=mode,
+            parser_root=parser_root,
+            clarify_gate={
+                "required": True,
+                **gate_result.data,
+            },
+        )
+        payload: dict[str, Any] = {
+            "clarification_required": True,
+            "clarification": gate_result.data,
+            "query": q,
+            "mode": mode,
+        }
+        if dump_path is not None:
+            payload["debug_dump"] = {"path": str(dump_path), "name": dump_path.name}
+        return payload
+
     started = time.perf_counter()
     thinking = ""
     answer = ""
@@ -654,7 +848,9 @@ async def api_query(body: QueryBody):
     if str(_scripts_dir) not in sys.path:
         sys.path.insert(0, str(_scripts_dir))
     from query_progress_hooks import (  # noqa: WPS433
+        get_naive_relevance,
         query_progress_hooks,
+        set_query_lightrag,
         set_query_media_roots,
         set_query_text_for_images,
     )
@@ -662,6 +858,7 @@ async def api_query(body: QueryBody):
 
     set_query_media_roots([parser_root])
     set_query_text_for_images(q)
+    set_query_lightrag(state.rag.lightrag, mode=mode)
     try:
         async with query_progress_hooks():
             raw = await _run_aquery(q, mode, stream=False)
@@ -673,6 +870,7 @@ async def api_query(body: QueryBody):
             parser_root=parser_root,
             error=error,
             duration_ms=int((time.perf_counter() - started) * 1000),
+            naive_relevance=get_naive_relevance(),
         )
         raise HTTPException(500, f"Query failed: {exc}") from exc
 
@@ -685,6 +883,7 @@ async def api_query(body: QueryBody):
     from query_doc_steering import strip_manual_circled_step_markers  # noqa: WPS433
 
     answer = strip_manual_circled_step_markers(answer)
+    naive_rel = get_naive_relevance()
     dump_path = _persist_query_debug_dump(
         query=q,
         mode=mode,
@@ -692,6 +891,7 @@ async def api_query(body: QueryBody):
         thinking=thinking,
         answer=answer,
         duration_ms=int((time.perf_counter() - started) * 1000),
+        naive_relevance=naive_rel,
     )
     payload: dict[str, Any] = {
         "thinking": thinking,
@@ -699,21 +899,59 @@ async def api_query(body: QueryBody):
         "mode": mode,
         "query": q,
     }
+    if naive_rel is not None:
+        payload["naive_relevance"] = naive_rel
     if dump_path is not None:
         payload["debug_dump"] = {"path": str(dump_path), "name": dump_path.name}
     return payload
 
 
-async def _query_stream_events(q: str, mode: str) -> AsyncIterator[str]:
+async def _query_stream_events(q: str, mode: str, body: QueryBody) -> AsyncIterator[str]:
     """SSE tied to real LightRAG stages (retrieve → rerank → generate), then token deltas."""
     from query_doc_steering import strip_manual_circled_step_markers  # noqa: WPS433
-    from query_progress_hooks import query_progress_hooks, set_query_media_roots, set_query_text_for_images  # noqa: WPS433
+    from query_progress_hooks import query_progress_hooks, get_naive_relevance, set_query_lightrag, set_query_media_roots, set_query_text_for_images  # noqa: WPS433
     from stream_cot_parser import StreamCotParser  # noqa: WPS433
+    from raganything.clarify_gate import ClarifyRequired  # noqa: WPS433
 
     q = q.strip()
     parser_root = Path(state.parser_output_dir).resolve()
+
+    gate_result = await _evaluate_clarify_gate(body, mode)
+    if isinstance(gate_result, ClarifyRequired):
+        dump_path = _persist_query_debug_dump(
+            query=q,
+            mode=mode,
+            parser_root=parser_root,
+            clarify_gate={
+                "required": True,
+                **gate_result.data,
+            },
+        )
+        if gate_result.data.get("unanswerable"):
+            yield _sse(
+                {
+                    "type": "status",
+                    "text": gate_result.data.get("message")
+                    or "当前知识库中未找到足够相关的依据，无法对该问题给出合理答案。",
+                }
+            )
+        else:
+            yield _sse({"type": "status", "text": "需要澄清：请选择更明确的问法，或坚持原问题。"})
+        yield _sse({"type": "clarification_required", "data": gate_result.data})
+        if dump_path is not None:
+            yield _sse(
+                {
+                    "type": "query_debug_saved",
+                    "path": str(dump_path),
+                    "name": dump_path.name,
+                }
+            )
+        yield _sse({"type": "done", "mode": mode, "clarification_only": True})
+        return
+
     set_query_media_roots([parser_root])
     set_query_text_for_images(q)
+    set_query_lightrag(state.rag.lightrag, mode=mode)
     started = time.perf_counter()
     thinking_parts: list[str] = []
     answer_parts: list[str] = []
@@ -751,6 +989,7 @@ async def _query_stream_events(q: str, mode: str) -> AsyncIterator[str]:
                             "retrieval_scope",
                             "related_images",
                             "inline_images",
+                            "naive_relevance",
                         ):
                             yield _sse(ev)
                     except Exception:
@@ -760,12 +999,14 @@ async def _query_stream_events(q: str, mode: str) -> AsyncIterator[str]:
                     kind, payload = res_task.result()
                     if kind == "error":
                         stream_error = _friendly_query_error(payload)
+                        naive_rel = await _resolve_naive_relevance(q, mode)
                         dump_path = _persist_query_debug_dump(
                             query=q,
                             mode=mode,
                             parser_root=parser_root,
                             error=stream_error,
                             duration_ms=int((time.perf_counter() - started) * 1000),
+                            naive_relevance=naive_rel,
                         )
                         if dump_path is not None:
                             yield _sse(
@@ -782,12 +1023,14 @@ async def _query_stream_events(q: str, mode: str) -> AsyncIterator[str]:
                         chunk_iter = _iter_llm_chunks(payload)
                     except Exception as exc:
                         stream_error = _friendly_query_error(exc)
+                        naive_rel = await _resolve_naive_relevance(q, mode)
                         dump_path = _persist_query_debug_dump(
                             query=q,
                             mode=mode,
                             parser_root=parser_root,
                             error=stream_error,
                             duration_ms=int((time.perf_counter() - started) * 1000),
+                            naive_relevance=naive_rel,
                         )
                         if dump_path is not None:
                             yield _sse(
@@ -838,6 +1081,7 @@ async def _query_stream_events(q: str, mode: str) -> AsyncIterator[str]:
                         )
                     elif related:
                         yield _sse({"type": "related_images", "images": related})
+                    naive_rel = get_naive_relevance() or await _resolve_naive_relevance(q, mode)
                     dump_path = _persist_query_debug_dump(
                         query=q,
                         mode=mode,
@@ -845,7 +1089,10 @@ async def _query_stream_events(q: str, mode: str) -> AsyncIterator[str]:
                         thinking="".join(thinking_parts).strip(),
                         answer=final_answer,
                         duration_ms=int((time.perf_counter() - started) * 1000),
+                        naive_relevance=naive_rel,
                     )
+                    if naive_rel is not None and not get_naive_relevance():
+                        yield _sse({"type": "naive_relevance", "data": naive_rel})
                     if dump_path is not None:
                         yield _sse(
                             {
@@ -875,7 +1122,7 @@ async def api_query_stream(body: QueryBody):
     mode = (body.mode or state.query_mode or "mix").strip()
     q = body.query.strip()
     return StreamingResponse(
-        _query_stream_events(q, mode),
+        _query_stream_events(q, mode, body),
         media_type="text/event-stream",
         headers={
             "Cache-Control": "no-cache",

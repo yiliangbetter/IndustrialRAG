@@ -28,8 +28,12 @@
           <dl class="meta">
             <dt>就绪</dt>
             <dd id="meta-ready">—</dd>
-            <dt>工作目录</dt>
+            <dt>知识库根目录</dt>
+            <dd id="meta-kb-base" class="mono">—</dd>
+            <dt>rag_storage</dt>
             <dd id="meta-wd" class="mono">—</dd>
+            <dt>pipeline_parse</dt>
+            <dd id="meta-pod" class="mono">—</dd>
             <dt>查询模式</dt>
             <dd id="meta-mode">—</dd>
             <dt>灌库模式</dt>
@@ -40,6 +44,24 @@
 
         <section class="panel">
           <h2>查询设置</h2>
+          <label class="field">
+            <span>知识库路径</span>
+            <div class="kb-path-row">
+              <input
+                type="text"
+                id="kb-base-dir"
+                class="mono"
+                placeholder="例如 data/kb_new"
+                spellcheck="false"
+              />
+              <button type="button" class="btn secondary" id="btn-kb-apply">应用</button>
+            </div>
+          </label>
+          <p class="hint" id="kb-path-hint">
+            根目录下须有 <code>rag_storage</code>（向量/图谱）与
+            <code>pipeline_parse</code>（解析产物与配图）；不存在时自动创建。切换后问答与灌库共用此路径。
+          </p>
+          <p class="hint hidden" id="kb-path-status"></p>
           <label class="field">
             <span>RAG模式</span>
             <select id="query-mode">
@@ -67,6 +89,9 @@
 
         <section class="panel">
           <h2>上传灌库</h2>
+          <p class="hint" id="ingest-kb-target">
+            灌库目标：<span id="ingest-kb-base" class="mono">—</span>
+          </p>
           <p class="hint" id="ingest-hint">
             将新文档追加到当前知识库（不会清空已有内容）。整批重灌或清空知识库请打开
             <a href="/setup">安装向导</a>。
@@ -93,6 +118,9 @@
           <div class="ingest-actions">
             <button type="button" class="btn secondary" id="btn-ingest" disabled>
               开始灌库
+            </button>
+            <button type="button" class="btn ghost hidden" id="btn-ingest-log" title="打开灌库日志窗口">
+              灌库日志
             </button>
             <button type="button" class="btn danger hidden" id="btn-stop-ingest">
               停止灌库
@@ -134,7 +162,7 @@
     </div>
     <script src="/static/vendor/marked.min.js"></script>
     <script src="/static/vendor/purify.min.js"></script>
-    <script src="/static/ingest_ui.js?v=20260602b"></script>
-    <script src="/static/app.js?v=20260614b"></script>
+    <script src="/static/ingest_ui.js?v=20260617c"></script>
+    <script src="/static/app.js?v=20260617c"></script>
   </body>
 </html>

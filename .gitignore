@@ -14,6 +14,7 @@ venv/
 
 *.env*
 .env_example
+env_bak
 
 # Build / Distribution
 dist/
@@ -26,6 +27,7 @@ site/
 *.logfire
 *.coverage/
 log/
+logs/
 
 # Caches
 .cache/
@@ -45,7 +47,8 @@ temp/
 local_neo4jWorkDir/
 neo4jWorkDir/
 
-# Data & Storage
+# Data & Storage (local runtime only — not versioned; safe from checkout/merge)
+data/
 inputs/
 rag_storage*/
 examples/input/

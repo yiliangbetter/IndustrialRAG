@@ -57,18 +57,163 @@ function parseSseLines(buffer, onEvent) {
 }
 
 function appendIngestLog(logEl, text) {
-  if (!logEl || !text) return;
-  logEl.textContent += `${text}\n`;
-  logEl.scrollTop = logEl.scrollHeight;
+  if (!text) return;
+  const targets = [];
+  if (logEl) targets.push(logEl);
+  const modalLog = getIngestTerminalModal()?.logEl;
+  if (modalLog && modalLog !== logEl) targets.push(modalLog);
+  for (const el of targets) {
+    el.textContent += `${text}\n`;
+    el.scrollTop = el.scrollHeight;
+  }
+}
+
+/** @type {{ backdrop: HTMLElement, panel: HTMLElement, logEl: HTMLElement, progressEl: HTMLElement, progressBarEl: HTMLElement, progressLabelEl: HTMLElement, stopBtn: HTMLButtonElement, closeBtn: HTMLButtonElement, reopenBtn: HTMLButtonElement } | null} */
+let ingestTerminalModal = null;
+
+function getIngestTerminalModal() {
+  return ingestTerminalModal;
+}
+
+function ensureIngestTerminalModal() {
+  if (ingestTerminalModal) return ingestTerminalModal;
+
+  const backdrop = document.createElement("div");
+  backdrop.className = "ingest-terminal-backdrop hidden";
+  backdrop.setAttribute("role", "dialog");
+  backdrop.setAttribute("aria-modal", "true");
+  backdrop.setAttribute("aria-labelledby", "ingest-terminal-title");
+
+  backdrop.innerHTML = `
+    <div class="ingest-terminal-panel">
+      <header class="ingest-terminal-header">
+        <div class="ingest-terminal-title-wrap">
+          <span class="ingest-terminal-dot" aria-hidden="true"></span>
+          <h2 id="ingest-terminal-title">灌库终端</h2>
+        </div>
+        <div class="ingest-terminal-header-actions">
+          <button type="button" class="btn danger ingest-terminal-stop hidden" title="停止灌库并清空知识库">
+            停止灌库
+          </button>
+          <button type="button" class="btn ghost ingest-terminal-close" title="关闭窗口（灌库在后台继续）">
+            关闭
+          </button>
+        </div>
+      </header>
+      <div class="ingest-terminal-progress">
+        <div class="ingest-progress-label ingest-terminal-progress-label">等待开始…</div>
+        <div class="ingest-progress-track">
+          <div class="ingest-progress-bar ingest-terminal-progress-bar"></div>
+        </div>
+      </div>
+      <pre class="ingest-log ingest-terminal-log" aria-live="polite"></pre>
+      <p class="hint ingest-terminal-hint">解析、建图谱与向量索引的实时日志。可点「停止灌库」终止并清空知识库；仅关闭窗口不会中断灌库。</p>
+    </div>
+  `;
+
+  document.body.appendChild(backdrop);
+
+  const reopenBtn = document.createElement("button");
+  reopenBtn.type = "button";
+  reopenBtn.className = "ingest-terminal-reopen hidden";
+  reopenBtn.textContent = "灌库日志";
+  reopenBtn.title = "打开灌库日志窗口";
+  document.body.appendChild(reopenBtn);
+
+  const panel = backdrop.querySelector(".ingest-terminal-panel");
+  const closeBtn = backdrop.querySelector(".ingest-terminal-close");
+  const stopBtn = backdrop.querySelector(".ingest-terminal-stop");
+  ingestTerminalModal = {
+    backdrop,
+    panel,
+    logEl: backdrop.querySelector(".ingest-terminal-log"),
+    progressEl: backdrop.querySelector(".ingest-terminal-progress"),
+    progressBarEl: backdrop.querySelector(".ingest-terminal-progress-bar"),
+    progressLabelEl: backdrop.querySelector(".ingest-terminal-progress-label"),
+    stopBtn,
+    closeBtn,
+    reopenBtn,
+  };
+
+  stopBtn?.addEventListener("click", () => {
+    document.dispatchEvent(new CustomEvent("ingest-stop-request"));
+  });
+  closeBtn?.addEventListener("click", () => hideIngestTerminalModal());
+  backdrop.addEventListener("click", (ev) => {
+    if (ev.target === backdrop) hideIngestTerminalModal();
+  });
+  reopenBtn.addEventListener("click", () => showIngestTerminalModal());
+
+  document.addEventListener("keydown", (ev) => {
+    if (ev.key !== "Escape" || !ingestTerminalModal) return;
+    if (ingestTerminalModal.backdrop.classList.contains("hidden")) return;
+    hideIngestTerminalModal();
+  });
+
+  return ingestTerminalModal;
+}
+
+function showIngestTerminalModal() {
+  const modal = ensureIngestTerminalModal();
+  modal.backdrop.classList.remove("hidden");
+  modal.reopenBtn.classList.add("hidden");
+  document.body.classList.add("ingest-terminal-open");
+}
+
+function hideIngestTerminalModal() {
+  if (!ingestTerminalModal) return;
+  ingestTerminalModal.backdrop.classList.add("hidden");
+  document.body.classList.remove("ingest-terminal-open");
+  if (ingestTerminalModal.reopenBtn && !ingestTerminalModal.reopenBtn.dataset.forceHide) {
+    ingestTerminalModal.reopenBtn.classList.remove("hidden");
+  }
+}
+
+function openIngestTerminalModal() {
+  showIngestTerminalModal();
+}
+
+function setIngestTerminalReopenVisible(visible) {
+  const modal = ensureIngestTerminalModal();
+  if (visible) {
+    modal.reopenBtn.classList.remove("hidden");
+    delete modal.reopenBtn.dataset.forceHide;
+  } else {
+    modal.reopenBtn.classList.add("hidden");
+    modal.reopenBtn.dataset.forceHide = "1";
+  }
+}
+
+function updateIngestTerminalStopState(busy, stopping) {
+  const modal = getIngestTerminalModal();
+  if (!modal?.stopBtn) return;
+  modal.stopBtn.classList.toggle("hidden", !busy);
+  modal.stopBtn.disabled = !busy || stopping;
+  modal.stopBtn.textContent = stopping ? "正在停止…" : "停止灌库";
+}
+
+function setIngestProgressBarError(progressBarEl, hasError) {
+  const bars = [progressBarEl, getIngestTerminalModal()?.progressBarEl].filter(Boolean);
+  for (const bar of bars) {
+    if (hasError) bar.classList.add("error");
+    else bar.classList.remove("error");
+  }
 }
 
 function setIngestProgress(progressEl, barEl, labelEl, current, total, message) {
-  if (!progressEl) return;
-  progressEl.classList.remove("hidden");
-  const pct = total > 0 ? Math.round((current / total) * 100) : 0;
-  if (barEl) barEl.style.width = `${pct}%`;
-  if (labelEl) {
-    labelEl.textContent = message || (total ? `进度 ${current}/${total}（${pct}%）` : "灌库进行中…");
+  const apply = (pEl, bEl, lEl) => {
+    if (!pEl) return;
+    pEl.classList.remove("hidden");
+    const pct = total > 0 ? Math.round((current / total) * 100) : 0;
+    if (bEl) bEl.style.width = `${pct}%`;
+    if (lEl) {
+      lEl.textContent = message || (total ? `进度 ${current}/${total}（${pct}%）` : "灌库进行中…");
+    }
+  };
+  apply(progressEl, barEl, labelEl);
+  const modal = getIngestTerminalModal();
+  if (modal) {
+    apply(modal.progressEl, modal.progressBarEl, modal.progressLabelEl);
   }
 }
 
@@ -94,6 +239,10 @@ async function streamIngest(opts) {
   } = opts;
 
   if (logEl) logEl.textContent = "";
+  const modal = ensureIngestTerminalModal();
+  if (modal.logEl) modal.logEl.textContent = "";
+  if (modal.progressBarEl) setIngestProgressBarError(modal.progressBarEl, false);
+  openIngestTerminalModal();
   setIngestProgress(progressEl, progressBarEl, progressLabelEl, 0, files.length, "上传文件中…");
   onActiveChange?.(true);
 
@@ -159,7 +308,7 @@ async function streamIngest(opts) {
           statusEl.textContent = `✗ ${ev.file}：${errText}`;
           statusEl.className = "hint error";
         }
-        if (progressBarEl) progressBarEl.classList.add("error");
+        if (progressBarEl) setIngestProgressBarError(progressBarEl, true);
         setIngestProgress(
           progressEl,
           progressBarEl,
@@ -189,7 +338,7 @@ async function streamIngest(opts) {
           files.length,
           "已停止"
         );
-        if (progressBarEl) progressBarEl.classList.add("error");
+        if (progressBarEl) setIngestProgressBarError(progressBarEl, true);
         appendIngestLog(logEl, ev.message || "—— 已停止灌库并清空知识库 ——");
         if (statusEl) statusEl.textContent = ev.message || "已停止灌库并清空知识库";
         return;
@@ -211,7 +360,7 @@ async function streamIngest(opts) {
           label
         );
         if (result.fail > 0) {
-          if (progressBarEl) progressBarEl.classList.add("error");
+          if (progressBarEl) setIngestProgressBarError(progressBarEl, true);
           if (statusEl) {
             statusEl.textContent =
               result.ok > 0
@@ -244,6 +393,7 @@ async function streamIngest(opts) {
     return result;
   } finally {
     onActiveChange?.(false);
+    setIngestTerminalReopenVisible(true);
   }
 }
 
