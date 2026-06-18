@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Replay question sets through clarify gate: random pick if clarified, then aquery.
+"""Replay question sets through clarify gate: pick first recommended candidate, then aquery.
 
 Reports per-question scores, candidate scores, pick, and whether an answer was produced.
 
@@ -16,7 +16,6 @@ import asyncio
 import importlib.util
 import json
 import os
-import random
 import sys
 import time
 from datetime import datetime, timezone
@@ -40,6 +39,7 @@ spec.loader.exec_module(rpc)
 
 from score_query_relevance import _load_cases  # noqa: E402
 from stream_cot_parser import parse_complete_cot  # noqa: E402
+from run_voice_script_tests import grade_response  # noqa: E402
 from raganything.clarify_gate import (  # noqa: E402
     ClarifyBypass,
     ClarifyRequired,
@@ -60,17 +60,12 @@ def _fscore(raw: Any) -> float | None:
         return None
 
 
-def _pick_clarify_option(data: dict[str, Any], rng: random.Random) -> tuple[str, dict[str, Any]]:
-    """Return (kind, payload) where kind is candidate|keep_original."""
+def _pick_first_candidate(data: dict[str, Any]) -> tuple[str, dict[str, Any]]:
+    """Pick the first answerable recommended question (no random, no keep_original)."""
     candidates = list(data.get("candidates") or [])
-    keep = data.get("keep_original")
-    options: list[tuple[str, dict[str, Any]]] = [("candidate", c) for c in candidates]
-    if isinstance(keep, dict) and (keep.get("text") or "").strip():
-        options.append(("keep_original", keep))
-    if not options:
-        return "none", {}
-    kind, payload = rng.choice(options)
-    return kind, payload
+    if candidates:
+        return "candidate", candidates[0]
+    return "none", {}
 
 
 async def _run_aquery(rag: Any, query: str, *, mode: str) -> tuple[str, str, str | None]:
@@ -99,14 +94,16 @@ async def _run_aquery(rag: Any, query: str, *, mode: str) -> tuple[str, str, str
 
 async def _replay_case(
     rag: Any,
-    case: dict[str, str],
+    case: dict[str, Any],
     *,
     mode: str,
     lo: float,
     hi: float,
-    rng: random.Random,
 ) -> dict[str, Any]:
-    orig_q = case["query"]
+    orig_q = (case.get("query") or case.get("standard_question") or "").strip()
+    if not orig_q:
+        utterances = case.get("utterances") or []
+        orig_q = (utterances[0] if utterances else "").strip()
     case_id = case.get("id", "?")
 
     orig_probe = await probe_query_score(rag.lightrag, orig_q)
@@ -129,7 +126,11 @@ async def _replay_case(
         "final_query": orig_q,
         "final_score": None,
         "has_answer": False,
+        "answer": "",
         "answer_chars": 0,
+        "grade_ok": False,
+        "grade_miss": [],
+        "standard_answer": (case.get("standard_answer") or "").strip(),
         "aquery_error": None,
         "duration_ms": None,
     }
@@ -153,7 +154,7 @@ async def _replay_case(
             row["pick_text"] = data.get("message")
             return row
 
-        pick_kind, pick_payload = _pick_clarify_option(data, rng)
+        pick_kind, pick_payload = _pick_first_candidate(data)
         row["pick_kind"] = pick_kind
 
         if pick_kind == "candidate":
@@ -179,8 +180,8 @@ async def _replay_case(
                 clarify_choice="keep_original",
             )
         else:
-            final_q = orig_q
-            bypass = ClarifyBypass("pass")
+            row["aquery_error"] = "no_answerable_candidate"
+            return row
         row["final_query"] = final_q
         if not isinstance(bypass, ClarifyBypass):
             row["aquery_error"] = "bypass_validation_failed"
@@ -198,8 +199,12 @@ async def _replay_case(
     row["duration_ms"] = int((time.perf_counter() - started) * 1000)
     row["aquery_error"] = err
     ans = (answer or "").strip()
+    row["answer"] = ans
     row["has_answer"] = bool(ans)
     row["answer_chars"] = len(ans)
+    ok, miss, _grade_mode = grade_response(ans, case)
+    row["grade_ok"] = ok
+    row["grade_miss"] = miss
     return row
 
 
@@ -209,16 +214,40 @@ _SOURCE_PRESETS: dict[str, Path] = {
 }
 
 
+def _load_source_cases(source: Path, *, limit: int) -> list[dict[str, Any]]:
+    if source.suffix.lower() == ".json":
+        data = json.loads(source.read_text(encoding="utf-8"))
+        rows: list[dict[str, Any]] = []
+        for case in data.get("cases") or []:
+            if case.get("skip"):
+                continue
+            q = (case.get("standard_question") or "").strip()
+            if not q:
+                utterances = case.get("utterances") or []
+                q = (utterances[0] if utterances else "").strip()
+            if not q:
+                continue
+            row = dict(case)
+            row["query"] = q
+            rows.append(row)
+            if limit > 0 and len(rows) >= limit:
+                break
+        return rows
+    slim = _load_cases(source.resolve(), limit=limit)
+    return [dict(c) for c in slim]
+
+
 def _format_report(
-    rows: list[dict[str, Any]], *, source: str, lo: float, hi: float, seed: int
+    rows: list[dict[str, Any]], *, source: str, lo: float, hi: float, wd: Path
 ) -> str:
     lines: list[str] = []
     lines.append("=" * 72)
     lines.append(f"{source} 澄清门控回放批测")
     lines.append("=" * 72)
     lines.append(f"time: {datetime.now(timezone.utc).isoformat()}")
+    lines.append(f"working_dir: {wd}")
     lines.append(f"thresholds: lower={lo} upper={hi}")
-    lines.append(f"random_seed: {seed}")
+    lines.append("clarify_pick: first_candidate")
     lines.append(f"cases: {len(rows)}")
     lines.append("")
 
@@ -242,35 +271,43 @@ def _format_report(
                     meta = f"chunks={cc} rerank={rs}" if rs is not None else f"score={c.get('score')}"
                     lines.append(f"    - [{c.get('id')}] {meta} | {c.get('text')}")
                 lines.append(
-                    f"  随机选择: {r['pick_kind']} | {r['pick_text']} "
+                    f"  选用推荐: {r['pick_kind']} | {r['pick_text']} "
                     f"(pick_score={r['pick_score']})"
                 )
         else:
             lines.append(f"  gate_bypass={r.get('gate_bypass')}")
-        lines.append(
-            f"  最终问: {r['final_query']}"
-        )
+        lines.append(f"  最终问: {r['final_query']}")
         lines.append(
             f"  最终 score={r['final_score']} | has_answer={r['has_answer']} "
-            f"answer_chars={r['answer_chars']} duration_ms={r['duration_ms']}"
+            f"grade={'PASS' if r.get('grade_ok') else 'FAIL'} duration_ms={r['duration_ms']}"
         )
+        if r.get("standard_answer"):
+            lines.append(f"  标准答案: {r['standard_answer']}")
+        if r.get("answer"):
+            lines.append(f"  实际答案: {r['answer']}")
+        if r.get("grade_miss"):
+            lines.append(f"  差异/缺失: {', '.join(r['grade_miss'])}")
         if r.get("aquery_error"):
             lines.append(f"  error: {r['aquery_error']}")
         lines.append("")
 
     n_clarify = sum(1 for r in rows if r["clarify_triggered"])
     n_answer = sum(1 for r in rows if r["has_answer"])
+    n_grade = sum(1 for r in rows if r.get("grade_ok"))
     lines.append("=" * 72)
-    lines.append(f"汇总: clarify触发 {n_clarify}/{len(rows)} | 出答案 {n_answer}/{len(rows)}")
+    lines.append(
+        f"汇总: clarify触发 {n_clarify}/{len(rows)} | 出答案 {n_answer}/{len(rows)} "
+        f"| 要点通过 {n_grade}/{len(rows)}"
+    )
     lines.append("")
-    lines.append("id   orig_q   final_q   clarify  has_ans")
+    lines.append("id   orig_s  final_s  clarify  grade  question")
     for r in rows:
         lines.append(
             f"{str(r['id']):>3}  "
             f"{r['original_score']!s:>7}  "
             f"{r['final_score']!s:>7}  "
             f"{'Y' if r['clarify_triggered'] else 'N':>7}  "
-            f"{'Y' if r['has_answer'] else 'N':>7}  "
+            f"{'P' if r.get('grade_ok') else 'F':>5}  "
             f"{r['original_query']}"
         )
     lines.append("")
@@ -279,28 +316,34 @@ def _format_report(
 
 async def _main(args: argparse.Namespace) -> None:
     os.environ.setdefault("RAG_CLARIFY_ENABLED", "1")
-    rng = random.Random(args.seed)
     lo, hi = clarify_threshold_lower(), clarify_threshold_upper()
-    wd = (_ROOT / "data" / "rag_storage").resolve()
-    pod = (_ROOT / "data" / "pipeline_parse").resolve()
+    wd = Path(
+        os.getenv("RAG_WEB_WORKING_DIR") or (_ROOT / "data" / "kb_new" / "rag_storage")
+    ).resolve()
+    pod = Path(
+        os.getenv("RAG_WEB_PARSER_OUTPUT_DIR")
+        or (_ROOT / "data" / "kb_new" / "pipeline_parse")
+    ).resolve()
     rag, _, _ = await rpc._build_rag(wd, pod)
     src = _SOURCE_PRESETS.get(args.source, Path(args.source))
-    cases = _load_cases(src.resolve(), limit=args.limit)
+    cases = _load_source_cases(src.resolve(), limit=args.limit)
 
     rows: list[dict[str, Any]] = []
-    for i, case in enumerate(cases, 1):
-        print(f"[{i}/{len(cases)}] {case.get('id')} {case['query']}", flush=True)
-        row = await _replay_case(
-            rag, case, mode=args.mode, lo=lo, hi=hi, rng=rng
-        )
-        rows.append(row)
-        print(
-            f"  orig={row['original_score']} clarify={row['clarify_triggered']} "
-            f"final={row['final_score']} answer={row['has_answer']}",
-            flush=True,
-        )
+    try:
+        for i, case in enumerate(cases, 1):
+            q = case.get("query") or case.get("standard_question")
+            print(f"[{i}/{len(cases)}] {case.get('id')} {q}", flush=True)
+            row = await _replay_case(rag, case, mode=args.mode, lo=lo, hi=hi)
+            rows.append(row)
+            print(
+                f"  orig={row['original_score']} clarify={row['clarify_triggered']} "
+                f"final={row['final_score']} grade={'PASS' if row.get('grade_ok') else 'FAIL'}",
+                flush=True,
+            )
+    finally:
+        await rag.finalize_storages()
 
-    report = _format_report(rows, source=args.source, lo=lo, hi=hi, seed=args.seed)
+    report = _format_report(rows, source=args.source, lo=lo, hi=hi, wd=wd)
     args.out_jsonl.parent.mkdir(parents=True, exist_ok=True)
     with args.out_jsonl.open("w", encoding="utf-8") as f:
         for row in rows:
@@ -320,7 +363,6 @@ def main() -> None:
     )
     p.add_argument("--mode", default="mix")
     p.add_argument("--limit", type=int, default=0)
-    p.add_argument("--seed", type=int, default=42, help="Random seed for clarify pick")
     p.add_argument("--out-jsonl", type=Path, default=None)
     p.add_argument("--out-report", type=Path, default=None)
     args = p.parse_args()

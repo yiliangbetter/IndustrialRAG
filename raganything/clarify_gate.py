@@ -113,7 +113,7 @@ def clarify_candidate_max_rounds() -> int:
 
 
 def clarify_candidate_strategy() -> str:
-    return (os.getenv("CLARIFY_CANDIDATE_STRATEGY") or "fill_k").strip().lower()
+    return (os.getenv("CLARIFY_CANDIDATE_STRATEGY") or "first").strip().lower()
 
 
 def clarify_candidate_min_rerank_score() -> float:
@@ -371,12 +371,13 @@ async def _collect_answerable_candidates(
     probe: dict[str, Any],
     mode: str,
 ) -> tuple[list[dict[str, Any]], dict[str, Any]]:
-    k_target = clarify_candidate_k()
     strategy = clarify_candidate_strategy()
+    k_target = 1 if strategy == "first" else clarify_candidate_k()
     max_rounds = clarify_candidate_max_rounds()
     seen: set[str] = {query.strip()}
     answerable: list[dict[str, Any]] = []
     rounds_used = 0
+    probes_used = 0
 
     while rounds_used < max_rounds:
         if strategy == "first" and answerable:
@@ -385,8 +386,11 @@ async def _collect_answerable_candidates(
             break
 
         rounds_used += 1
-        need = k_target - len(answerable)
-        batch_size = max(need + 2, k_target)
+        if strategy == "first":
+            batch_size = 1
+        else:
+            need = k_target - len(answerable)
+            batch_size = max(need + 2, k_target)
         lines = await _generate_candidate_lines(
             lightrag,
             query=query,
@@ -400,6 +404,7 @@ async def _collect_answerable_candidates(
             if line in seen:
                 continue
             seen.add(line)
+            probes_used += 1
             retrieval = await probe_llm_retrieval(lightrag, line, mode=mode)
             if not retrieval.get("answerable"):
                 continue
@@ -426,6 +431,7 @@ async def _collect_answerable_candidates(
         "k_requested": k_target,
         "k_answerable": len(answerable),
         "rounds_used": rounds_used,
+        "probes_used": probes_used,
         "strategy": strategy,
         "candidate_validation": "mix_llm_chunks",
         "min_rerank_threshold": clarify_candidate_min_rerank_score(),
