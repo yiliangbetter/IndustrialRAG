@@ -173,6 +173,8 @@ body {
   border-radius: 6px;
   padding: 0.55rem 0.6rem;
   font-size: 1rem;
+  width: 100%;
+  box-sizing: border-box;
 }
 
 .field input.mono,
@@ -184,22 +186,8 @@ body {
   padding: 0.55rem 0.6rem;
   font-size: 0.92rem;
   font-family: ui-monospace, "Cascadia Code", Consolas, monospace;
-}
-
-.kb-path-row {
-  display: flex;
-  gap: 0.5rem;
-  align-items: stretch;
-}
-
-.kb-path-row input {
-  flex: 1;
-  min-width: 0;
-}
-
-.kb-path-row .btn {
-  flex-shrink: 0;
-  white-space: nowrap;
+  width: 100%;
+  box-sizing: border-box;
 }
 
 .hint code {

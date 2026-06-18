@@ -3,7 +3,6 @@
 from __future__ import annotations
 
 import os
-import re
 from pathlib import Path
 from typing import Any
 
@@ -174,21 +173,13 @@ def _client_hf_home() -> str:
     except Exception:
         return str(get_models_dir())
 
-_ENV_LINE = re.compile(r"^([A-Za-z_][A-Za-z0-9_]*)=(.*)$")
-
 
 def _parse_env_file(path: Path) -> dict[str, str]:
-    out: dict[str, str] = {}
     if not path.is_file():
-        return out
-    for line in path.read_text(encoding="utf-8", errors="replace").splitlines():
-        s = line.strip()
-        if not s or s.startswith("#"):
-            continue
-        m = _ENV_LINE.match(s)
-        if m:
-            out[m.group(1)] = m.group(2)
-    return out
+        return {}
+    from dotenv import dotenv_values
+
+    return {k: v for k, v in dotenv_values(path).items() if v is not None}
 
 
 def _quote_env_value(value: str) -> str:
@@ -396,6 +387,20 @@ def apply_env_to_process() -> None:
     if llm_key:
         os.environ["LLM_BINDING_API_KEY"] = llm_key
         os.environ["OPENAI_API_KEY"] = llm_key
+
+    def _ensure_valid_path_env(key: str, fallback: Path) -> None:
+        raw = (os.getenv(key) or "").strip()
+        if not raw:
+            os.environ[key] = str(fallback)
+            return
+        try:
+            Path(raw).resolve()
+        except OSError:
+            os.environ[key] = str(fallback)
+
+    _ensure_valid_path_env("HF_HOME", get_models_dir())
+    _ensure_valid_path_env("TIKTOKEN_CACHE_DIR", get_tiktoken_cache_dir())
+
     if is_client_mode():
         try:
             from client_setup_service import resolve_hf_home_for_runtime  # noqa: WPS433

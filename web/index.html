@@ -4,7 +4,7 @@
     <meta charset="UTF-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1" />
     <title>南兴知识库问答助手</title>
-    <link rel="stylesheet" href="/static/styles.css" />
+    <link rel="stylesheet" href="/static/styles.css?v=20260617e" />
   </head>
   <body>
     <div class="app">
@@ -46,16 +46,14 @@
           <h2>查询设置</h2>
           <label class="field">
             <span>知识库路径</span>
-            <div class="kb-path-row">
-              <input
-                type="text"
-                id="kb-base-dir"
-                class="mono"
-                placeholder="例如 data/kb_new"
-                spellcheck="false"
-              />
-              <button type="button" class="btn secondary" id="btn-kb-apply">应用</button>
-            </div>
+            <input
+              type="text"
+              id="kb-base-dir"
+              class="mono"
+              placeholder="例如 data/kb_new"
+              spellcheck="false"
+            />
+            <button type="button" class="btn secondary" id="btn-kb-apply">应用</button>
           </label>
           <p class="hint" id="kb-path-hint">
             根目录下须有 <code>rag_storage</code>（向量/图谱）与
