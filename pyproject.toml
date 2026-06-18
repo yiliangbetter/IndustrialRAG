@@ -58,6 +58,12 @@ web = [
     # HF embedding (EMBEDDING_BACKEND=hf) used by the pipeline Web UI
     "sentence-transformers>=3.0.0",
 ]
+eval = [
+    "ragas>=0.2.0",
+    "datasets>=2.14.0",
+    "langchain-openai>=0.2.0",
+    "pandas>=2.0.0",
+]
 
 [project.urls]
 Homepage = "https://github.com/HKUDS/RAG-Anything"
