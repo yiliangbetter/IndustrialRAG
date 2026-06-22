@@ -256,12 +256,14 @@ async def _evaluate_clarify_gate(body: QueryBody, mode: str) -> Any:
         ClarifyRequired,
         ClarifyValidationError,
         evaluate_clarify_gate,
+        resolve_clarify_bundle,
     )
+    from query_progress_hooks import set_clarify_context_injection  # noqa: WPS433
 
     if state.rag is None:
         raise HTTPException(503, "RAG engine not initialized")
     try:
-        return await evaluate_clarify_gate(
+        result = await evaluate_clarify_gate(
             state.rag.lightrag,
             body.query.strip(),
             mode=mode,
@@ -271,6 +273,28 @@ async def _evaluate_clarify_gate(body: QueryBody, mode: str) -> Any:
         )
     except ClarifyValidationError as exc:
         raise HTTPException(400, str(exc)) from exc
+
+    if isinstance(result, ClarifyBypass) and result.reason in (
+        "keep_original",
+        "use_candidate",
+    ):
+        bundle = resolve_clarify_bundle(
+            body.clarification_id,
+            body.clarify_choice or result.reason,
+            body.query.strip(),
+            body.candidate_id,
+        )
+        if bundle is None:
+            raise HTTPException(400, "clarification cache expired or invalid")
+        set_clarify_context_injection(bundle)
+
+    return result
+
+
+def _clear_clarify_injection_if_set() -> None:
+    from query_progress_hooks import clear_clarify_context_injection  # noqa: WPS433
+
+    clear_clarify_context_injection()
 
 
 def _persist_query_debug_dump(
@@ -830,11 +854,13 @@ async def api_query(body: QueryBody):
             parser_root=parser_root,
             clarify_gate={
                 "required": True,
+                "gate_outcome": gate_result.gate_outcome,
                 **gate_result.data,
             },
         )
         payload: dict[str, Any] = {
             "clarification_required": True,
+            "gate_outcome": gate_result.gate_outcome,
             "clarification": gate_result.data,
             "query": q,
             "mode": mode,
@@ -876,6 +902,8 @@ async def api_query(body: QueryBody):
             naive_relevance=get_naive_relevance(),
         )
         raise HTTPException(500, f"Query failed: {exc}") from exc
+    finally:
+        _clear_clarify_injection_if_set()
 
     if not isinstance(raw, str):
         parts: list[str] = []
@@ -927,20 +955,29 @@ async def _query_stream_events(q: str, mode: str, body: QueryBody) -> AsyncItera
             parser_root=parser_root,
             clarify_gate={
                 "required": True,
+                "gate_outcome": gate_result.gate_outcome,
                 **gate_result.data,
             },
         )
-        if gate_result.data.get("unanswerable"):
-            yield _sse(
-                {
-                    "type": "status",
-                    "text": gate_result.data.get("message")
-                    or "当前知识库中未找到足够相关的依据，无法对该问题给出合理答案。",
-                }
-            )
-        else:
-            yield _sse({"type": "status", "text": "需要澄清：请选择更明确的问法，或坚持原问题。"})
-        yield _sse({"type": "clarification_required", "data": gate_result.data})
+        yield _sse(
+            {
+                "type": "status",
+                "text": (
+                    gate_result.data.get("message")
+                    if gate_result.gate_outcome == "reject"
+                    else "需要澄清：请选择更明确的问法，或保持原问题。"
+                ),
+            }
+        )
+        yield _sse(
+            {
+                "type": "clarification_required",
+                "data": {
+                    "gate_outcome": gate_result.gate_outcome,
+                    **gate_result.data,
+                },
+            }
+        )
         if dump_path is not None:
             yield _sse(
                 {
@@ -962,157 +999,162 @@ async def _query_stream_events(q: str, mode: str, body: QueryBody) -> AsyncItera
 
     result_queue: asyncio.Queue[tuple[str, Any]] = asyncio.Queue(maxsize=1)
 
-    async with query_progress_hooks() as progress_queue:
-        async def _worker() -> None:
+    try:
+        async with query_progress_hooks() as progress_queue:
+            async def _worker() -> None:
+                try:
+                    result = await _run_aquery(q, mode, stream=True)
+                    await result_queue.put(("ok", result))
+                except Exception as exc:
+                    await result_queue.put(("error", exc))
+
+            worker = asyncio.create_task(_worker())
+            cot_parser = StreamCotParser()
+
             try:
-                result = await _run_aquery(q, mode, stream=True)
-                await result_queue.put(("ok", result))
-            except Exception as exc:
-                await result_queue.put(("error", exc))
+                while True:
+                    prog_task = asyncio.create_task(progress_queue.get())
+                    res_task = asyncio.create_task(result_queue.get())
+                    done, pending = await asyncio.wait(
+                        {prog_task, res_task},
+                        return_when=asyncio.FIRST_COMPLETED,
+                    )
+                    for t in pending:
+                        t.cancel()
 
-        worker = asyncio.create_task(_worker())
-        cot_parser = StreamCotParser()
+                    if prog_task in done and not prog_task.cancelled():
+                        try:
+                            ev = prog_task.result()
+                            if ev.get("type") in (
+                                "status",
+                                "retrieval_scope",
+                                "related_images",
+                                "inline_images",
+                                "naive_relevance",
+                            ):
+                                yield _sse(ev)
+                        except Exception:
+                            pass
 
-        try:
-            while True:
-                prog_task = asyncio.create_task(progress_queue.get())
-                res_task = asyncio.create_task(result_queue.get())
-                done, pending = await asyncio.wait(
-                    {prog_task, res_task},
-                    return_when=asyncio.FIRST_COMPLETED,
-                )
-                for t in pending:
-                    t.cancel()
-
-                if prog_task in done and not prog_task.cancelled():
-                    try:
-                        ev = prog_task.result()
-                        if ev.get("type") in (
-                            "status",
-                            "retrieval_scope",
-                            "related_images",
-                            "inline_images",
-                            "naive_relevance",
-                        ):
-                            yield _sse(ev)
-                    except Exception:
-                        pass
-
-                if res_task in done and not res_task.cancelled():
-                    kind, payload = res_task.result()
-                    if kind == "error":
-                        stream_error = _friendly_query_error(payload)
-                        naive_rel = await _resolve_naive_relevance(q, mode)
-                        dump_path = _persist_query_debug_dump(
-                            query=q,
-                            mode=mode,
-                            parser_root=parser_root,
-                            error=stream_error,
-                            duration_ms=int((time.perf_counter() - started) * 1000),
-                            naive_relevance=naive_rel,
-                        )
-                        if dump_path is not None:
-                            yield _sse(
-                                {
-                                    "type": "query_debug_saved",
-                                    "path": str(dump_path),
-                                    "name": dump_path.name,
-                                }
+                    if res_task in done and not res_task.cancelled():
+                        kind, payload = res_task.result()
+                        if kind == "error":
+                            stream_error = _friendly_query_error(payload)
+                            naive_rel = await _resolve_naive_relevance(q, mode)
+                            dump_path = _persist_query_debug_dump(
+                                query=q,
+                                mode=mode,
+                                parser_root=parser_root,
+                                error=stream_error,
+                                duration_ms=int((time.perf_counter() - started) * 1000),
+                                naive_relevance=naive_rel,
                             )
-                        yield _sse({"type": "error", "message": stream_error})
-                        return
+                            if dump_path is not None:
+                                yield _sse(
+                                    {
+                                        "type": "query_debug_saved",
+                                        "path": str(dump_path),
+                                        "name": dump_path.name,
+                                    }
+                                )
+                            yield _sse({"type": "error", "message": stream_error})
+                            return
 
-                    try:
-                        chunk_iter = _iter_llm_chunks(payload)
-                    except Exception as exc:
-                        stream_error = _friendly_query_error(exc)
-                        naive_rel = await _resolve_naive_relevance(q, mode)
-                        dump_path = _persist_query_debug_dump(
-                            query=q,
-                            mode=mode,
-                            parser_root=parser_root,
-                            error=stream_error,
-                            duration_ms=int((time.perf_counter() - started) * 1000),
-                            naive_relevance=naive_rel,
-                        )
-                        if dump_path is not None:
-                            yield _sse(
-                                {
-                                    "type": "query_debug_saved",
-                                    "path": str(dump_path),
-                                    "name": dump_path.name,
-                                }
+                        try:
+                            chunk_iter = _iter_llm_chunks(payload)
+                        except Exception as exc:
+                            stream_error = _friendly_query_error(exc)
+                            naive_rel = await _resolve_naive_relevance(q, mode)
+                            dump_path = _persist_query_debug_dump(
+                                query=q,
+                                mode=mode,
+                                parser_root=parser_root,
+                                error=stream_error,
+                                duration_ms=int((time.perf_counter() - started) * 1000),
+                                naive_relevance=naive_rel,
                             )
-                        yield _sse({"type": "error", "message": stream_error})
-                        return
+                            if dump_path is not None:
+                                yield _sse(
+                                    {
+                                        "type": "query_debug_saved",
+                                        "path": str(dump_path),
+                                        "name": dump_path.name,
+                                    }
+                                )
+                            yield _sse({"type": "error", "message": stream_error})
+                            return
 
-                    async for chunk in chunk_iter:
-                        for ev_kind, piece in cot_parser.feed(chunk):
+                        async for chunk in chunk_iter:
+                            for ev_kind, piece in cot_parser.feed(chunk):
+                                if not piece:
+                                    continue
+                                if ev_kind == "thinking":
+                                    thinking_parts.append(piece)
+                                    yield _sse({"type": "thinking_delta", "text": piece})
+                                else:
+                                    answer_parts.append(piece)
+                                    yield _sse({"type": "answer_delta", "text": piece})
+                        for ev_kind, piece in cot_parser.flush():
                             if not piece:
                                 continue
                             if ev_kind == "thinking":
                                 thinking_parts.append(piece)
                                 yield _sse({"type": "thinking_delta", "text": piece})
                             else:
+                                piece = strip_manual_circled_step_markers(piece)
                                 answer_parts.append(piece)
                                 yield _sse({"type": "answer_delta", "text": piece})
-                    for ev_kind, piece in cot_parser.flush():
-                        if not piece:
-                            continue
-                        if ev_kind == "thinking":
-                            thinking_parts.append(piece)
-                            yield _sse({"type": "thinking_delta", "text": piece})
-                        else:
-                            piece = strip_manual_circled_step_markers(piece)
-                            answer_parts.append(piece)
-                            yield _sse({"type": "answer_delta", "text": piece})
-                    final_answer = strip_manual_circled_step_markers(
-                        "".join(answer_parts).strip()
-                    )
-                    from query_progress_hooks import finalize_inline_images  # noqa: WPS433
+                        final_answer = strip_manual_circled_step_markers(
+                            "".join(answer_parts).strip()
+                        )
+                        from query_progress_hooks import finalize_inline_images  # noqa: WPS433
 
-                    inline_result = finalize_inline_images(answer_text=final_answer)
-                    related = inline_result.get("images") or []
-                    placements = inline_result.get("placements") or []
-                    if related and placements:
-                        yield _sse(
-                            {
-                                "type": "inline_images",
-                                "images": related,
-                                "placements": placements,
-                            }
+                        inline_result = finalize_inline_images(answer_text=final_answer)
+                        related = inline_result.get("images") or []
+                        placements = inline_result.get("placements") or []
+                        if related and placements:
+                            yield _sse(
+                                {
+                                    "type": "inline_images",
+                                    "images": related,
+                                    "placements": placements,
+                                }
+                            )
+                        elif related:
+                            yield _sse({"type": "related_images", "images": related})
+                        naive_rel = get_naive_relevance() or await _resolve_naive_relevance(
+                            q, mode
                         )
-                    elif related:
-                        yield _sse({"type": "related_images", "images": related})
-                    naive_rel = get_naive_relevance() or await _resolve_naive_relevance(q, mode)
-                    dump_path = _persist_query_debug_dump(
-                        query=q,
-                        mode=mode,
-                        parser_root=parser_root,
-                        thinking="".join(thinking_parts).strip(),
-                        answer=final_answer,
-                        duration_ms=int((time.perf_counter() - started) * 1000),
-                        naive_relevance=naive_rel,
-                    )
-                    if naive_rel is not None and not get_naive_relevance():
-                        yield _sse({"type": "naive_relevance", "data": naive_rel})
-                    if dump_path is not None:
-                        yield _sse(
-                            {
-                                "type": "query_debug_saved",
-                                "path": str(dump_path),
-                                "name": dump_path.name,
-                            }
+                        dump_path = _persist_query_debug_dump(
+                            query=q,
+                            mode=mode,
+                            parser_root=parser_root,
+                            thinking="".join(thinking_parts).strip(),
+                            answer=final_answer,
+                            duration_ms=int((time.perf_counter() - started) * 1000),
+                            naive_relevance=naive_rel,
                         )
-                    yield _sse({"type": "done", "mode": mode})
-                    return
-        finally:
-            if not worker.done():
-                worker.cancel()
-                try:
-                    await worker
-                except asyncio.CancelledError:
-                    pass
+                        if naive_rel is not None and not get_naive_relevance():
+                            yield _sse({"type": "naive_relevance", "data": naive_rel})
+                        if dump_path is not None:
+                            yield _sse(
+                                {
+                                    "type": "query_debug_saved",
+                                    "path": str(dump_path),
+                                    "name": dump_path.name,
+                                }
+                            )
+                        yield _sse({"type": "done", "mode": mode})
+                        return
+            finally:
+                if not worker.done():
+                    worker.cancel()
+                    try:
+                        await worker
+                    except asyncio.CancelledError:
+                        pass
+    finally:
+        _clear_clarify_injection_if_set()
 
 
 @app.post("/api/query/stream")

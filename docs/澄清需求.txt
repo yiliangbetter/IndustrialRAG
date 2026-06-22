@@ -55,3 +55,30 @@
 ---
 
 详细设计方案（实现规格、API、env、测试）：见 [`澄清门控设计方案.md`](澄清门控设计方案.md)
+
+
+更合理的分工（若要改产品行为）
+不是去掉 KG，而是 各层各管一件事：
+
+层	应管什么
+澄清门控
+无关拒答（naive）；可选：原问 qualifying chunks = 0 且 naive 在灰区 → 强制澄清/拒答
+检索
+mix 照常 merge + rerank
+生成前
+例如：chunks==0 且非 catalog 查询 → 不调答案 LLM，或只返回「请换种问法」
+KG
+有 chunk 时作增强；无 chunk 时不单独生成（或仅当 naive 极高 + 实体与 query 对齐才允许 KG-only）
+「今天天气不错」说明：单靠 LLM 读 prompt 有时能拒答，但不可靠；应在前面的门控或 chunk 门槛拦，而不是指望 LLM 从离谱 KG 里自学可答性。
+
+
+我看了，所谓的document chunks就是llm_chunks。
+doc chunks是向量chunks+KG反查chunks合并后再过滤后的结果。
+这个如果是空的，那就没有reference。所以当前reference逻辑是没问题的。 
+
+现在要改的点：
+1.把naive mode评分取消掉，澄清门控根据document chunks来判断，如果有document chunks，则在保持原问的同时再生成两个推荐问题，推荐问题要确保其检索出的chunks，包括向量chunks和KG反查chunks，能过0.28过滤（可答且答案有依据）。
+在推荐问题时所有3个问题（两个追问+一个原问）的document chunks已缓存，选择其中任何一个问题则直接把document chunks送给LLM生成答案。
+2.如果遇到用户的问题没有document chunks，则直接拒绝回答, 告知其问题与知识库无关。
+3.管控KG JSON，只有能反查出chunks，且反查chunks在document chunks里的（没有被0.28淘汰掉的）KG entities/relations json才送给LLM，其他KG JSON丢弃。
+4.确保两个追问问题和保持原问在被用户选择后不会再次除法

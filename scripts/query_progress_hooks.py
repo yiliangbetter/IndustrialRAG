@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import asyncio
 import contextlib
+import copy
 from collections.abc import AsyncIterator
 from contextvars import ContextVar
 from pathlib import Path
@@ -60,6 +61,12 @@ _naive_relevance: ContextVar[dict[str, Any] | None] = ContextVar(
     "naive_relevance", default=None
 )
 _llm_input: ContextVar[dict[str, Any] | None] = ContextVar("llm_input", default=None)
+_last_probe_raw_data: ContextVar[dict[str, Any] | None] = ContextVar(
+    "last_probe_raw_data", default=None
+)
+_clarify_context_injection: ContextVar[dict[str, Any] | None] = ContextVar(
+    "clarify_context_injection", default=None
+)
 # Worker tasks copy ContextVar; parent dump reads this shared snapshot instead.
 _query_debug_snapshot: dict[str, Any] = {}
 # Survives hook teardown so dumps can be written after ``async with`` exits.
@@ -156,6 +163,32 @@ def get_llm_input() -> dict[str, Any] | None:
     return dict(val) if isinstance(val, dict) else None
 
 
+def get_last_probe_raw_data() -> dict[str, Any] | None:
+    val = _last_probe_raw_data.get()
+    return copy.deepcopy(val) if isinstance(val, dict) else None
+
+
+def set_clarify_context_injection(bundle: Any) -> None:
+    """Inject a cached clarify bundle so ``_build_query_context`` skips retrieval."""
+    if bundle is None:
+        _clarify_context_injection.set(None)
+        return
+    if hasattr(bundle, "to_injection"):
+        _clarify_context_injection.set(bundle.to_injection())
+        return
+    if isinstance(bundle, dict):
+        _clarify_context_injection.set(dict(bundle))
+
+
+def clear_clarify_context_injection() -> None:
+    _clarify_context_injection.set(None)
+
+
+def get_clarify_context_injection() -> dict[str, Any] | None:
+    val = _clarify_context_injection.get()
+    return dict(val) if isinstance(val, dict) else None
+
+
 def _capture_llm_context_from_build_result(ctx: Any) -> None:
     """Persist answer-LLM context from LightRAG ``QueryContextResult`` or legacy str."""
     context_str: str | None = None
@@ -169,6 +202,7 @@ def _capture_llm_context_from_build_result(ctx: Any) -> None:
         maybe_raw = getattr(ctx, "raw_data", None)
         if isinstance(maybe_raw, dict):
             raw_data = maybe_raw
+            _last_probe_raw_data.set(copy.deepcopy(maybe_raw))
     if context_str:
         _retrieval_context.set(context_str)
     if raw_data is not None:
@@ -482,6 +516,19 @@ async def query_progress_hooks() -> AsyncIterator[asyncio.Queue[dict[str, str]]]
     orig_process_chunks = op.process_chunks_unified
 
     async def _build_query_context(*args: Any, **kwargs: Any):
+        injected = get_clarify_context_injection()
+        if injected:
+            from lightrag.base import QueryContextResult  # noqa: WPS433
+
+            await _emit(PHASE_RETRIEVE)
+            ctx = QueryContextResult(
+                context=str(injected.get("context_str") or ""),
+                raw_data=copy.deepcopy(injected.get("raw_data") or {}),
+            )
+            _capture_llm_context_from_build_result(ctx)
+            _sync_query_debug_snapshot()
+            return ctx
+
         await _emit(PHASE_RETRIEVE)
         query = args[0] if args else kwargs.get("query", "")
         if isinstance(query, str) and query.strip():
@@ -651,6 +698,8 @@ async def query_progress_hooks() -> AsyncIterator[asyncio.Queue[dict[str, str]]]
         _query_mode_for_relevance.set(None)
         _naive_relevance.set(None)
         _llm_input.set(None)
+        _last_probe_raw_data.set(None)
+        clear_clarify_context_injection()
         _retain_query_debug_snapshot()
         _query_debug_snapshot.clear()
 

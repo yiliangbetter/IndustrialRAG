@@ -43,12 +43,11 @@ from run_voice_script_tests import grade_response  # noqa: E402
 from raganything.clarify_gate import (  # noqa: E402
     ClarifyBypass,
     ClarifyRequired,
-    classify_query_relevance,
+    clarify_candidate_k,
     clarify_candidate_min_rerank_score,
-    clarify_threshold,
     evaluate_clarify_gate,
     probe_llm_retrieval,
-    probe_query_score,
+    resolve_clarify_bundle,
 )
 
 
@@ -69,27 +68,44 @@ def _pick_first_candidate(data: dict[str, Any]) -> tuple[str, dict[str, Any]]:
     return "none", {}
 
 
-async def _run_aquery(rag: Any, query: str, *, mode: str) -> tuple[str, str, str | None]:
+async def _run_aquery(
+    rag: Any,
+    query: str,
+    *,
+    mode: str,
+    bundle: Any | None = None,
+) -> tuple[str, str, str | None]:
+    from query_progress_hooks import (  # noqa: E402
+        clear_clarify_context_injection,
+        query_progress_hooks,
+        set_clarify_context_injection,
+    )
+
+    if bundle is not None:
+        set_clarify_context_injection(bundle)
     started = time.perf_counter()
     error: str | None = None
     raw = ""
     try:
-        raw = await rag.aquery(
-            query,
-            mode=mode,
-            vlm_enhanced=False,
-            **rpc._query_extras_from_env(query),
-        )
-        if not isinstance(raw, str):
-            parts: list[str] = []
-            async for chunk in raw:
-                if chunk:
-                    parts.append(chunk if isinstance(chunk, str) else str(chunk))
-            raw = "".join(parts)
+        async with query_progress_hooks():
+            raw = await rag.aquery(
+                query,
+                mode=mode,
+                vlm_enhanced=False,
+                **rpc._query_extras_from_env(query),
+            )
+            if not isinstance(raw, str):
+                parts: list[str] = []
+                async for chunk in raw:
+                    if chunk:
+                        parts.append(chunk if isinstance(chunk, str) else str(chunk))
+                raw = "".join(parts)
     except Exception as exc:
         error = str(exc)
+    finally:
+        clear_clarify_context_injection()
     thinking, answer = parse_complete_cot(raw or "")
-    ms = int((time.perf_counter() - started) * 1000)
+    del started
     return thinking, answer, error if error else (None if not (answer or "").strip() else None)
 
 
@@ -98,7 +114,6 @@ async def _replay_case(
     case: dict[str, Any],
     *,
     mode: str,
-    threshold: float,
     gate_only: bool = False,
 ) -> dict[str, Any]:
     orig_q = (case.get("query") or case.get("standard_question") or "").strip()
@@ -107,9 +122,6 @@ async def _replay_case(
         orig_q = (utterances[0] if utterances else "").strip()
     case_id = case.get("id", "?")
 
-    orig_probe = await probe_query_score(rag.lightrag, orig_q)
-    orig_score = _fscore(orig_probe.get("max_cosine_similarity"))
-    band = classify_query_relevance(orig_score, threshold=threshold).value
     orig_retrieval = await probe_llm_retrieval(rag.lightrag, orig_q, mode=mode)
 
     gate = await evaluate_clarify_gate(rag.lightrag, orig_q, mode=mode)
@@ -118,22 +130,20 @@ async def _replay_case(
         "id": case_id,
         "category": case.get("category", ""),
         "original_query": orig_q,
-        "original_score": round(orig_score, 4) if orig_score is not None else None,
         "original_llm_chunks": int(orig_retrieval.get("chunk_count") or 0),
         "original_llm_total": int(orig_retrieval.get("llm_chunk_total") or 0),
         "original_max_rerank": orig_retrieval.get("max_rerank_score"),
         "original_scores_unavailable": bool(orig_retrieval.get("scores_unavailable")),
         "original_answerable": bool(orig_retrieval.get("answerable")),
         "min_rerank_threshold": clarify_candidate_min_rerank_score(),
-        "band": band,
+        "k_required": clarify_candidate_k(),
         "source_set": case.get("source_set", ""),
         "clarify_triggered": clarify_triggered,
+        "gate_outcome": gate.gate_outcome if isinstance(gate, ClarifyRequired) else None,
         "candidates": [],
         "pick_kind": None,
         "pick_text": None,
-        "pick_score": None,
         "final_query": orig_q,
-        "final_score": None,
         "has_answer": False,
         "answer": "",
         "answer_chars": 0,
@@ -144,9 +154,11 @@ async def _replay_case(
         "duration_ms": None,
     }
 
+    bundle = None
     if clarify_triggered:
         data = gate.data
         row["clarification_id"] = data.get("clarification_id")
+        row["gate_reason"] = data.get("gate_reason")
         row["unrelated"] = bool(data.get("unrelated"))
         row["unanswerable"] = bool(data.get("unanswerable"))
         row["candidates"] = [
@@ -155,16 +167,11 @@ async def _replay_case(
                 "text": c.get("text"),
                 "chunk_count": c.get("chunk_count"),
                 "max_rerank_score": c.get("max_rerank_score"),
-                "score": c.get("score"),
             }
             for c in (data.get("candidates") or [])
         ]
-        if row["unrelated"]:
-            row["pick_kind"] = "unrelated"
-            row["pick_text"] = data.get("message")
-            return row
-        if row["unanswerable"]:
-            row["pick_kind"] = "unanswerable"
+        if gate.gate_outcome == "reject":
+            row["pick_kind"] = data.get("gate_reason") or "reject"
             row["pick_text"] = data.get("message")
             return row
         if gate_only:
@@ -177,7 +184,6 @@ async def _replay_case(
         if pick_kind == "candidate":
             final_q = (pick_payload.get("text") or "").strip()
             row["pick_text"] = final_q
-            row["pick_score"] = pick_payload.get("score")
             bypass = await evaluate_clarify_gate(
                 rag.lightrag,
                 final_q,
@@ -186,15 +192,11 @@ async def _replay_case(
                 clarification_id=data.get("clarification_id"),
                 candidate_id=pick_payload.get("id"),
             )
-        elif pick_kind == "keep_original":
-            final_q = (pick_payload.get("text") or orig_q).strip()
-            row["pick_text"] = final_q
-            row["pick_score"] = pick_payload.get("relevance_score")
-            bypass = await evaluate_clarify_gate(
-                rag.lightrag,
+            bundle = resolve_clarify_bundle(
+                data.get("clarification_id"),
+                "use_candidate",
                 final_q,
-                mode=mode,
-                clarify_choice="keep_original",
+                pick_payload.get("id"),
             )
         else:
             row["aquery_error"] = "no_answerable_candidate"
@@ -207,12 +209,8 @@ async def _replay_case(
         row["gate_bypass"] = gate.reason if isinstance(gate, ClarifyBypass) else None
         final_q = orig_q
 
-    final_probe = await probe_query_score(rag.lightrag, final_q)
-    final_score = _fscore(final_probe.get("max_cosine_similarity"))
-    row["final_score"] = round(final_score, 4) if final_score is not None else None
-
     started = time.perf_counter()
-    _thinking, answer, err = await _run_aquery(rag, final_q, mode=mode)
+    _thinking, answer, err = await _run_aquery(rag, final_q, mode=mode, bundle=bundle)
     row["duration_ms"] = int((time.perf_counter() - started) * 1000)
     row["aquery_error"] = err
     ans = (answer or "").strip()
@@ -281,16 +279,16 @@ def _load_source_cases(source: Path, *, limit: int) -> list[dict[str, Any]]:
 
 
 def _format_report(
-    rows: list[dict[str, Any]], *, source: str, threshold: float, wd: Path, gate_only: bool
+    rows: list[dict[str, Any]], *, source: str, wd: Path, gate_only: bool
 ) -> str:
     lines: list[str] = []
     lines.append("=" * 72)
-    lines.append(f"{source} 澄清门控批测")
+    lines.append(f"{source} 澄清门控批测 (v3 document-chunk gate)")
     lines.append("=" * 72)
     lines.append(f"time: {datetime.now(timezone.utc).isoformat()}")
     lines.append(f"working_dir: {wd}")
-    lines.append(f"threshold: {threshold}")
     lines.append(f"min_rerank: {clarify_candidate_min_rerank_score()}")
+    lines.append(f"k_required: {clarify_candidate_k()}")
     lines.append(f"mode: gate_only={gate_only}")
     lines.append(f"cases: {len(rows)}")
     lines.append("")
@@ -302,7 +300,7 @@ def _format_report(
             f"#{r['id']} [{src}/{r.get('category','')}] {r['original_query']}"
         )
         lines.append(
-            f"  naive_score={r['original_score']} band={r['band']} "
+            f"  gate_outcome={r.get('gate_outcome')} "
             f"clarify={'YES' if r['clarify_triggered'] else 'NO'}"
         )
         lines.append(
@@ -313,10 +311,8 @@ def _format_report(
             + (" scores_unavailable" if r.get("original_scores_unavailable") else "")
         )
         if r["clarify_triggered"]:
-            if r.get("unrelated"):
-                lines.append(f"  与知识库无关: {r.get('pick_text') or ''}")
-            elif r.get("unanswerable"):
-                lines.append(f"  无法回答: {r.get('pick_text') or ''}")
+            if r.get("gate_outcome") == "reject":
+                lines.append(f"  拒答 ({r.get('gate_reason')}): {r.get('pick_text') or ''}")
             else:
                 lines.append("  澄清推荐问法:")
                 for c in r.get("candidates") or []:
@@ -327,14 +323,13 @@ def _format_report(
                     )
                 if not gate_only and r.get("pick_kind") not in (None, "gate_only"):
                     lines.append(
-                        f"  选用: {r['pick_kind']} | {r['pick_text']} "
-                        f"(pick_score={r['pick_score']})"
+                        f"  选用: {r['pick_kind']} | {r['pick_text']}"
                     )
         else:
             lines.append(f"  gate_bypass={r.get('gate_bypass')}")
         if not gate_only and r.get("duration_ms") is not None:
             lines.append(
-                f"  最终问: {r['final_query']} final_score={r['final_score']} "
+                f"  最终问: {r['final_query']} "
                 f"has_answer={r['has_answer']} grade={'PASS' if r.get('grade_ok') else 'FAIL'} "
                 f"duration_ms={r['duration_ms']}"
             )
@@ -343,24 +338,23 @@ def _format_report(
         lines.append("")
 
     n_clarify = sum(1 for r in rows if r["clarify_triggered"])
-    n_unrelated = sum(1 for r in rows if r.get("unrelated"))
-    n_with_cands = sum(1 for r in rows if (r.get("candidates") or []))
+    n_reject = sum(1 for r in rows if r.get("gate_outcome") == "reject")
+    n_offer = sum(1 for r in rows if r.get("gate_outcome") == "offer")
     lines.append("=" * 72)
     lines.append(
-        f"汇总: 总题 {len(rows)} | 触发澄清 {n_clarify} | 无关拒答 {n_unrelated} | "
-        f"有推荐问 {n_with_cands}"
+        f"汇总: 总题 {len(rows)} | 触发门控 {n_clarify} | 拒答 {n_reject} | 澄清 Offer {n_offer}"
     )
     lines.append("")
-    lines.append("set  id  naive_s  orig_rerank  clarify  cands  band  question")
+    lines.append("set  id  orig_chunks  max_rerank  gate  cands  outcome  question")
     for r in rows:
         lines.append(
             f"{str(r.get('source_set','')):<7} "
             f"{str(r['id']):>3}  "
-            f"{r['original_score']!s:>7}  "
+            f"{r.get('original_llm_chunks')!s:>11}  "
             f"{r.get('original_max_rerank')!s:>10}  "
-            f"{'Y' if r['clarify_triggered'] else 'N':>7}  "
+            f"{'Y' if r['clarify_triggered'] else 'N':>4}  "
             f"{len(r.get('candidates') or []):>5}  "
-            f"{r['band']:<9} "
+            f"{str(r.get('gate_outcome') or '-'):<7} "
             f"{r['original_query']}"
         )
     lines.append("")
@@ -369,7 +363,6 @@ def _format_report(
 
 async def _main(args: argparse.Namespace) -> None:
     os.environ.setdefault("RAG_CLARIFY_ENABLED", "1")
-    threshold = clarify_threshold()
     wd = Path(
         os.getenv("RAG_WEB_WORKING_DIR") or (_ROOT / "data" / "rag_storage")
     ).resolve()
@@ -394,14 +387,12 @@ async def _main(args: argparse.Namespace) -> None:
                 rag,
                 case,
                 mode=args.mode,
-                threshold=threshold,
                 gate_only=args.gate_only,
             )
             rows.append(row)
             print(
-                f"  naive={row['original_score']} rerank={row.get('original_max_rerank')} "
-                f"clarify={row['clarify_triggered']} cands={len(row.get('candidates') or [])} "
-                f"band={row['band']}",
+                f"  chunks={row.get('original_llm_chunks')} rerank={row.get('original_max_rerank')} "
+                f"gate={row.get('gate_outcome')} cands={len(row.get('candidates') or [])}",
                 flush=True,
             )
     finally:
@@ -410,7 +401,6 @@ async def _main(args: argparse.Namespace) -> None:
     report = _format_report(
         rows,
         source=source_label,
-        threshold=threshold,
         wd=wd,
         gate_only=args.gate_only,
     )
