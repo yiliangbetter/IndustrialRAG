@@ -745,10 +745,16 @@ function renderClarificationPanel(loadingEl, data) {
   const bodyEl = document.createElement(`d` + `iv`);
   bodyEl.className = "body";
 
+  const unrelated = Boolean(data?.unrelated);
   const unanswerable = Boolean(data?.unanswerable);
   const intro = document.createElement("p");
-  intro.className = unanswerable ? "clarify-intro clarify-unanswerable" : "clarify-intro";
-  if (unanswerable) {
+  intro.className =
+    unrelated || unanswerable ? "clarify-intro clarify-unanswerable" : "clarify-intro";
+  if (unrelated) {
+    intro.textContent =
+      data?.message ||
+      "您的问题与当前知识库内容关联度较低，暂无法基于知识库作答。请尝试换种说法，或联系技术支持。";
+  } else if (unanswerable) {
     intro.textContent =
       data?.message ||
       "当前知识库中未找到足够相关的依据，无法对该问题给出合理答案。请换种说法或联系技术支持。";
@@ -756,8 +762,8 @@ function renderClarificationPanel(loadingEl, data) {
     const k = data?.generation?.k_answerable ?? (data?.candidates || []).length;
     intro.textContent =
       k > 0
-        ? "您的问题较模糊。请从下列已验证可检索的推荐问法中选择，或坚持原问题继续。"
-        : "暂未生成可检索的推荐问法，您可以坚持原问题继续，或在输入框换种说法重试。";
+        ? "请从下列已验证可检索的推荐问法中选择，或保持原问题继续。"
+        : "暂未生成可检索的推荐问法，您可以保持原问题继续，或在输入框换种说法重试。";
   }
   bodyEl.appendChild(intro);
 
@@ -766,7 +772,7 @@ function renderClarificationPanel(loadingEl, data) {
   preview.innerHTML = `原问：<pre>${escapeHtml(data?.original_query || "")}</pre>`;
   bodyEl.appendChild(preview);
 
-  if (!unanswerable) {
+  if (!unanswerable && !unrelated) {
     const options = document.createElement(`d` + `iv`);
     options.className = "clarify-options";
 
@@ -799,7 +805,7 @@ function renderClarificationPanel(loadingEl, data) {
       const btn = document.createElement("button");
       btn.type = "button";
       btn.className = "clarify-option clarify-keep-original";
-      btn.textContent = keep.label || "坚持原问题";
+      btn.textContent = keep.label || "保持原问题";
       btn.addEventListener("click", () => {
         void submitClarifiedQuery({
           query: keep.text,

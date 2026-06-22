@@ -59,8 +59,26 @@ _query_mode_for_relevance: ContextVar[str | None] = ContextVar(
 _naive_relevance: ContextVar[dict[str, Any] | None] = ContextVar(
     "naive_relevance", default=None
 )
+_llm_input: ContextVar[dict[str, Any] | None] = ContextVar("llm_input", default=None)
 # Worker tasks copy ContextVar; parent dump reads this shared snapshot instead.
 _query_debug_snapshot: dict[str, Any] = {}
+# Survives hook teardown so dumps can be written after ``async with`` exits.
+_retained_query_debug_snapshot: dict[str, Any] = {}
+
+
+def _retain_query_debug_snapshot() -> None:
+    if not _query_debug_snapshot:
+        return
+    _retained_query_debug_snapshot.clear()
+    _retained_query_debug_snapshot.update(_query_debug_snapshot)
+
+
+def _active_query_debug_snapshot() -> dict[str, Any]:
+    if _query_debug_snapshot:
+        return dict(_query_debug_snapshot)
+    if _retained_query_debug_snapshot:
+        return dict(_retained_query_debug_snapshot)
+    return {}
 
 
 def _sync_query_debug_snapshot() -> None:
@@ -80,12 +98,16 @@ def _sync_query_debug_snapshot() -> None:
             "naive_relevance": dict(_naive_relevance.get() or {})
             if isinstance(_naive_relevance.get(), dict)
             else _naive_relevance.get(),
+            "llm_input": dict(_llm_input.get() or {})
+            if isinstance(_llm_input.get(), dict)
+            else _llm_input.get(),
         }
     )
 
 
 def get_query_debug_state() -> dict[str, Any]:
     """Snapshot hook state for query debug dumps."""
+    snap = _active_query_debug_snapshot()
     live = {
         "retrieval_context": _retrieval_context.get(),
         "retrieved_docs_text": _retrieved_docs_text.get(),
@@ -96,16 +118,17 @@ def get_query_debug_state() -> dict[str, Any]:
         "steering_report": dict(_steering_report.get() or {}),
         "images_debug": dict(_last_image_debug.get() or {}),
         "naive_relevance": _naive_relevance.get(),
+        "llm_input": _llm_input.get(),
     }
-    if not _query_debug_snapshot:
+    if not snap:
         return live
-    snap = dict(_query_debug_snapshot)
+    merged = dict(snap)
     for key, val in live.items():
         if val is None or val == [] or val == {}:
             continue
-        if not snap.get(key):
-            snap[key] = val
-    return snap
+        if not merged.get(key):
+            merged[key] = val
+    return merged
 
 
 def get_answer_text_for_images() -> str | None:
@@ -126,6 +149,48 @@ def set_answer_text_for_images(answer: str) -> None:
 
 def get_retrieval_context() -> str | None:
     return _retrieval_context.get()
+
+
+def get_llm_input() -> dict[str, Any] | None:
+    val = _llm_input.get()
+    return dict(val) if isinstance(val, dict) else None
+
+
+def _capture_llm_context_from_build_result(ctx: Any) -> None:
+    """Persist answer-LLM context from LightRAG ``QueryContextResult`` or legacy str."""
+    context_str: str | None = None
+    raw_data: dict[str, Any] | None = None
+    if isinstance(ctx, str):
+        context_str = ctx.strip() or None
+    elif ctx is not None:
+        maybe_ctx = getattr(ctx, "context", None)
+        if isinstance(maybe_ctx, str) and maybe_ctx.strip():
+            context_str = maybe_ctx.strip()
+        maybe_raw = getattr(ctx, "raw_data", None)
+        if isinstance(maybe_raw, dict):
+            raw_data = maybe_raw
+    if context_str:
+        _retrieval_context.set(context_str)
+    if raw_data is not None:
+        from query_debug_dump import build_llm_input_snapshot  # noqa: WPS433
+
+        _llm_input.set(build_llm_input_snapshot(raw_data, context_str=context_str))
+    elif context_str:
+        _llm_input.set(
+            {
+                "context_chars": len(context_str),
+                "counts": {
+                    "entities": 0,
+                    "relationships": 0,
+                    "chunks": 0,
+                    "references": 0,
+                },
+                "entities": [],
+                "relationships": [],
+                "chunks": [],
+                "references": [],
+            }
+        )
 
 
 def get_naive_relevance() -> dict[str, Any] | None:
@@ -393,6 +458,12 @@ def _sync_retrieved_docs_after_rerank(final_docs: list[dict]) -> None:
     _rerank_docs.set(list(final_docs or []))
 
 
+def get_llm_input_chunks() -> list[dict]:
+    """LLM-bound chunks from the latest hooked query (includes ``rerank_score`` when rerank ran)."""
+    raw = _llm_chunks_for_images.get() or _retrieved_docs.get() or []
+    return list(raw)
+
+
 @contextlib.asynccontextmanager
 async def query_progress_hooks() -> AsyncIterator[asyncio.Queue[dict[str, str]]]:
     """Install hooks; yield a queue of ``{type, phase, text}`` status events."""
@@ -401,6 +472,8 @@ async def query_progress_hooks() -> AsyncIterator[asyncio.Queue[dict[str, str]]]
 
     q: asyncio.Queue[dict[str, str]] = asyncio.Queue(maxsize=32)
     token = _progress_queue.set(q)
+    _query_debug_snapshot.clear()
+    _retained_query_debug_snapshot.clear()
 
     orig_build_ctx = op._build_query_context
     orig_naive_query = op.naive_query
@@ -415,9 +488,8 @@ async def query_progress_hooks() -> AsyncIterator[asyncio.Queue[dict[str, str]]]
             _query_text.set(query)
             await _ensure_naive_relevance_scored(query)
         ctx = await orig_build_ctx(*args, **kwargs)
-        if isinstance(ctx, str) and ctx.strip():
-            _retrieval_context.set(ctx)
-            _sync_query_debug_snapshot()
+        _capture_llm_context_from_build_result(ctx)
+        _sync_query_debug_snapshot()
         return ctx
 
     async def _naive_query(*args: Any, **kwargs: Any):
@@ -578,6 +650,8 @@ async def query_progress_hooks() -> AsyncIterator[asyncio.Queue[dict[str, str]]]
         _lightrag_for_relevance.set(None)
         _query_mode_for_relevance.set(None)
         _naive_relevance.set(None)
+        _llm_input.set(None)
+        _retain_query_debug_snapshot()
         _query_debug_snapshot.clear()
 
 

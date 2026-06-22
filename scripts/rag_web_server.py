@@ -343,6 +343,9 @@ def _persist_query_debug_dump(
         else None,
         naive_relevance=naive_relevance,
         clarify_gate=clarify_gate,
+        llm_input=hook_state.get("llm_input")
+        if isinstance(hook_state.get("llm_input"), dict)
+        else None,
     )
     return write_query_dump(payload)
 

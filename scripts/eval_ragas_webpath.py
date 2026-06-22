@@ -9,7 +9,7 @@ Workflow:
   2. This script collects (question, answer, contexts, ground_truth) per case
   3. RAGAS scores faithfulness / answer relevancy / context recall / context precision
 
-Install eval deps first::
+Install eval deps first (keeps sentence-transformers for HF embedding)::
 
   uv sync --extra eval
 
@@ -226,13 +226,74 @@ def _is_nan(value: Any) -> bool:
     return isinstance(value, float) and math.isnan(value)
 
 
+_KNOWN_RAGAS_METRICS = frozenset(
+    {
+        "faithfulness",
+        "answer_relevancy",
+        "context_recall",
+        "context_precision",
+        "context_utilization",
+        "answer_similarity",
+        "answer_correctness",
+    }
+)
+_RAGAS_INPUT_COLS = frozenset(
+    {
+        "question",
+        "answer",
+        "contexts",
+        "ground_truth",
+        "user_input",
+        "response",
+        "retrieved_contexts",
+        "reference",
+    }
+)
+
+
+def _parse_metric_value(val: Any) -> float | None:
+    if val is None:
+        return None
+    if isinstance(val, float) and math.isnan(val):
+        return None
+    if isinstance(val, (int, float)):
+        return float(val)
+    if isinstance(val, str):
+        try:
+            return float(val)
+        except ValueError:
+            return None
+    return None
+
+
+def _metric_columns(df) -> list[str]:
+    cols = [c for c in df.columns if c in _KNOWN_RAGAS_METRICS]
+    if cols:
+        return cols
+    inferred: list[str] = []
+    for c in df.columns:
+        if c in _RAGAS_INPUT_COLS:
+            continue
+        if any(_parse_metric_value(row[c]) is not None for _, row in df.iterrows()):
+            inferred.append(c)
+    return inferred
+
+
+def _resolve_hf_model_path(model_id: str) -> str:
+    from raganything.local_hf_embedding import _hub_snapshot_dir  # noqa: WPS433
+
+    hf_home = (os.getenv("HF_HOME") or "").strip() or str(_ROOT / "data" / "models")
+    snap = _hub_snapshot_dir(model_id, hf_home)
+    return str(snap) if snap else model_id
+
+
 def _build_ragas_llm():
     try:
-        from langchain_openai import ChatOpenAI, OpenAIEmbeddings
+        from langchain_openai import ChatOpenAI
         from ragas.llms import LangchainLLMWrapper
     except ImportError as exc:
         raise ImportError(
-            "RAGAS eval deps missing. Install with: uv sync --extra eval"
+            "RAGAS eval deps missing or incompatible. Install with: uv sync --extra eval"
         ) from exc
 
     api_key = (
@@ -256,24 +317,71 @@ def _build_ragas_llm():
     if base_url:
         llm_kwargs["base_url"] = base_url
 
-    embed_api_key = (
-        os.getenv("EVAL_EMBEDDING_BINDING_API_KEY")
-        or os.getenv("EMBEDDING_BINDING_API_KEY")
-        or api_key
-    )
-    embed_model = os.getenv("EVAL_EMBEDDING_MODEL") or os.getenv("EMBEDDING_MODEL") or "text-embedding-3-small"
-    embed_base = os.getenv("EVAL_EMBEDDING_BINDING_HOST") or os.getenv("EMBEDDING_BINDING_HOST") or base_url
-    embed_kwargs: dict[str, Any] = {"model": embed_model, "api_key": embed_api_key}
-    if embed_base:
-        embed_kwargs["base_url"] = embed_base
-
     base_llm = ChatOpenAI(**llm_kwargs)
     try:
         eval_llm = LangchainLLMWrapper(langchain_llm=base_llm, bypass_n=True)
     except Exception:
         eval_llm = base_llm
-    embeddings = OpenAIEmbeddings(**embed_kwargs)
-    return eval_llm, embeddings, model, embed_model
+    return eval_llm, model
+
+
+def _build_ragas_embeddings():
+    """Embeddings for answer_relevancy only. Never send local HF model id to OpenAI API."""
+    eval_model = (os.getenv("EVAL_EMBEDDING_MODEL") or "").strip()
+    eval_backend = (os.getenv("EVAL_EMBEDDING_BACKEND") or "").strip().lower()
+
+    if not eval_backend:
+        if eval_model.startswith("text-embedding"):
+            eval_backend = "api"
+        elif eval_model:
+            eval_backend = "hf"
+        elif (os.getenv("EMBEDDING_BACKEND") or "").strip().lower() == "hf":
+            eval_backend = "hf"
+        else:
+            eval_backend = "api"
+
+    if eval_backend == "hf":
+        try:
+            from langchain_community.embeddings import HuggingFaceEmbeddings
+        except ImportError as exc:
+            raise ImportError(
+                "Local RAGAS embeddings need langchain-community + sentence-transformers"
+            ) from exc
+        from raganything.local_hf_embedding import _resolve_embedding_device  # noqa: WPS433
+
+        model_id = eval_model or (os.getenv("EMBEDDING_MODEL") or "BAAI/bge-m3").strip()
+        model_path = _resolve_hf_model_path(model_id)
+        device = _resolve_embedding_device()
+        embeddings = HuggingFaceEmbeddings(
+            model_name=model_path,
+            model_kwargs={"device": device},
+            encode_kwargs={"normalize_embeddings": True},
+        )
+        return embeddings, f"hf:{model_id}"
+
+    try:
+        from langchain_openai import OpenAIEmbeddings
+    except ImportError as exc:
+        raise ImportError(
+            "RAGAS eval deps missing or incompatible. Install with: uv sync --extra eval"
+        ) from exc
+
+    api_key = (
+        os.getenv("EVAL_EMBEDDING_BINDING_API_KEY")
+        or os.getenv("LLM_BINDING_API_KEY")
+        or os.getenv("OPENAI_API_KEY")
+    )
+    if not api_key:
+        raise EnvironmentError(
+            "API embeddings need EVAL_EMBEDDING_BINDING_API_KEY or LLM_BINDING_API_KEY"
+        )
+    base_url = os.getenv("EVAL_EMBEDDING_BINDING_HOST") or os.getenv("LLM_BINDING_HOST")
+    # Do not fall back to EMBEDDING_MODEL (BAAI/bge-m3) — that is local HF, not an API id.
+    model = eval_model or "text-embedding-v3"
+    embed_kwargs: dict[str, Any] = {"model": model, "api_key": api_key}
+    if base_url:
+        embed_kwargs["base_url"] = base_url
+    return OpenAIEmbeddings(**embed_kwargs), model
 
 
 def run_ragas_eval(rows: list[dict[str, Any]]) -> dict[str, Any]:
@@ -288,14 +396,15 @@ def run_ragas_eval(rows: list[dict[str, Any]]) -> dict[str, Any]:
         )
     except ImportError as exc:
         raise ImportError(
-            "RAGAS eval deps missing. Install with: uv sync --extra eval"
+            "RAGAS eval deps missing or incompatible. Install with: uv sync --extra eval"
         ) from exc
 
     usable = [r for r in rows if (r.get("answer") or "").strip() and r.get("contexts")]
     if not usable:
         raise RuntimeError("No rows with both answer and contexts; cannot run RAGAS")
 
-    eval_llm, embeddings, llm_model, embed_model = _build_ragas_llm()
+    eval_llm, llm_model = _build_ragas_llm()
+    embeddings, embed_model = _build_ragas_embeddings()
     dataset = Dataset.from_dict(
         {
             "question": [r["question"] for r in usable],
@@ -319,17 +428,12 @@ def run_ragas_eval(rows: list[dict[str, Any]]) -> dict[str, Any]:
     df = result.to_pandas()
 
     per_case: list[dict[str, Any]] = []
-    metric_cols = [
-        c
-        for c in df.columns
-        if c not in ("question", "answer", "contexts", "ground_truth")
-    ]
+    metric_cols = _metric_columns(df)
     for idx, row in df.iterrows():
         case_row = usable[int(idx)]
         scores = {}
         for col in metric_cols:
-            val = row[col]
-            scores[col] = None if _is_nan(val) else float(val)
+            scores[col] = _parse_metric_value(row[col])
         per_case.append(
             {
                 "id": case_row.get("id"),
@@ -476,6 +580,15 @@ async def _async_main(args: argparse.Namespace) -> None:
         print(f"Loaded {len(rows)} rows from {args.run_jsonl}", flush=True)
     else:
         rows = await collect_rows(cases, mode=mode, wd=wd, pod=pod)
+        # Persist collection before RAGAS (scoring can fail on dep/API issues)
+        out_dir = _RESULTS_DIR / stamp
+        out_dir.mkdir(parents=True, exist_ok=True)
+        collect_path = out_dir / "run.jsonl"
+        _write_jsonl(collect_path, rows)
+        (out_dir / "meta.json").write_text(
+            json.dumps(meta, ensure_ascii=False, indent=2) + "\n", encoding="utf-8"
+        )
+        print(f"Saved collection -> {collect_path}", flush=True)
 
     ragas: dict[str, Any] | None = None
     if not args.collect_only:

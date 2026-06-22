@@ -62,7 +62,11 @@ eval = [
     "ragas>=0.2.0",
     "datasets>=2.14.0",
     "langchain-openai>=0.2.0",
+    # ragas 0.4.x imports VertexAI from langchain_community; removed in 0.4.x
+    "langchain-community>=0.3.31,<0.4",
     "pandas>=2.0.0",
+    # Web-path collect uses EMBEDDING_BACKEND=hf (same as run_web_path_q1_17)
+    "sentence-transformers>=3.0.0",
 ]
 
 [project.urls]
