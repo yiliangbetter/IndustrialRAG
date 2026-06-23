@@ -7,6 +7,7 @@ Examples::
 
   uv run python scripts/replay_clarify_gate_green8.py --source green8
   uv run python scripts/replay_clarify_gate_green8.py --source shili17
+  uv run python scripts/replay_clarify_gate_green8.py --source voice29
 """
 
 from __future__ import annotations
@@ -226,6 +227,7 @@ async def _replay_case(
 _SOURCE_PRESETS: dict[str, Path | list[Path]] = {
     "green8": _ROOT / "data" / "voice_script_green8.json",
     "shili17": _ROOT / "docs" / "测试例.txt",
+    "voice29": _ROOT / "data" / "voice_script_tests.json",
     "all": [
         _ROOT / "docs" / "测试例.txt",
         _ROOT / "data" / "voice_script_green8.json",
@@ -419,7 +421,7 @@ def main() -> None:
     p.add_argument(
         "--source",
         default="green8",
-        help="Preset (green8, shili17, all) or path to question file",
+        help="Preset (green8, shili17, voice29, all) or path to question file",
     )
     p.add_argument("--mode", default="mix")
     p.add_argument("--limit", type=int, default=0)
