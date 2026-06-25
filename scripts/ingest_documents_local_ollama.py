@@ -51,7 +51,7 @@ OLLAMA_BASE_URL = f"{OLLAMA_HOST}/v1"
 OLLAMA_API_KEY = "ollama"
 
 DEFAULT_INPUT = _ROOT / "Documents"
-DEFAULT_WORKING = _ROOT / "rag_storage_documents_v3"
+DEFAULT_WORKING = _ROOT / "rag_storage_documents_v5"
 DEFAULT_PARSER_OUT = _ROOT / "output" / "documents_mineru"
 
 
@@ -179,10 +179,40 @@ async def ollama_embedding_async(
     import ollama
 
     limit = max_token_size or OLLAMA_EMBEDDING_MAX_TOKENS
-    safe_texts = [_truncate_for_embed(t, limit) for t in texts]
+    safe_texts: list[str] = []
+    for t in texts:
+        s = _truncate_for_embed(t or "", limit)
+        if not s.strip():
+            s = " "
+        safe_texts.append(s)
+
     client = ollama.AsyncClient(host=OLLAMA_HOST)
-    response = await client.embed(model=OLLAMA_EMBEDDING_MODEL, input=safe_texts)
-    return np.array(response.embeddings, dtype=np.float32)
+    batch_size = int(os.getenv("OLLAMA_EMBED_BATCH_SIZE", "4"))
+    rows: list[np.ndarray] = []
+    for i in range(0, len(safe_texts), batch_size):
+        batch = safe_texts[i : i + batch_size]
+        try:
+            response = await client.embed(model=OLLAMA_EMBEDDING_MODEL, input=batch)
+            batch_arr = np.array(response.embeddings, dtype=np.float32)
+        except Exception:
+            batch_arr = np.empty((0, OLLAMA_EMBEDDING_DIM), dtype=np.float32)
+
+        if batch_arr.shape[0] != len(batch):
+            batch_arr = np.empty((0, OLLAMA_EMBEDDING_DIM), dtype=np.float32)
+
+        for j, text in enumerate(batch):
+            vec = (
+                batch_arr[j]
+                if j < len(batch_arr)
+                else np.full(OLLAMA_EMBEDDING_DIM, np.nan, dtype=np.float32)
+            )
+            if vec.shape[0] != OLLAMA_EMBEDDING_DIM or np.isnan(vec).any():
+                one = await client.embed(model=OLLAMA_EMBEDDING_MODEL, input=[text])
+                vec = np.array(one.embeddings[0], dtype=np.float32)
+                if np.isnan(vec).any() or vec.shape[0] != OLLAMA_EMBEDDING_DIM:
+                    vec = np.zeros(OLLAMA_EMBEDDING_DIM, dtype=np.float32)
+            rows.append(vec)
+    return np.vstack(rows) if rows else np.empty((0, OLLAMA_EMBEDDING_DIM), dtype=np.float32)
 
 
 def _embedding_func() -> EmbeddingFunc:
