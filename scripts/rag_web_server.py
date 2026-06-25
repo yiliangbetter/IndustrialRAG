@@ -274,9 +274,21 @@ async def _evaluate_clarify_gate(body: QueryBody, mode: str) -> Any:
     except ClarifyValidationError as exc:
         raise HTTPException(400, str(exc)) from exc
 
+    import logging
+
+    if isinstance(result, ClarifyBypass) and body.clarify_choice:
+        logging.getLogger(__name__).info(
+            "clarify pick bypass=%s query=%r clarification_id=%s candidate_id=%s",
+            result.reason,
+            body.query.strip()[:80],
+            body.clarification_id,
+            body.candidate_id,
+        )
+
     if isinstance(result, ClarifyBypass) and result.reason in (
         "keep_original",
         "use_candidate",
+        "cached_answer",
     ):
         bundle = resolve_clarify_bundle(
             body.clarification_id,
@@ -869,6 +881,19 @@ async def api_query(body: QueryBody):
             payload["debug_dump"] = {"path": str(dump_path), "name": dump_path.name}
         return payload
 
+    from raganything.clarify_gate import ClarifyBypass, resolve_clarify_cached_response  # noqa: WPS433
+
+    cached_response: dict[str, Any] | None = None
+    if isinstance(gate_result, ClarifyBypass) and gate_result.reason == "cached_answer":
+        cached_response = resolve_clarify_cached_response(
+            body.clarification_id,
+            body.clarify_choice or "use_candidate",
+            q,
+            body.candidate_id,
+        )
+        if cached_response is None:
+            raise HTTPException(400, "clarification cache expired or invalid")
+
     started = time.perf_counter()
     thinking = ""
     answer = ""
@@ -889,8 +914,24 @@ async def api_query(body: QueryBody):
     set_query_text_for_images(q)
     set_query_lightrag(state.rag.lightrag, mode=mode)
     try:
-        async with query_progress_hooks():
-            raw = await _run_aquery(q, mode, stream=False)
+        if cached_response is not None:
+            thinking = str(cached_response.get("thinking") or "")
+            answer = str(cached_response.get("answer") or "")
+            from query_doc_steering import strip_manual_circled_step_markers  # noqa: WPS433
+
+            answer = strip_manual_circled_step_markers(answer)
+        else:
+            async with query_progress_hooks():
+                raw = await _run_aquery(q, mode, stream=False)
+            if not isinstance(raw, str):
+                parts: list[str] = []
+                async for chunk in _iter_llm_chunks(raw):
+                    parts.append(chunk)
+                raw = "".join(parts)
+            thinking, answer = parse_complete_cot(raw or "")
+            from query_doc_steering import strip_manual_circled_step_markers  # noqa: WPS433
+
+            answer = strip_manual_circled_step_markers(answer)
     except Exception as exc:
         error = _friendly_query_error(exc)
         _persist_query_debug_dump(
@@ -904,16 +945,6 @@ async def api_query(body: QueryBody):
         raise HTTPException(500, f"Query failed: {exc}") from exc
     finally:
         _clear_clarify_injection_if_set()
-
-    if not isinstance(raw, str):
-        parts: list[str] = []
-        async for chunk in _iter_llm_chunks(raw):
-            parts.append(chunk)
-        raw = "".join(parts)
-    thinking, answer = parse_complete_cot(raw or "")
-    from query_doc_steering import strip_manual_circled_step_markers  # noqa: WPS433
-
-    answer = strip_manual_circled_step_markers(answer)
     naive_rel = get_naive_relevance()
     dump_path = _persist_query_debug_dump(
         query=q,
@@ -989,10 +1020,59 @@ async def _query_stream_events(q: str, mode: str, body: QueryBody) -> AsyncItera
         yield _sse({"type": "done", "mode": mode, "clarification_only": True})
         return
 
+    from raganything.clarify_gate import ClarifyBypass, resolve_clarify_cached_response  # noqa: WPS433
+
+    cached_response: dict[str, Any] | None = None
+    if isinstance(gate_result, ClarifyBypass) and gate_result.reason == "cached_answer":
+        cached_response = resolve_clarify_cached_response(
+            body.clarification_id,
+            body.clarify_choice or "use_candidate",
+            q,
+            body.candidate_id,
+        )
+        if cached_response is None:
+            yield _sse(
+                {"type": "error", "message": "clarification cache expired or invalid"}
+            )
+            return
+
     set_query_media_roots([parser_root])
     set_query_text_for_images(q)
     set_query_lightrag(state.rag.lightrag, mode=mode)
     started = time.perf_counter()
+
+    if cached_response is not None:
+        try:
+            thinking = str(cached_response.get("thinking") or "")
+            answer = strip_manual_circled_step_markers(
+                str(cached_response.get("answer") or "")
+            )
+            if thinking:
+                yield _sse({"type": "thinking_delta", "text": thinking})
+            if answer:
+                yield _sse({"type": "answer_delta", "text": answer})
+            dump_path = _persist_query_debug_dump(
+                query=q,
+                mode=mode,
+                parser_root=parser_root,
+                thinking=thinking,
+                answer=answer,
+                duration_ms=int((time.perf_counter() - started) * 1000),
+                naive_relevance=await _resolve_naive_relevance(q, mode),
+            )
+            if dump_path is not None:
+                yield _sse(
+                    {
+                        "type": "query_debug_saved",
+                        "path": str(dump_path),
+                        "name": dump_path.name,
+                    }
+                )
+            yield _sse({"type": "done", "mode": mode, "cached_answer": True})
+        finally:
+            _clear_clarify_injection_if_set()
+        return
+
     thinking_parts: list[str] = []
     answer_parts: list[str] = []
     stream_error: str | None = None

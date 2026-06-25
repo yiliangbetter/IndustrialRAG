@@ -51,6 +51,7 @@ from raganything.clarify_gate import (  # noqa: E402
     clarify_candidate_min_rerank_score,
     evaluate_clarify_gate,
     resolve_clarify_bundle,
+    resolve_clarify_cached_response,
 )
 
 
@@ -371,6 +372,7 @@ async def _replay_case(
         "pick_max_rerank_score": None,
         "final_query": orig_q,
         "has_answer": False,
+        "answer_cached": False,
         "answer": "",
         "answer_chars": 0,
         "answer_has_reference": False,
@@ -385,6 +387,7 @@ async def _replay_case(
     }
 
     bundle = None
+    cached: dict[str, Any] | None = None
     if clarify_triggered:
         data = gate.data
         row["clarification_id"] = data.get("clarification_id")
@@ -448,28 +451,47 @@ async def _replay_case(
             row["aquery_error"] = "bypass_validation_failed"
             _attach_design_checks(row)
             return row
+        if bypass.reason == "cached_answer":
+            cached = resolve_clarify_cached_response(
+                data.get("clarification_id"),
+                "use_candidate",
+                final_q,
+                pick_payload.get("id"),
+            )
     else:
         row["gate_bypass"] = gate.reason if isinstance(gate, ClarifyBypass) else None
         final_q = orig_q
 
     started = time.perf_counter()
-    _thinking, answer, err, aquery_meta = await _run_aquery(
-        rag, final_q, mode=mode, bundle=bundle
-    )
-    row["duration_ms"] = int((time.perf_counter() - started) * 1000)
-    row["aquery_error"] = err
-    ans = (answer or "").strip()
-    row["answer"] = ans
-    row["has_answer"] = bool(ans)
-    row["answer_chars"] = len(ans)
-    row["answer_has_reference"] = bool(aquery_meta.get("answer_has_reference"))
-    row["answer_reference_lines"] = list(aquery_meta.get("answer_reference_lines") or [])
-    row["llm_input_reference_count"] = int(
-        aquery_meta.get("llm_input_reference_count") or 0
-    )
-    row["llm_input_reference_lines"] = list(
-        aquery_meta.get("llm_input_reference_lines") or []
-    )
+    if cached is not None and cached.get("answer"):
+        ans = str(cached.get("answer") or "").strip()
+        row["answer"] = ans
+        row["has_answer"] = bool(ans)
+        row["answer_cached"] = True
+        row["answer_chars"] = len(ans)
+        row["answer_has_reference"] = _answer_has_reference_markers(ans)
+        row["answer_reference_lines"] = _extract_answer_reference_lines(ans)
+        row["llm_input_reference_count"] = int(row.get("bundle_reference_count") or 0)
+        row["llm_input_reference_lines"] = list(row.get("bundle_reference_lines") or [])
+        row["duration_ms"] = int((time.perf_counter() - started) * 1000)
+    else:
+        _thinking, answer, err, aquery_meta = await _run_aquery(
+            rag, final_q, mode=mode, bundle=bundle
+        )
+        row["duration_ms"] = int((time.perf_counter() - started) * 1000)
+        row["aquery_error"] = err
+        ans = (answer or "").strip()
+        row["answer"] = ans
+        row["has_answer"] = bool(ans)
+        row["answer_chars"] = len(ans)
+        row["answer_has_reference"] = bool(aquery_meta.get("answer_has_reference"))
+        row["answer_reference_lines"] = list(aquery_meta.get("answer_reference_lines") or [])
+        row["llm_input_reference_count"] = int(
+            aquery_meta.get("llm_input_reference_count") or 0
+        )
+        row["llm_input_reference_lines"] = list(
+            aquery_meta.get("llm_input_reference_lines") or []
+        )
     _attach_design_checks(row)
     return row
 

@@ -762,7 +762,9 @@ function renderClarificationPanel(loadingEl, data) {
     const k = data?.generation?.k_answerable ?? (data?.candidates || []).length;
     intro.textContent =
       k > 0
-        ? "请从下列已验证可检索的推荐问法中选择，或保持原问题继续。"
+        ? data?.generation?.candidate_validation === "mix_document_chunks+llm_answer"
+          ? "请从下列已预答验证的推荐问法中选择，或保持原问题继续。"
+          : "请从下列已验证可检索的推荐问法中选择，或保持原问题继续。"
         : "正在准备澄清选项…";
   }
   bodyEl.appendChild(intro);
@@ -810,6 +812,7 @@ function renderClarificationPanel(loadingEl, data) {
         void submitClarifiedQuery({
           query: keep.text,
           clarify_choice: "keep_original",
+          clarification_id: data.clarification_id,
         });
       });
       options.appendChild(btn);

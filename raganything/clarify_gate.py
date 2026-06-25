@@ -2,8 +2,9 @@
 
 Gate on **document chunks** (mix retrieval + rerank >= MIN_RERANK_SCORE):
 - chunk_count == 0: ClarifyReject (no LLM, no recommendations).
-- chunk_count > 0: generate k answerable recommendations (default k=2); only ClarifyOffer
-  when k recommendations are verified; otherwise ClarifyReject after max rounds.
+- chunk_count > 0: generate k recommendations; each candidate must pass rerank
+  probe and (by default) a full injected aquery whose answer is substantive.
+  Cached answers are returned on user pick without a second answer LLM call.
 - User selection injects cached CachedQueryBundle (ClarifyBypass, no re-retrieval).
 
 See ``docs/澄清门控设计方案_v3.md``.
@@ -22,6 +23,10 @@ from typing import Any, Literal
 
 from lightrag import QueryParam
 
+from raganything.clarify_candidate_answer import (
+    clarify_candidate_llm_validate_enabled,
+    validate_candidate_with_llm,
+)
 from raganything.clarify_context import (
     CachedQueryBundle,
     RetrievalProbeResult,
@@ -377,6 +382,45 @@ def resolve_clarify_bundle(
     return bundle if isinstance(bundle, CachedQueryBundle) else None
 
 
+def resolve_clarify_cached_response(
+    clarification_id: str | None,
+    clarify_choice: str,
+    query_text: str,
+    candidate_id: str | None = None,
+) -> dict[str, Any] | None:
+    """Return cached thinking/answer for a validated candidate option."""
+    rec = _get_clarification_record(clarification_id)
+    if not rec:
+        return None
+    choice = (clarify_choice or "").strip().lower()
+    options = rec.get("options")
+    if not isinstance(options, dict):
+        return None
+
+    if choice == "keep_original":
+        if not validate_keep_original(clarification_id, query_text):
+            return None
+        entry = options.get("keep_original")
+    elif choice == "use_candidate":
+        if not validate_use_candidate(clarification_id, candidate_id, query_text):
+            return None
+        entry = options.get((candidate_id or "").strip())
+    else:
+        return None
+
+    if not isinstance(entry, dict):
+        return None
+    answer = entry.get("cached_answer")
+    if not isinstance(answer, str) or not answer.strip():
+        return None
+    bundle = entry.get("bundle")
+    return {
+        "thinking": str(entry.get("cached_thinking") or ""),
+        "answer": answer.strip(),
+        "bundle": bundle if isinstance(bundle, CachedQueryBundle) else None,
+    }
+
+
 def _normalize_candidate_line(line: str) -> str:
     text = (line or "").strip()
     text = re.sub(r"^[\s\d]+[.、)）]\s*", "", text)
@@ -466,6 +510,8 @@ async def _collect_answerable_candidates(
     option_entries: dict[str, dict[str, Any]] = {}
     rounds_used = 0
     probes_used = 0
+    llm_validations_used = 0
+    llm_validate = clarify_candidate_llm_validate_enabled()
 
     while rounds_used < max_rounds and len(answerable) < k_target:
         if max_probes is not None and probes_used >= max_probes:
@@ -497,6 +543,19 @@ async def _collect_answerable_candidates(
             if not probe.answerable or probe.bundle is None:
                 continue
 
+            cached_thinking = ""
+            cached_answer = ""
+            if llm_validate:
+                llm_validations_used += 1
+                accepted, cached_thinking, cached_answer = await validate_candidate_with_llm(
+                    lightrag,
+                    line,
+                    probe.bundle,
+                    mode=mode,
+                )
+                if not accepted:
+                    continue
+
             cid = f"c{len(answerable) + 1}"
             answerable.append(
                 {
@@ -506,9 +565,15 @@ async def _collect_answerable_candidates(
                     "max_rerank_score": probe.max_rerank_score,
                     "min_rerank_threshold": probe.min_rerank_threshold,
                     "answerable": True,
+                    "llm_validated": llm_validate,
                 }
             )
-            option_entries[cid] = {"query": line, "bundle": probe.bundle}
+            option_entries[cid] = {
+                "query": line,
+                "bundle": probe.bundle,
+                "cached_thinking": cached_thinking,
+                "cached_answer": cached_answer,
+            }
 
             if strategy == "first" and answerable:
                 break
@@ -529,8 +594,14 @@ async def _collect_answerable_candidates(
         "k_answerable": len(answerable),
         "rounds_used": rounds_used,
         "probes_used": probes_used,
+        "llm_validations_used": llm_validations_used,
         "strategy": strategy,
-        "candidate_validation": "mix_document_chunks",
+        "candidate_validation": (
+            "mix_document_chunks+llm_answer"
+            if llm_validate
+            else "mix_document_chunks"
+        ),
+        "llm_validate": llm_validate,
         "min_rerank_threshold": clarify_candidate_min_rerank_score(),
         "reason": "filled_k" if len(answerable) >= k_target else "cannot_fill_answerable_candidates",
     }
@@ -601,6 +672,11 @@ async def evaluate_clarify_gate(
             raise ClarifyValidationError(
                 "invalid clarification_id / candidate_id / query for use_candidate"
             )
+        cached = resolve_clarify_cached_response(
+            clarification_id, "use_candidate", q, candidate_id
+        )
+        if cached and cached.get("answer"):
+            return ClarifyBypass("cached_answer")
         return ClarifyBypass("use_candidate")
 
     if not is_clarify_gate_enabled(mode):
