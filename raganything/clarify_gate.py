@@ -430,15 +430,21 @@ async def _generate_candidate_lines(
         context = format_chunk_previews(bundle.document_chunks)
 
     prompt = (
-        f"用户原问较模糊或与手册表述不完全一致。根据用户原问和下列检索片段，"
-        f"生成 {k} 条更明确的中文疑问句。\n"
-        "问句须与片段主题一致，且适合在设备手册中检索到依据。\n"
-        "不要回答问题，不要解释，每行只输出一条问句。\n"
+        f"用户原问表述不够清楚。请生成 {k} 条「更具体、但仍与原问同一意图」的中文疑问句，"
+        "供用户点选澄清。\n"
+        "规则：\n"
+        "1. 必须保留原问的核心：问的对象、问的属性（如型号/参数/原因/步骤/地址等）不能更换。\n"
+        "2. 每条推荐问应能看作原问的细化或改写，而不是换一个新话题。\n"
+        "3. 检索片段仅用于对齐手册中的术语与表述，不得因片段内容而改换用户意图。\n"
+        "4. 不要回答问题，不要解释，每行只输出一条完整问句。\n"
         f"{exclude_block}\n\n"
         f"用户原问：{query}\n\n"
-        f"检索片段：\n{context or '（无）'}"
+        f"检索片段（仅供术语参考）：\n{context or '（无）'}"
     )
-    system = "你是设备手册问答助手，只输出中文问句，每行一条。"
+    system = (
+        "你是设备手册问答助手。只输出中文疑问句，每行一条。"
+        "推荐问必须与原问同一意图，仅表述更具体，不得偏离用户要问的事项。"
+    )
 
     raw = await _call_lightrag_llm(lightrag, prompt, system_prompt=system)
     return _parse_candidate_lines(raw, limit=k + 2)
@@ -532,12 +538,7 @@ async def _collect_answerable_candidates(
 
 
 def _probe_summary(probe: RetrievalProbeResult) -> dict[str, Any]:
-    return {
-        "chunk_count": probe.chunk_count,
-        "max_rerank_score": probe.max_rerank_score,
-        "min_rerank_threshold": probe.min_rerank_threshold,
-        "mode": probe.mode,
-    }
+    return probe.as_stats()
 
 
 def build_clarification_payload(
