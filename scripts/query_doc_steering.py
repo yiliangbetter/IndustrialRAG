@@ -1,8 +1,11 @@
 """Scope retrieval to the machine type mentioned in the user query.
 
 Rules live in code (``MACHINE_PROFILES``), not per-machine ``.env`` entries.
-When a profile matches, unrelated manual PDFs are dropped after rerank and a
-report is exposed for the Web UI / logs.
+When a profile matches, unrelated manual PDFs can be dropped after rerank
+(see ``query_progress_hooks``); a report is exposed for the Web UI / logs.
+
+Rerank scores come only from CrossEncoder (``pipeline_rerank``); this module
+no longer injects KV chunks or synthetic ``rerank_score`` values after rerank.
 """
 
 from __future__ import annotations
@@ -282,124 +285,6 @@ def is_catalog_product_model_query(query: str) -> bool:
     return True
 
 
-def _default_min_rerank_score() -> float:
-    raw = os.getenv("MIN_RERANK_SCORE") or "0.28"
-    try:
-        return float(raw)
-    except ValueError:
-        return 0.28
-
-
-def catalog_query_min_rerank_score() -> float:
-    raw = os.getenv("RAG_CATALOG_QUERY_MIN_RERANK_SCORE") or "0.0"
-    try:
-        return max(0.0, float(raw))
-    except ValueError:
-        return 0.0
-
-
-def _chunk_has_catalog_marker(doc: dict) -> bool:
-    return _CATALOG_MODEL_MARKER in str(doc.get("content") or "")
-
-
-def _catalog_chunk_relevant_to_query(query: str, doc: dict) -> bool:
-    """Keep foreword catalog lines whose path/body overlap query terms (no manual name lists)."""
-    if not _chunk_has_catalog_marker(doc):
-        return False
-    path = _doc_path(doc)
-    profile = resolve_machine_profile(query)
-    if profile:
-        deny = list(profile.get("deny_path_substrings") or [])
-        if _path_hits_deny(path, deny):
-            return False
-        phrases = profile.get("query_phrases") or []
-        if path and phrases:
-            pn = path.replace(" ", "")
-            if not any(str(p).replace(" ", "") in pn for p in phrases if str(p).strip()):
-                return False
-    terms = _query_discriminative_terms(query)
-    if not terms:
-        return True
-    blob = f"{path} {str(doc.get('content') or '')[:500]}"
-    return any(len(term) >= 3 and term in blob for term in terms)
-
-
-def _load_catalog_chunks_from_storage() -> list[dict]:
-    try:
-        from client_paths import get_rag_storage_dir  # noqa: WPS433
-
-        store = Path(get_rag_storage_dir())
-    except Exception:
-        store = _ROOT / "data" / "rag_storage"
-    path = store / "kv_store_text_chunks.json"
-    if not path.is_file():
-        return []
-    try:
-        raw = json.loads(path.read_text(encoding="utf-8"))
-    except (OSError, json.JSONDecodeError):
-        return []
-    if not isinstance(raw, dict):
-        return []
-    out: list[dict] = []
-    for chunk_id, row in raw.items():
-        if not isinstance(row, dict):
-            continue
-        content = str(row.get("content") or "")
-        if _CATALOG_MODEL_MARKER not in content:
-            continue
-        doc = dict(row)
-        doc.setdefault("content", content)
-        doc.setdefault("id", chunk_id)
-        out.append(doc)
-    return out
-
-
-def supplement_catalog_product_model_chunks(
-    query: str,
-    docs: list[dict],
-    *,
-    rerank_pool: list[dict] | None = None,
-) -> list[dict]:
-    """Ensure each relevant manual's foreword ``本手册适用产品型号`` chunk is present."""
-    if not _env_bool("RAG_CATALOG_QUERY_BOOST", True):
-        return docs
-    if not is_catalog_product_model_query(query):
-        return docs
-
-    seen_paths: set[str] = set()
-    merged: list[dict] = []
-
-    def add_doc(doc: dict) -> None:
-        path = _doc_path(doc)
-        if not path or path in seen_paths:
-            return
-        if not _catalog_chunk_relevant_to_query(query, doc):
-            return
-        seen_paths.add(path)
-        boosted = dict(doc)
-        boosted["rerank_score"] = max(float(boosted.get("rerank_score") or 0), 0.99)
-        merged.append(boosted)
-
-    for doc in docs:
-        add_doc(doc)
-    for doc in rerank_pool or []:
-        add_doc(doc)
-    for doc in _load_catalog_chunks_from_storage():
-        add_doc(doc)
-
-    if not merged:
-        return docs
-    return merged + [d for d in docs if _doc_path(d) not in seen_paths]
-
-
-def _stash_catalog_boost_stats(count: int) -> None:
-    if count <= 0:
-        return
-    prev = _last_filter_report.get()
-    payload = dict(prev) if isinstance(prev, dict) else {}
-    payload["catalog_boost"] = {"chunks_added": count}
-    _last_filter_report.set(payload)
-
 
 def table_filter_needle(query: str) -> str | None:
     """Filter value the user wants to match in tabular rows (from the question wording)."""
@@ -480,152 +365,7 @@ def _append_table_filter_user_prompt(query_param: Any, query: str) -> None:
     query_param.user_prompt = f"{existing}\n\n{extra}".strip() if existing else extra
 
 
-def _matrix_store_path() -> Path:
-    try:
-        from client_paths import get_rag_storage_dir  # noqa: WPS433
-
-        return Path(get_rag_storage_dir())
-    except Exception:
-        return _ROOT / "data" / "rag_storage"
-
-
-def _load_table_matrix_from_storage() -> list[Any]:
-    from raganything.table_matrix import load_matrix_store
-
-    store = load_matrix_store(_matrix_store_path())
-    return list(store.values())
-
-
-def _allowed_manual_basenames(docs: list[dict]) -> set[str]:
-    out: set[str] = set()
-    for doc in docs:
-        path = _doc_path(doc)
-        if path:
-            out.add(_basename(path))
-    return out
-
-
-def _table_matrix_chunk_relevant(
-    query: str,
-    record: Any,
-    *,
-    allowed_basenames: set[str],
-) -> bool:
-    from raganything.table_matrix import table_matrix_matches_query
-    from raganything.utils import discriminative_terms
-
-    fp = str(getattr(record, "file_path", "") or "")
-    if allowed_basenames:
-        bp = _basename(fp)
-        if not any(ab and (ab in fp or ab in bp) for ab in allowed_basenames):
-            return False
-    elif fp:
-        terms = discriminative_terms(query, min_len=3)
-        if terms and not any(t in fp for t in terms):
-            return False
-    deny, _profile = active_deny_substrings(query)
-    if _path_hits_deny(fp, deny):
-        return False
-    return table_matrix_matches_query(query, record)
-
-
-def supplement_table_matrix_chunks(
-    query: str,
-    docs: list[dict],
-    *,
-    rerank_pool: list[dict] | None = None,
-) -> list[dict]:
-    """Boost table chunks when row-matrix term overlap matches the query."""
-    from raganything.table_matrix import table_matrix_query_boost_enabled
-
-    if not table_matrix_query_boost_enabled():
-        return docs
-
-    allowed = _allowed_manual_basenames(docs + (rerank_pool or []))
-    seen_chunk: set[str] = set()
-    boosted: list[dict] = []
-
-    def add_chunk(chunk_id: str, file_path: str) -> None:
-        if not chunk_id or chunk_id in seen_chunk:
-            return
-        seen_chunk.add(chunk_id)
-        boosted.append(
-            {
-                "content": "",
-                "id": chunk_id,
-                "file_path": file_path,
-                "rerank_score": 0.98,
-            }
-        )
-
-    for record in _load_table_matrix_from_storage():
-        if not _table_matrix_chunk_relevant(
-            query, record, allowed_basenames=allowed if allowed else set()
-        ):
-            continue
-        fp = str(record.file_path or "")
-        for chunk_id in record.chunk_ids:
-            add_chunk(chunk_id, fp)
-
-    if not boosted:
-        return docs
-
-    try:
-        path = _matrix_store_path() / "kv_store_text_chunks.json"
-        chunk_map = (
-            json.loads(path.read_text(encoding="utf-8"))
-            if path.is_file()
-            else {}
-        )
-        for doc in boosted:
-            cid = str(doc.get("id") or "")
-            row = chunk_map.get(cid)
-            if isinstance(row, dict) and row.get("content"):
-                doc["content"] = row["content"]
-    except (OSError, json.JSONDecodeError):
-        pass
-
-    return boosted + [d for d in docs if str(d.get("id") or "") not in seen_chunk]
-
-
-def _stash_matrix_boost_stats(count: int) -> None:
-    if count <= 0:
-        return
-    prev = _last_filter_report.get()
-    payload = dict(prev) if isinstance(prev, dict) else {}
-    payload["table_matrix_boost"] = {"chunks_added": count}
-    _last_filter_report.set(payload)
-
-
-def _query_align_boost_enabled() -> bool:
-    return _env_bool("RAG_QUERY_ALIGN_BOOST", True)
-
-
-def _query_align_min_score() -> float:
-    raw = os.getenv("RAG_QUERY_ALIGN_MIN") or "0.12"
-    try:
-        return max(0.0, float(raw))
-    except ValueError:
-        return 0.12
-
-
-def _query_align_rerank_score() -> float:
-    raw = os.getenv("RAG_QUERY_ALIGN_RERANK") or "0.94"
-    try:
-        return min(1.0, max(0.0, float(raw)))
-    except ValueError:
-        return 0.94
-
-
-def _query_align_top_n() -> int:
-    raw = os.getenv("RAG_QUERY_ALIGN_TOP_N") or "2"
-    try:
-        return max(1, int(raw))
-    except ValueError:
-        return 2
-
-
-def _query_align_min_chars() -> int:
+def _manual_chunk_min_chars() -> int:
     raw = os.getenv("RAG_QUERY_ALIGN_MIN_CHARS") or "22"
     try:
         return max(8, int(raw))
@@ -668,66 +408,6 @@ def _query_focus_terms(query: str) -> list[str]:
     return terms[:16]
 
 
-def _query_subject_anchor(query: str) -> str:
-    """Longest remaining CJK span after stripping matched machine-profile phrases."""
-    q = (query or "").strip()
-    profile = resolve_machine_profile(query)
-    if profile:
-        for phrase in sorted(
-            (str(p) for p in (profile.get("query_phrases") or [])),
-            key=len,
-            reverse=True,
-        ):
-            pn = phrase.replace(" ", "")
-            if pn and pn in q.replace(" ", ""):
-                q = q.replace(phrase, " ").replace(pn, " ")
-    runs = re.findall(r"[\u4e00-\u9fff]+", q)
-    return max(runs, key=len, default="")
-
-
-def _query_anchor_alignment(query: str, content: str) -> float:
-    from raganything.utils import text_term_alignment  # noqa: WPS433
-
-    anchor = _query_subject_anchor(query)
-    if len(anchor) < 4:
-        return 1.0
-    return text_term_alignment(anchor, content, min_len=3)
-
-
-def _query_anchor_min_align() -> float:
-    raw = os.getenv("RAG_QUERY_ALIGN_ANCHOR_MIN") or "0.18"
-    try:
-        return max(0.0, float(raw))
-    except ValueError:
-        return 0.18
-
-
-def _chunk_query_alignment_score(query: str, content: str) -> float:
-    from raganything.utils import text_term_alignment_symmetric  # noqa: WPS433
-
-    body = content.strip()
-    if len(body) < _query_align_min_chars():
-        return 0.0
-    sym = text_term_alignment_symmetric(query, body, min_len=3)
-    short_cap = max(28, len(query) // 6)
-    if len(body) < short_cap:
-        sym *= len(body) / short_cap
-    subject = _query_subject_terms(query)
-    if not subject:
-        return sym
-    hits = sum(1 for term in subject if term in body)
-    hit_ratio = hits / len(subject)
-    longest = max((len(term) for term in subject if term in body), default=0)
-    return sym + 0.55 * hit_ratio + 0.02 * longest
-
-
-def _chunk_literal_focus_hit(query: str, content: str) -> bool:
-    subject = _query_subject_terms(query)
-    if not subject:
-        return True
-    return any(term in content for term in subject)
-
-
 def _text_chunks_store_path() -> Path:
     try:
         from client_paths import get_rag_storage_dir  # noqa: WPS433
@@ -751,6 +431,7 @@ def _load_manual_chunks_for_paths(
         return []
     if not isinstance(raw, dict):
         return []
+    min_chars = _manual_chunk_min_chars()
     allowed_basenames = {_basename(p) for p in allowed_paths if p}
     out: list[dict] = []
     for chunk_id, row in raw.items():
@@ -763,109 +444,13 @@ def _load_manual_chunks_for_paths(
         if not any(ab and (ab in fp or ab in bp or bp in ab) for ab in allowed_basenames):
             continue
         content = str(row.get("content") or "")
-        if len(content.strip()) < _query_align_min_chars():
+        if len(content.strip()) < min_chars:
             continue
         doc = dict(row)
         doc.setdefault("content", content)
         doc.setdefault("id", chunk_id)
         out.append(doc)
     return out
-
-
-def _apply_query_alignment_rerank_bonus(query: str, docs: list[dict]) -> list[dict]:
-    """Nudge rerank order toward chunks whose body literally overlaps query terms."""
-    if not docs:
-        return docs
-    rescored: list[tuple[float, dict]] = []
-    for doc in docs:
-        content = str(doc.get("content") or "")
-        align = _chunk_query_alignment_score(query, content)
-        boosted = dict(doc)
-        base = float(boosted.get("rerank_score") or 0)
-        boosted["rerank_score"] = base + min(0.3, align * 0.45)
-        rescored.append((align, boosted))
-    rescored.sort(
-        key=lambda pair: (float(pair[1].get("rerank_score") or 0), pair[0]),
-        reverse=True,
-    )
-    return [doc for _, doc in rescored]
-
-
-def supplement_query_aligned_chunks(
-    query: str,
-    docs: list[dict],
-    *,
-    rerank_pool: list[dict] | None = None,
-) -> list[dict]:
-    """Promote chunks whose body literally matches query discriminative terms."""
-    if not _query_align_boost_enabled():
-        return docs
-    focus = _query_focus_terms(query)
-    if len(focus) < 2:
-        return docs
-
-    deny, _profile = active_deny_substrings(query)
-    allowed_paths = {
-        p for p in (_doc_path(d) for d in list(docs) + list(rerank_pool or [])) if p
-    }
-    if not allowed_paths:
-        return _apply_query_alignment_rerank_bonus(query, docs)
-
-    candidates: dict[str, dict] = {}
-    for doc in list(docs) + list(rerank_pool or []):
-        cid = str(doc.get("id") or "")
-        if cid:
-            candidates[cid] = doc
-
-    for doc in _load_manual_chunks_for_paths(
-        allowed_paths,
-        deny,
-    ):
-        cid = str(doc.get("id") or "")
-        if cid and cid not in candidates:
-            candidates[cid] = doc
-
-    min_score = _query_align_min_score()
-    scored: list[tuple[float, dict]] = []
-    for doc in candidates.values():
-        content = str(doc.get("content") or "")
-        score = _chunk_query_alignment_score(query, content)
-        if score < min_score:
-            continue
-        if not _chunk_literal_focus_hit(query, content) and score < min_score * 2:
-            continue
-        if _query_anchor_alignment(query, content) < _query_anchor_min_align():
-            continue
-        scored.append((score, doc))
-
-    if not scored:
-        return _apply_query_alignment_rerank_bonus(query, docs)
-
-    scored.sort(key=lambda pair: pair[0], reverse=True)
-    top_n = _query_align_top_n()
-    boost_score = _query_align_rerank_score()
-    boosted_ids: set[str] = set()
-    merged: list[dict] = []
-    for score, doc in scored[:top_n]:
-        cid = str(doc.get("id") or "")
-        if cid in boosted_ids:
-            continue
-        boosted_ids.add(cid)
-        boosted = dict(doc)
-        boosted["rerank_score"] = max(
-            float(boosted.get("rerank_score") or 0),
-            boost_score,
-        )
-        merged.append(boosted)
-
-    if not merged:
-        return _apply_query_alignment_rerank_bonus(query, docs)
-
-    rest = [
-        d for d in _apply_query_alignment_rerank_bonus(query, docs)
-        if str(d.get("id") or "") not in boosted_ids
-    ]
-    return merged + rest
 
 
 def _is_cross_manual_listing_query(query: str) -> bool:
@@ -876,108 +461,6 @@ def _is_cross_manual_listing_query(query: str) -> bool:
         re.search(r"部件|零件|组件", q)
         and re.search(r"哪些|有什么|有哪|各自|所有机型", q)
     )
-
-
-def supplement_multi_manual_listing_chunks(
-    query: str,
-    docs: list[dict],
-    *,
-    rerank_pool: list[dict] | None = None,
-) -> list[dict]:
-    """Pre-answer: boost per-manual figure chunks for cross-manual listings (plan C)."""
-    if not _env_bool("RAG_QUERY_MULTI_MANUAL_LISTING_BOOST", True):
-        return docs
-    if not _is_cross_manual_listing_query(query):
-        return docs
-    pool = list(docs) + list(rerank_pool or [])
-    allowed_paths = {p for p in (_doc_path(d) for d in pool) if p}
-    if len(allowed_paths) < 2:
-        return docs
-    try:
-        from image_query_refs import (  # noqa: WPS433
-            _chunk_figure_context_aligns_query,
-            _chunk_subject_score,
-            _doc_basename,
-            _doc_content,
-            _term_overlap_ratio,
-            extract_image_refs_from_context,
-        )
-    except ImportError:
-        return docs
-    deny, _ = active_deny_substrings(query)
-    loaded = _load_manual_chunks_for_paths(allowed_paths, deny)
-    if not loaded:
-        return docs
-    q_terms = list(dict.fromkeys(_query_discriminative_terms(query)))
-    focus_terms = sorted(
-        {t for t in q_terms if 2 <= len(t) <= 8},
-        key=len,
-        reverse=True,
-    )
-    by_manual: dict[str, list[tuple[float, dict]]] = {}
-    for doc in loaded:
-        content = _doc_content(doc).strip()
-        if not content or not extract_image_refs_from_context(content):
-            continue
-        term_hit = focus_terms and any(term in content for term in focus_terms)
-        if q_terms and not term_hit and not _chunk_figure_context_aligns_query(
-            query, content
-        ):
-            continue
-        manual = _doc_basename(doc)
-        if not manual:
-            continue
-        score = max(
-            _term_overlap_ratio(query, content),
-            _chunk_subject_score(query, content),
-        )
-        if term_hit:
-            score = max(score, 0.2)
-        if _chunk_figure_context_aligns_query(query, content):
-            score += 0.2
-        if score < 0.08 and not term_hit:
-            continue
-        by_manual.setdefault(manual, []).append((score, doc))
-    if len(by_manual) < 2:
-        return docs
-    boost_score = _query_align_rerank_score()
-    boosted_ids: set[str] = set()
-    merged: list[dict] = []
-    for items in by_manual.values():
-        items.sort(key=lambda pair: pair[0], reverse=True)
-        for _, doc in items[:2]:
-            cid = str(doc.get("id") or "")
-            if cid in boosted_ids:
-                continue
-            boosted_ids.add(cid)
-            boosted = dict(doc)
-            boosted["rerank_score"] = max(
-                float(boosted.get("rerank_score") or 0),
-                boost_score,
-            )
-            merged.append(boosted)
-    if not merged:
-        return docs
-    rest = [d for d in docs if str(d.get("id") or "") not in boosted_ids]
-    return merged + rest
-
-
-def _stash_query_align_boost_stats(count: int) -> None:
-    if count <= 0:
-        return
-    prev = _last_filter_report.get()
-    payload = dict(prev) if isinstance(prev, dict) else {}
-    payload["query_align_boost"] = {"chunks_added": count}
-    _last_filter_report.set(payload)
-
-
-def _stash_multi_manual_listing_boost_stats(count: int) -> None:
-    if count <= 0:
-        return
-    prev = _last_filter_report.get()
-    payload = dict(prev) if isinstance(prev, dict) else {}
-    payload["multi_manual_listing_boost"] = {"chunks_added": count}
-    _last_filter_report.set(payload)
 
 
 def build_query_subject_chunk_prompt(query: str) -> str:
@@ -1176,45 +659,11 @@ def build_steering_user_prompt(query: str) -> str:
 
 
 def install_doc_filter_on_rerank() -> None:
-    import lightrag.utils as ut
+    """Deprecated: rerank post-hooks removed; CrossEncoder scores are used as-is."""
 
-    orig = ut.apply_rerank_if_enabled
-    if getattr(orig, "_doc_filter_wrapped", False):
-        return
 
-    async def _wrapped(
-        query: str,
-        retrieved_docs: list[dict],
-        global_config: dict,
-        enable_rerank: bool = True,
-        top_n: int | None = None,
-    ) -> list[dict]:
-        docs = await orig(
-            query, retrieved_docs, global_config, enable_rerank, top_n
-        )
-        before_catalog = len(docs)
-        docs = supplement_catalog_product_model_chunks(
-            query, docs, rerank_pool=docs
-        )
-        if len(docs) > before_catalog:
-            _stash_catalog_boost_stats(len(docs) - before_catalog)
-        before_matrix = len(docs)
-        docs = supplement_table_matrix_chunks(query, docs, rerank_pool=docs)
-        if len(docs) > before_matrix:
-            _stash_matrix_boost_stats(len(docs) - before_matrix)
-        before_align = len(docs)
-        docs = supplement_query_aligned_chunks(query, docs, rerank_pool=docs)
-        if len(docs) > before_align:
-            _stash_query_align_boost_stats(len(docs) - before_align)
-        before_multi = len(docs)
-        docs = supplement_multi_manual_listing_chunks(query, docs, rerank_pool=docs)
-        if len(docs) > before_multi:
-            _stash_multi_manual_listing_boost_stats(len(docs) - before_multi)
-        kept, _report = filter_retrieved_docs_with_report(query, docs)
-        return kept
-
-    _wrapped._doc_filter_wrapped = True  # type: ignore[attr-defined]
-    ut.apply_rerank_if_enabled = _wrapped  # type: ignore[method-assign]
+def install_catalog_rerank_threshold() -> None:
+    """Deprecated: catalog-specific min_rerank override removed."""
 
 
 def install_query_context_hooks() -> None:
@@ -1247,49 +696,6 @@ def install_query_context_hooks() -> None:
     op._build_query_context = _wrapped  # type: ignore[method-assign]
 
 
-def install_catalog_rerank_threshold() -> None:
-    """Lower ``min_rerank_score`` for product-line catalog queries."""
-    import lightrag.utils as ut
-
-    orig = ut.process_chunks_unified
-    if getattr(orig, "_catalog_rerank_wrapped", False):
-        return
-
-    async def _wrapped(
-        query: str,
-        unique_chunks: list[dict],
-        query_param: Any,
-        global_config: dict,
-        source_type: str = "mixed",
-        chunk_token_limit: int | None = None,
-    ):
-        prev_min: float | None = None
-        if is_catalog_product_model_query(query) and _env_bool(
-            "RAG_CATALOG_QUERY_RERANK", True
-        ):
-            prev_min = float(
-                global_config.get("min_rerank_score", _default_min_rerank_score())
-            )
-            global_config["min_rerank_score"] = catalog_query_min_rerank_score()
-        try:
-            return await orig(
-                query,
-                unique_chunks,
-                query_param,
-                global_config,
-                source_type,
-                chunk_token_limit,
-            )
-        finally:
-            if prev_min is not None:
-                global_config["min_rerank_score"] = prev_min
-
-    _wrapped._catalog_rerank_wrapped = True  # type: ignore[attr-defined]
-    ut.process_chunks_unified = _wrapped  # type: ignore[method-assign]
-
-
 def install_query_steering_hooks() -> None:
-    """Chunk file_path filter + catalog/table query hooks (idempotent)."""
-    install_doc_filter_on_rerank()
-    install_catalog_rerank_threshold()
+    """LLM user_prompt hooks only (no rerank score steering)."""
     install_query_context_hooks()
