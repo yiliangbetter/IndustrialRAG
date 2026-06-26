@@ -947,7 +947,14 @@ async def _query_stream_events(q: str, mode: str, body: QueryBody) -> AsyncItera
     q = q.strip()
     parser_root = Path(state.parser_output_dir).resolve()
 
-    gate_result = await _evaluate_clarify_gate(body, mode)
+    try:
+        gate_result = await _evaluate_clarify_gate(body, mode)
+    except HTTPException as exc:
+        detail = exc.detail if isinstance(exc.detail, str) else str(exc.detail)
+        yield _sse({"type": "error", "message": detail})
+        yield _sse({"type": "done", "mode": mode, "error": True})
+        return
+
     if isinstance(gate_result, ClarifyRequired):
         dump_path = _persist_query_debug_dump(
             query=q,

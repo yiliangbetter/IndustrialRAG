@@ -737,6 +737,17 @@ function renderClarificationPanel(loadingEl, data) {
   loadingEl.classList.remove("streaming");
   loadingEl.innerHTML = "";
 
+  const clarificationId = String(data?.clarification_id || "").trim();
+  const originalQuery = String(
+    data?.original_query || data?.keep_original?.text || "",
+  ).trim();
+  if (clarificationId) {
+    loadingEl.dataset.clarificationId = clarificationId;
+  }
+  if (originalQuery) {
+    loadingEl.dataset.originalQuery = originalQuery;
+  }
+
   const roleEl = document.createElement(`d` + `iv`);
   roleEl.className = "role";
   roleEl.textContent = "助手";
@@ -793,7 +804,7 @@ function renderClarificationPanel(loadingEl, data) {
         void submitClarifiedQuery({
           query: cand.text,
           clarify_choice: "use_candidate",
-          clarification_id: data.clarification_id,
+          clarification_id: clarificationId || loadingEl.dataset.clarificationId,
           candidate_id: cand.id,
         });
       });
@@ -808,8 +819,9 @@ function renderClarificationPanel(loadingEl, data) {
       btn.textContent = keep.label || "保持原问题";
       btn.addEventListener("click", () => {
         void submitClarifiedQuery({
-          query: keep.text,
+          query: originalQuery || keep.text,
           clarify_choice: "keep_original",
+          clarification_id: clarificationId || loadingEl.dataset.clarificationId,
         });
       });
       options.appendChild(btn);

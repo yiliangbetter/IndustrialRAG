@@ -129,15 +129,14 @@ def clarify_candidate_min_rerank_score() -> float:
 
 
 def _chunk_rerank_score(doc: dict[str, Any]) -> float | None:
-    for key in ("rerank_score", "score"):
-        raw = doc.get(key)
-        if raw is None:
-            continue
-        try:
-            return float(raw)
-        except (TypeError, ValueError):
-            continue
-    return None
+    """CrossEncoder ``rerank_score`` only (not vector ``score`` fallback)."""
+    raw = doc.get("rerank_score")
+    if raw is None:
+        return None
+    try:
+        return float(raw)
+    except (TypeError, ValueError):
+        return None
 
 
 def _env_bool_rerank_default() -> bool:
@@ -330,10 +329,7 @@ def validate_use_candidate(
     return isinstance(expected, str) and expected.strip() == text
 
 
-def validate_keep_original(clarification_id: str | None, query_text: str) -> bool:
-    rec = _get_clarification_record(clarification_id)
-    if not rec:
-        return False
+def _query_matches_keep_original(rec: dict[str, Any], query_text: str) -> bool:
     text = (query_text or "").strip()
     if not text:
         return False
@@ -346,26 +342,61 @@ def validate_keep_original(clarification_id: str | None, query_text: str) -> boo
     return original == text
 
 
+def validate_keep_original(clarification_id: str | None, query_text: str) -> bool:
+    rec = _get_clarification_record(clarification_id)
+    if not rec:
+        return False
+    return _query_matches_keep_original(rec, query_text)
+
+
+def _resolve_keep_clarification_id(
+    clarification_id: str | None, query_text: str
+) -> str | None:
+    """Match keep_original by id; fall back to the newest in-memory offer for the same query."""
+    cid = (clarification_id or "").strip()
+    if cid and validate_keep_original(cid, query_text):
+        return cid
+    _purge_clarification_store()
+    text = (query_text or "").strip()
+    if not text:
+        return None
+    best: tuple[float, str] | None = None
+    now = time.time()
+    for store_id, rec in _CLARIFICATION_STORE.items():
+        if now - float(rec.get("created", 0)) > _STORE_TTL_SEC:
+            continue
+        if not _query_matches_keep_original(rec, text):
+            continue
+        created = float(rec.get("created", 0))
+        if best is None or created > best[0]:
+            best = (created, store_id)
+    return best[1] if best else None
+
+
 def resolve_clarify_bundle(
     clarification_id: str | None,
     clarify_choice: str,
     query_text: str,
     candidate_id: str | None = None,
 ) -> CachedQueryBundle | None:
-    rec = _get_clarification_record(clarification_id)
+    choice = (clarify_choice or "").strip().lower()
+    cid = (clarification_id or "").strip()
+    if choice == "keep_original":
+        resolved = _resolve_keep_clarification_id(clarification_id, query_text)
+        if not resolved:
+            return None
+        cid = resolved
+    rec = _get_clarification_record(cid)
     if not rec:
         return None
-    choice = (clarify_choice or "").strip().lower()
     options = rec.get("options")
     if not isinstance(options, dict):
         return None
 
     if choice == "keep_original":
-        if not validate_keep_original(clarification_id, query_text):
-            return None
         entry = options.get("keep_original")
     elif choice == "use_candidate":
-        if not validate_use_candidate(clarification_id, candidate_id, query_text):
+        if not validate_use_candidate(cid, candidate_id, query_text):
             return None
         entry = options.get((candidate_id or "").strip())
     else:
@@ -591,9 +622,9 @@ async def evaluate_clarify_gate(
 
     choice = (clarify_choice or "").strip().lower()
     if choice == "keep_original":
-        if not validate_keep_original(clarification_id, q):
+        if not _resolve_keep_clarification_id(clarification_id, q):
             raise ClarifyValidationError(
-                "invalid clarification_id / query for keep_original"
+                "澄清会话已过期或服务已重启，请重新提问后再点「保持原问题」"
             )
         return ClarifyBypass("keep_original")
     if choice == "use_candidate":
