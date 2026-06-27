@@ -22,6 +22,7 @@ from raganything.utils import (
     insert_text_content,
     insert_text_content_with_multimodal_content,
     get_processor_for_type,
+    compute_ingest_chunk_id,
     _join_caption_field,
     resolve_image_caption,
     resolve_image_footnote,
@@ -346,7 +347,7 @@ class ProcessorMixin:
 
         chunk_data = {}
         for idx, chunk_text in enumerate(raw_chunks):
-            chunk_id = compute_mdhash_id(f"{doc_id}:{idx}:{chunk_text}", prefix="chunk-")
+            chunk_id = compute_ingest_chunk_id(doc_id, idx, chunk_text)
             try:
                 tokens = len(self.lightrag.tokenizer.encode(chunk_text))
             except Exception:
@@ -1217,7 +1218,7 @@ class ProcessorMixin:
 
         # Stage 5: Add belongs_to relations (multimodal-specific)
         enhanced_chunk_results = await self._batch_add_belongs_to_relations_type_aware(
-            chunk_results, multimodal_data_list
+            chunk_results, multimodal_data_list, doc_id
         )
 
         # Stage 6: Use LightRAG's batch merge
@@ -1248,7 +1249,9 @@ class ProcessorMixin:
             )
 
             # Generate chunk_id
-            chunk_id = compute_mdhash_id(formatted_chunk_content, prefix="chunk-")
+            chunk_id = compute_ingest_chunk_id(
+                doc_id, chunk_order_index, formatted_chunk_content
+            )
 
             # Calculate tokens
             tokens = len(self.lightrag.tokenizer.encode(formatted_chunk_content))
@@ -1407,7 +1410,9 @@ class ProcessorMixin:
             )
 
             # Generate chunk_id using the formatted content (same as in _convert_to_lightrag_chunks)
-            chunk_id = compute_mdhash_id(formatted_chunk_content, prefix="chunk-")
+            chunk_id = compute_ingest_chunk_id(
+                doc_id, data["chunk_order_index"], formatted_chunk_content
+            )
 
             # Generate entity_id using LightRAG's standard format
             entity_id = compute_mdhash_id(entity_name, prefix="ent-")
@@ -1552,7 +1557,10 @@ class ProcessorMixin:
         return chunk_results
 
     async def _batch_add_belongs_to_relations_type_aware(
-        self, chunk_results: List[Tuple], multimodal_data_list: List[Dict[str, Any]]
+        self,
+        chunk_results: List[Tuple],
+        multimodal_data_list: List[Dict[str, Any]],
+        doc_id: str,
     ) -> List[Tuple]:
         """Add belongs_to relations for multimodal entities"""
         # Create mapping from chunk_id to modal_entity_name
@@ -1568,7 +1576,9 @@ class ProcessorMixin:
             formatted_chunk_content = self._apply_chunk_template(
                 content_type, original_item, description
             )
-            chunk_id = compute_mdhash_id(formatted_chunk_content, prefix="chunk-")
+            chunk_id = compute_ingest_chunk_id(
+                doc_id, data["chunk_order_index"], formatted_chunk_content
+            )
 
             chunk_to_modal_entity[chunk_id] = data["entity_info"]["entity_name"]
             chunk_to_file_path[chunk_id] = data.get("file_path", "multimodal_content")

@@ -4,9 +4,9 @@ Rules live in code (``MACHINE_PROFILES``), not per-machine ``.env`` entries.
 When a profile matches, unrelated manual PDFs can be dropped after rerank
 (see ``query_progress_hooks``); a report is exposed for the Web UI / logs.
 
-Rerank scores come only from CrossEncoder (``pipeline_rerank``); this module
-no longer injects KV chunks or synthetic ``rerank_score`` values after rerank.
-"""
+Rerank scores come only from CrossEncoder (``pipeline_rerank``). Table-matrix
+sibling chunks may be merged into the pre-rerank pool (or the LLM batch as a
+fallback) when ``table_matrix_matches_query`` agrees; no synthetic scores."""
 
 from __future__ import annotations
 
@@ -240,50 +240,10 @@ def _path_hits_deny(path: str, deny: list[str]) -> str | None:
     return hit
 
 
-_CATALOG_MODEL_MARKER = "本手册适用产品型号"
-
-
 def _query_discriminative_terms(query: str) -> list[str]:
     from raganything.utils import discriminative_terms  # noqa: WPS433
 
     return discriminative_terms(query, min_len=3)
-
-
-def _asks_manual_applicability_models(query: str) -> bool:
-    """Foreword-style: which product models a named manual applies to."""
-    q = (query or "").strip()
-    if not q:
-        return False
-    return bool(
-        re.search(
-            r"适用(?:于)?(?:哪些|什么|哪(?:些|种)|多少).*?(?:型号|机型)|"
-            r"(?:手册|说明书).*适用.*?(?:型号|机型)|"
-            r"(?:型号|机型).*适用",
-            q,
-        )
-    )
-
-
-def is_catalog_product_model_query(query: str) -> bool:
-    """Broad product-line / model-count questions (not single-machine maintenance)."""
-    q = (query or "").strip()
-    if not q:
-        return False
-    asks_scope = bool(
-        re.search(
-            r"哪些|多少|一共|总共|全部|有哪些|几种|列举|清单|概况|多少个|一共有多少|多少种",
-            q,
-        )
-    )
-    asks_models = bool(re.search(r"型号|机型|产品", q))
-    if not (asks_scope and asks_models):
-        return False
-    if _asks_manual_applicability_models(q):
-        return True
-    if resolve_machine_profile(query):
-        return False
-    return True
-
 
 
 def table_filter_needle(query: str) -> str | None:
@@ -409,13 +369,179 @@ def _query_focus_terms(query: str) -> list[str]:
 
 
 def _text_chunks_store_path() -> Path:
+    return _rag_storage_dir() / "kv_store_text_chunks.json"
+
+
+def _matrix_store_path() -> Path:
+    return _rag_storage_dir()
+
+
+def _rag_storage_dir() -> Path:
     try:
         from client_paths import get_rag_storage_dir  # noqa: WPS433
 
-        store = Path(get_rag_storage_dir())
+        return Path(get_rag_storage_dir())
     except Exception:
-        store = _ROOT / "data" / "rag_storage"
-    return store / "kv_store_text_chunks.json"
+        return _ROOT / "data" / "rag_storage"
+
+
+def _chunk_doc_id(doc: dict) -> str:
+    for key in ("id", "chunk_id"):
+        val = doc.get(key)
+        if val:
+            return str(val)
+    return ""
+
+
+def _load_table_matrix_from_storage() -> list[Any]:
+    from raganything.table_matrix import load_matrix_store
+
+    store = load_matrix_store(_matrix_store_path())
+    return list(store.values())
+
+
+def _allowed_manual_basenames(docs: list[dict]) -> set[str]:
+    out: set[str] = set()
+    for doc in docs:
+        path = _doc_path(doc)
+        if path:
+            out.add(_basename(path))
+    return out
+
+
+def _table_matrix_chunk_relevant(
+    query: str,
+    record: Any,
+    *,
+    allowed_basenames: set[str],
+) -> bool:
+    from raganything.table_matrix import table_matrix_matches_query
+
+    fp = str(getattr(record, "file_path", "") or "")
+    if allowed_basenames:
+        bp = _basename(fp)
+        if not any(ab and (ab in fp or ab in bp) for ab in allowed_basenames):
+            return False
+    elif fp:
+        terms = _query_discriminative_terms(query)
+        if terms and not any(t in fp for t in terms):
+            return False
+    deny, _profile = active_deny_substrings(query)
+    if _path_hits_deny(fp, deny):
+        return False
+    return table_matrix_matches_query(query, record)
+
+
+def _load_text_chunk_map() -> dict[str, dict]:
+    path = _text_chunks_store_path()
+    if not path.is_file():
+        return {}
+    try:
+        raw = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError):
+        return {}
+    return raw if isinstance(raw, dict) else {}
+
+
+def collect_table_matrix_candidate_docs(
+    query: str,
+    docs: list[dict],
+    *,
+    context_docs: list[dict] | None = None,
+    exclude_doc_ids: list[dict] | None = None,
+) -> list[dict]:
+    """Table chunks from ``kv_store_table_matrix`` not already in ``exclude_doc_ids``."""
+    from raganything.table_matrix import table_matrix_query_boost_enabled
+
+    if not table_matrix_query_boost_enabled():
+        return []
+
+    scope = list(docs) + list(context_docs or [])
+    allowed = _allowed_manual_basenames(scope)
+    seen = {
+        _chunk_doc_id(d)
+        for d in (exclude_doc_ids if exclude_doc_ids is not None else docs)
+        if _chunk_doc_id(d)
+    }
+    chunk_map = _load_text_chunk_map()
+    out: list[dict] = []
+
+    for record in _load_table_matrix_from_storage():
+        if not _table_matrix_chunk_relevant(
+            query, record, allowed_basenames=allowed if allowed else set()
+        ):
+            continue
+        fp = str(getattr(record, "file_path", "") or "")
+        for chunk_id in getattr(record, "chunk_ids", None) or []:
+            cid = str(chunk_id or "").strip()
+            if not cid or cid in seen:
+                continue
+            row = chunk_map.get(cid)
+            if not isinstance(row, dict):
+                continue
+            content = str(row.get("content") or "").strip()
+            if not content:
+                continue
+            seen.add(cid)
+            out.append(
+                {
+                    "content": content,
+                    "id": cid,
+                    "file_path": fp or str(row.get("file_path") or ""),
+                }
+            )
+    return out
+
+
+def supplement_table_matrix_before_rerank(
+    query: str, retrieved_docs: list[dict]
+) -> tuple[list[dict], int]:
+    """Merge matrix-linked table chunks into the pool before CrossEncoder rerank."""
+    added = collect_table_matrix_candidate_docs(query, retrieved_docs)
+    if not added:
+        return retrieved_docs, 0
+    return list(retrieved_docs) + added, len(added)
+
+
+def supplement_llm_table_matrix_chunks(
+    query: str,
+    llm_docs: list[dict],
+    *,
+    rerank_pool: list[dict] | None = None,
+) -> tuple[list[dict], int]:
+    """Ensure sibling table chunks reach the LLM batch after rerank truncation."""
+    added = collect_table_matrix_candidate_docs(
+        query,
+        llm_docs,
+        context_docs=rerank_pool,
+        exclude_doc_ids=llm_docs,
+    )
+    if not added:
+        return llm_docs, 0
+    seen = {_chunk_doc_id(d) for d in llm_docs if _chunk_doc_id(d)}
+    prepend: list[dict] = []
+    for doc in added:
+        cid = _chunk_doc_id(doc)
+        if cid and cid not in seen:
+            seen.add(cid)
+            prepend.append(doc)
+    if not prepend:
+        return llm_docs, 0
+    return prepend + list(llm_docs), len(prepend)
+
+
+def record_table_matrix_boost(*, pre_rerank: int = 0, llm: int = 0) -> None:
+    if pre_rerank <= 0 and llm <= 0:
+        return
+    prev = _last_filter_report.get()
+    payload = dict(prev) if isinstance(prev, dict) else {}
+    boost = dict(payload.get("table_matrix_boost") or {})
+    if pre_rerank > 0:
+        boost["pre_rerank_added"] = pre_rerank
+    if llm > 0:
+        boost["llm_added"] = llm
+    payload["table_matrix_boost"] = boost
+    _last_filter_report.set(payload)
 
 
 def _load_manual_chunks_for_paths(
@@ -553,16 +679,6 @@ def consume_filter_report() -> dict[str, Any] | None:
     return report
 
 
-def build_catalog_model_listing_prompt(query: str) -> str:
-    if not is_catalog_product_model_query(query):
-        return ""
-    return (
-        "用户询问产品线/型号总览：请按检索到的每一份手册分别列出正文中"
-        f"「{_CATALOG_MODEL_MARKER}」一行里的全部型号；"
-        "有几份来源含该行就列几份，不得只汇总其中部分来源。"
-    )
-
-
 def build_maintenance_supply_listing_prompt(query: str) -> str:
     """Q13-style: list every supply category named in manual chunks (e.g. grease types)."""
     if not _env_bool("RAG_QUERY_MAINTENANCE_SUPPLY_LIST", True):
@@ -616,11 +732,8 @@ def build_cross_manual_listing_answer_prompt(query: str) -> str:
 
 
 def build_query_user_prompt(query: str) -> str:
-    """Merge catalog listing + profile steering hints for LightRAG ``user_prompt``."""
+    """Merge optional LLM hints for LightRAG ``user_prompt``."""
     parts: list[str] = []
-    catalog = build_catalog_model_listing_prompt(query)
-    if catalog:
-        parts.append(catalog)
     subject = build_query_subject_chunk_prompt(query)
     if subject:
         parts.append(subject)

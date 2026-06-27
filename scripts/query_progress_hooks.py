@@ -38,6 +38,9 @@ _rerank_figure_pool: ContextVar[list[dict] | None] = ContextVar(
 _llm_chunks_rerank_figure_supplement: ContextVar[int] = ContextVar(
     "llm_chunks_rerank_figure_supplement", default=0
 )
+_llm_chunks_table_matrix_supplement: ContextVar[int] = ContextVar(
+    "llm_chunks_table_matrix_supplement", default=0
+)
 _related_images_selected: ContextVar[list[dict[str, Any]] | None] = ContextVar(
     "related_images_selected", default=None
 )
@@ -97,6 +100,8 @@ def _sync_query_debug_snapshot() -> None:
             "retrieved_docs": _retrieved_docs.get(),
             "llm_chunks_for_images": _llm_chunks_for_images.get(),
             "llm_chunks_rerank_figure_supplement": _llm_chunks_rerank_figure_supplement.get()
+            or 0,
+            "llm_chunks_table_matrix_supplement": _llm_chunks_table_matrix_supplement.get()
             or 0,
             "related_images": list(_related_images_selected.get() or []),
             "inline_placements": list(_inline_placements.get() or []),
@@ -479,6 +484,20 @@ def _sync_llm_chunks_for_images(query: str, chunks: list[dict]) -> None:
     else:
         merged, added = final, 0
     _llm_chunks_rerank_figure_supplement.set(added)
+    try:
+        from query_doc_steering import (  # noqa: WPS433
+            record_table_matrix_boost,
+            supplement_llm_table_matrix_chunks,
+        )
+
+        merged, matrix_added = supplement_llm_table_matrix_chunks(
+            query, merged, rerank_pool=rerank_pool
+        )
+        if matrix_added:
+            record_table_matrix_boost(llm=matrix_added)
+    except Exception:
+        matrix_added = 0
+    _llm_chunks_table_matrix_supplement.set(matrix_added)
     _llm_chunks_for_images.set(merged)
     _retrieved_docs.set(merged)
     docs_text = text_from_retrieved_docs(merged).strip()
@@ -557,8 +576,20 @@ async def query_progress_hooks() -> AsyncIterator[asyncio.Queue[dict[str, str]]]
         if enable_rerank and retrieved_docs:
             await _emit(PHASE_RERANK)
         _query_text.set(query)
+        pool = list(retrieved_docs or [])
+        try:
+            from query_doc_steering import (  # noqa: WPS433
+                record_table_matrix_boost,
+                supplement_table_matrix_before_rerank,
+            )
+
+            pool, matrix_pre = supplement_table_matrix_before_rerank(query, pool)
+            if matrix_pre:
+                record_table_matrix_boost(pre_rerank=matrix_pre)
+        except Exception:
+            pass
         docs = await orig_rerank(
-            query, retrieved_docs, global_config, enable_rerank, top_n
+            query, pool, global_config, enable_rerank, top_n
         )
         try:
             from query_doc_steering import filter_retrieved_docs_by_query  # noqa: WPS433
@@ -690,6 +721,7 @@ async def query_progress_hooks() -> AsyncIterator[asyncio.Queue[dict[str, str]]]
         _rerank_docs.set(None)
         _rerank_figure_pool.set(None)
         _llm_chunks_rerank_figure_supplement.set(0)
+        _llm_chunks_table_matrix_supplement.set(0)
         _related_images_selected.set(None)
         _inline_placements.set(None)
         _steering_report.set(None)

@@ -4,13 +4,17 @@ Utility functions for RAGAnything
 Contains helper functions for content separation, text insertion, and other utilities
 """
 
+import asyncio
 import base64
+import inspect
 import math
 import os
 import re
+from dataclasses import asdict
+from datetime import datetime, timezone
 from typing import Any, Dict, List, Tuple
 from pathlib import Path
-from lightrag.utils import logger
+from lightrag.utils import compute_mdhash_id, logger
 
 
 def separate_content(
@@ -454,6 +458,23 @@ def coalesce_text_image_segments(segments: List[str]) -> List[str]:
 _TABLE_INGEST_MARKER = "[Table]"
 _INGEST_SEGMENT_DELIMITER = "\n<<<RAG_SEG_BOUNDARY>>>\n"
 _TABLE_ROW_RE = re.compile(r"<tr>.*?</tr>", re.IGNORECASE | re.DOTALL)
+
+
+def compute_ingest_chunk_id(
+    full_doc_id: str, chunk_order_index: int, content: str
+) -> str:
+    """Scope chunk ids by document so identical text in different manuals stays distinct."""
+    return compute_mdhash_id(
+        f"{full_doc_id}:{chunk_order_index}:{content}", prefix="chunk-"
+    )
+
+
+def _status_field(status_doc: Any, name: str, default: Any = "") -> Any:
+    if status_doc is None:
+        return default
+    if isinstance(status_doc, dict):
+        return status_doc.get(name, default)
+    return getattr(status_doc, name, default)
 
 
 def table_aware_ingest_enabled() -> bool:
@@ -977,6 +998,163 @@ def validate_image_file(image_path: str, max_size_mb: int = 50) -> bool:
         return False
 
 
+async def _resolve_ingest_segments(
+    lightrag,
+    *,
+    input_text: str,
+    document_parts: List[str] | None,
+    split_by_character: str | None,
+    split_by_character_only: bool,
+) -> List[str]:
+    if table_aware_ingest_enabled() and document_parts:
+        tokenizer = getattr(lightrag, "tokenizer", None)
+        if tokenizer is not None:
+            max_tokens = _ingest_chunk_token_size(lightrag)
+            segments = prepare_table_aware_ingest_segments(
+                document_parts, tokenizer, max_tokens
+            )
+            if segments:
+                return segments
+
+    chunking_result = lightrag.chunking_func(
+        lightrag.tokenizer,
+        input_text,
+        split_by_character,
+        split_by_character_only,
+        lightrag.chunk_overlap_token_size,
+        lightrag.chunk_token_size,
+    )
+    if inspect.isawaitable(chunking_result):
+        chunking_result = await chunking_result
+    if not isinstance(chunking_result, (list, tuple)):
+        raise TypeError(
+            f"chunking_func must return a list or tuple of dicts, got {type(chunking_result)}"
+        )
+    return [
+        str(row["content"])
+        for row in chunking_result
+        if isinstance(row, dict) and str(row.get("content") or "").strip()
+    ]
+
+
+async def insert_doc_scoped_text_content(
+    lightrag,
+    *,
+    enqueue_input: str,
+    doc_id: str,
+    file_path: str,
+    segments: List[str],
+    ids: str | list[str] | None,
+    file_paths: str | list[str] | None,
+) -> None:
+    """Insert text chunks with per-document chunk ids; runs KG extract + merge like ``ainsert``."""
+    from lightrag.base import DocStatus
+    from lightrag.kg.shared_storage import get_namespace_data, get_pipeline_status_lock
+    from lightrag.operate import merge_nodes_and_edges
+
+    pipeline_status = await get_namespace_data("pipeline_status")
+    pipeline_status_lock = get_pipeline_status_lock()
+
+    await lightrag.apipeline_enqueue_documents(
+        enqueue_input, ids=ids, file_paths=file_paths
+    )
+
+    status_doc = await lightrag.doc_status.get_by_id(doc_id)
+    processing_start_time = int(datetime.now(timezone.utc).timestamp())
+
+    chunks: Dict[str, Dict[str, Any]] = {}
+    order = 0
+    for seg in segments:
+        content = (seg or "").strip()
+        if not content:
+            continue
+        chunk_id = compute_ingest_chunk_id(doc_id, order, content)
+        try:
+            tokens = len(lightrag.tokenizer.encode(content))
+        except Exception:
+            tokens = len(content.split())
+        chunks[chunk_id] = {
+            "content": content,
+            "full_doc_id": doc_id,
+            "file_path": file_path,
+            "chunk_order_index": order,
+            "tokens": tokens,
+            "llm_cache_list": [],
+        }
+        order += 1
+
+    if not chunks:
+        logger.warning("Doc-scoped ingest: no segments for doc_id=%s", doc_id)
+        return
+
+    await lightrag.doc_status.upsert(
+        {
+            doc_id: {
+                "status": DocStatus.PROCESSING,
+                "chunks_count": len(chunks),
+                "chunks_list": list(chunks.keys()),
+                "content_summary": _status_field(status_doc, "content_summary"),
+                "content_length": _status_field(status_doc, "content_length"),
+                "created_at": _status_field(status_doc, "created_at"),
+                "updated_at": datetime.now(timezone.utc).isoformat(),
+                "file_path": file_path,
+                "track_id": _status_field(status_doc, "track_id"),
+                "metadata": {"processing_start_time": processing_start_time},
+            }
+        }
+    )
+
+    await asyncio.gather(
+        lightrag.chunks_vdb.upsert(chunks),
+        lightrag.text_chunks.upsert(chunks),
+    )
+
+    chunk_results = await lightrag._process_extract_entities(
+        chunks, pipeline_status, pipeline_status_lock
+    )
+
+    await merge_nodes_and_edges(
+        chunk_results=chunk_results,
+        knowledge_graph_inst=lightrag.chunk_entity_relation_graph,
+        entity_vdb=lightrag.entities_vdb,
+        relationships_vdb=lightrag.relationships_vdb,
+        global_config=asdict(lightrag),
+        full_entities_storage=lightrag.full_entities,
+        full_relations_storage=lightrag.full_relations,
+        doc_id=doc_id,
+        pipeline_status=pipeline_status,
+        pipeline_status_lock=pipeline_status_lock,
+        llm_response_cache=lightrag.llm_response_cache,
+        entity_chunks_storage=lightrag.entity_chunks,
+        relation_chunks_storage=lightrag.relation_chunks,
+        current_file_number=1,
+        total_files=1,
+        file_path=file_path,
+    )
+
+    processing_end_time = int(datetime.now(timezone.utc).timestamp())
+    await lightrag.doc_status.upsert(
+        {
+            doc_id: {
+                "status": DocStatus.PROCESSED,
+                "chunks_count": len(chunks),
+                "chunks_list": list(chunks.keys()),
+                "content_summary": _status_field(status_doc, "content_summary"),
+                "content_length": _status_field(status_doc, "content_length"),
+                "created_at": _status_field(status_doc, "created_at"),
+                "updated_at": datetime.now(timezone.utc).isoformat(),
+                "file_path": file_path,
+                "track_id": _status_field(status_doc, "track_id"),
+                "metadata": {
+                    "processing_start_time": processing_start_time,
+                    "processing_end_time": processing_end_time,
+                },
+            }
+        }
+    )
+    await lightrag._insert_done()
+
+
 async def insert_text_content(
     lightrag,
     input: str | list[str],
@@ -1003,35 +1181,46 @@ async def insert_text_content(
     """
     logger.info("Starting text content insertion into LightRAG...")
 
-    if (
-        table_aware_ingest_enabled()
-        and document_parts
-        and isinstance(input, str)
-    ):
-        tokenizer = getattr(lightrag, "tokenizer", None)
-        if tokenizer is not None:
-            max_tokens = _ingest_chunk_token_size(lightrag)
-            segments = prepare_table_aware_ingest_segments(
-                document_parts, tokenizer, max_tokens
-            )
-            if segments:
-                blob = _INGEST_SEGMENT_DELIMITER.join(segments)
-                logger.info(
-                    "Table-aware ingest: %d segment(s), delimiter split (max_tokens=%d)",
-                    len(segments),
-                    max_tokens,
-                )
-                await lightrag.ainsert(
-                    input=blob,
-                    file_paths=file_paths,
-                    split_by_character=_INGEST_SEGMENT_DELIMITER,
-                    split_by_character_only=True,
-                    ids=ids,
-                )
-                logger.info("Text content insertion complete")
-                return
+    if isinstance(input, str) and ids is not None:
+        doc_id = ids if isinstance(ids, str) else ids[0]
+        file_path = ""
+        if file_paths:
+            file_path = file_paths if isinstance(file_paths, str) else file_paths[0]
+        file_path = file_path or "unknown_source"
 
-    # Use LightRAG's insert method with all parameters
+        segments = await _resolve_ingest_segments(
+            lightrag,
+            input_text=input,
+            document_parts=document_parts,
+            split_by_character=split_by_character,
+            split_by_character_only=split_by_character_only,
+        )
+        if segments:
+            enqueue_input = input
+            if (
+                table_aware_ingest_enabled()
+                and document_parts
+                and _INGEST_SEGMENT_DELIMITER.join(segments) != input.strip()
+            ):
+                enqueue_input = _INGEST_SEGMENT_DELIMITER.join(segments)
+            logger.info(
+                "Doc-scoped chunk ingest: %d segment(s) for %s",
+                len(segments),
+                file_path,
+            )
+            await insert_doc_scoped_text_content(
+                lightrag,
+                enqueue_input=enqueue_input,
+                doc_id=doc_id,
+                file_path=file_path,
+                segments=segments,
+                ids=ids,
+                file_paths=file_paths,
+            )
+            logger.info("Text content insertion complete")
+            return
+
+    # Fallback: legacy LightRAG path (content-only chunk ids)
     await lightrag.ainsert(
         input=input,
         file_paths=file_paths,

@@ -288,7 +288,6 @@ async def _evaluate_clarify_gate(body: QueryBody, mode: str) -> Any:
     if isinstance(result, ClarifyBypass) and result.reason in (
         "keep_original",
         "use_candidate",
-        "cached_answer",
     ):
         bundle = resolve_clarify_bundle(
             body.clarification_id,
@@ -321,69 +320,19 @@ def _persist_query_debug_dump(
     naive_relevance: dict[str, Any] | None = None,
     clarify_gate: dict[str, Any] | None = None,
 ) -> Path | None:
-    from query_debug_dump import (  # noqa: WPS433
-        build_query_dump,
-        is_query_debug_enabled,
-        write_query_dump,
-    )
-    from image_query_refs import (  # noqa: WPS433
-        explain_query_images,
-        merge_context_for_images,
-        text_from_retrieved_docs,
-    )
-    from query_progress_hooks import get_query_debug_state  # noqa: WPS433
+    from query_debug_dump import persist_query_debug_dump  # noqa: WPS433
 
-    if not is_query_debug_enabled():
-        return None
-
-    from query_progress_hooks import finalize_related_images  # noqa: WPS433
-
-    hook_state = get_query_debug_state()
-    if naive_relevance is None:
-        naive_relevance = hook_state.get("naive_relevance")
-        if not isinstance(naive_relevance, dict):
-            naive_relevance = None
-    retrieved_docs = hook_state.get("retrieved_docs")
-    docs_text = hook_state.get("retrieved_docs_text")
-    if not docs_text and isinstance(retrieved_docs, list):
-        docs_text = text_from_retrieved_docs(retrieved_docs)
-    retrieval_context = hook_state.get("retrieval_context")
-    merged = merge_context_for_images(docs_text or "", retrieval_context or "")
-
-    related_images = hook_state.get("related_images")
-    if not isinstance(related_images, list) or not related_images:
-        related_images = finalize_related_images()
-
-    images_debug = hook_state.get("images_debug")
-    if not isinstance(images_debug, dict) or not images_debug:
-        images_debug = explain_query_images(
-            docs_text or merged or "",
-            [parser_root],
-            query=query,
-            retrieved_docs=retrieved_docs if isinstance(retrieved_docs, list) else None,
-        )
-    payload = build_query_dump(
+    return persist_query_debug_dump(
         query=query,
         mode=mode,
+        parser_root=parser_root,
         thinking=thinking,
         answer=answer,
         error=error,
         duration_ms=duration_ms,
-        retrieval_context=retrieval_context if isinstance(retrieval_context, str) else None,
-        retrieved_docs=retrieved_docs if isinstance(retrieved_docs, list) else None,
-        retrieved_docs_text=docs_text if isinstance(docs_text, str) else None,
-        related_images=related_images if isinstance(related_images, list) else None,
-        images_debug=images_debug,
-        steering_report=hook_state.get("steering_report")
-        if isinstance(hook_state.get("steering_report"), dict)
-        else None,
         naive_relevance=naive_relevance,
         clarify_gate=clarify_gate,
-        llm_input=hook_state.get("llm_input")
-        if isinstance(hook_state.get("llm_input"), dict)
-        else None,
     )
-    return write_query_dump(payload)
 
 
 class AppState:
@@ -881,26 +830,6 @@ async def api_query(body: QueryBody):
             payload["debug_dump"] = {"path": str(dump_path), "name": dump_path.name}
         return payload
 
-    from raganything.clarify_gate import ClarifyBypass, resolve_clarify_cached_response  # noqa: WPS433
-
-    cached_response: dict[str, Any] | None = None
-    if isinstance(gate_result, ClarifyBypass) and gate_result.reason == "cached_answer":
-        cached_response = resolve_clarify_cached_response(
-            body.clarification_id,
-            body.clarify_choice or "use_candidate",
-            q,
-            body.candidate_id,
-        )
-        if cached_response is None:
-            raise HTTPException(400, "clarification cache expired or invalid")
-
-    started = time.perf_counter()
-    thinking = ""
-    answer = ""
-    error: str | None = None
-    _scripts_dir = _ROOT / "scripts"
-    if str(_scripts_dir) not in sys.path:
-        sys.path.insert(0, str(_scripts_dir))
     from query_progress_hooks import (  # noqa: WPS433
         get_naive_relevance,
         query_progress_hooks,
@@ -910,28 +839,25 @@ async def api_query(body: QueryBody):
     )
     from stream_cot_parser import parse_complete_cot  # noqa: WPS433
 
+    started = time.perf_counter()
+    thinking = ""
+    answer = ""
+    error: str | None = None
     set_query_media_roots([parser_root])
     set_query_text_for_images(q)
     set_query_lightrag(state.rag.lightrag, mode=mode)
     try:
-        if cached_response is not None:
-            thinking = str(cached_response.get("thinking") or "")
-            answer = str(cached_response.get("answer") or "")
-            from query_doc_steering import strip_manual_circled_step_markers  # noqa: WPS433
+        async with query_progress_hooks():
+            raw = await _run_aquery(q, mode, stream=False)
+        if not isinstance(raw, str):
+            parts: list[str] = []
+            async for chunk in _iter_llm_chunks(raw):
+                parts.append(chunk)
+            raw = "".join(parts)
+        thinking, answer = parse_complete_cot(raw or "")
+        from query_doc_steering import strip_manual_circled_step_markers  # noqa: WPS433
 
-            answer = strip_manual_circled_step_markers(answer)
-        else:
-            async with query_progress_hooks():
-                raw = await _run_aquery(q, mode, stream=False)
-            if not isinstance(raw, str):
-                parts: list[str] = []
-                async for chunk in _iter_llm_chunks(raw):
-                    parts.append(chunk)
-                raw = "".join(parts)
-            thinking, answer = parse_complete_cot(raw or "")
-            from query_doc_steering import strip_manual_circled_step_markers  # noqa: WPS433
-
-            answer = strip_manual_circled_step_markers(answer)
+        answer = strip_manual_circled_step_markers(answer)
     except Exception as exc:
         error = _friendly_query_error(exc)
         _persist_query_debug_dump(
@@ -1027,58 +953,10 @@ async def _query_stream_events(q: str, mode: str, body: QueryBody) -> AsyncItera
         yield _sse({"type": "done", "mode": mode, "clarification_only": True})
         return
 
-    from raganything.clarify_gate import ClarifyBypass, resolve_clarify_cached_response  # noqa: WPS433
-
-    cached_response: dict[str, Any] | None = None
-    if isinstance(gate_result, ClarifyBypass) and gate_result.reason == "cached_answer":
-        cached_response = resolve_clarify_cached_response(
-            body.clarification_id,
-            body.clarify_choice or "use_candidate",
-            q,
-            body.candidate_id,
-        )
-        if cached_response is None:
-            yield _sse(
-                {"type": "error", "message": "clarification cache expired or invalid"}
-            )
-            return
-
     set_query_media_roots([parser_root])
     set_query_text_for_images(q)
     set_query_lightrag(state.rag.lightrag, mode=mode)
     started = time.perf_counter()
-
-    if cached_response is not None:
-        try:
-            thinking = str(cached_response.get("thinking") or "")
-            answer = strip_manual_circled_step_markers(
-                str(cached_response.get("answer") or "")
-            )
-            if thinking:
-                yield _sse({"type": "thinking_delta", "text": thinking})
-            if answer:
-                yield _sse({"type": "answer_delta", "text": answer})
-            dump_path = _persist_query_debug_dump(
-                query=q,
-                mode=mode,
-                parser_root=parser_root,
-                thinking=thinking,
-                answer=answer,
-                duration_ms=int((time.perf_counter() - started) * 1000),
-                naive_relevance=await _resolve_naive_relevance(q, mode),
-            )
-            if dump_path is not None:
-                yield _sse(
-                    {
-                        "type": "query_debug_saved",
-                        "path": str(dump_path),
-                        "name": dump_path.name,
-                    }
-                )
-            yield _sse({"type": "done", "mode": mode, "cached_answer": True})
-        finally:
-            _clear_clarify_injection_if_set()
-        return
 
     thinking_parts: list[str] = []
     answer_parts: list[str] = []

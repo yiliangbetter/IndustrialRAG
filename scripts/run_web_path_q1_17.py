@@ -1,5 +1,9 @@
 #!/usr/bin/env python3
-"""Web-path batch test Q1–Q17 graded against docs/测试例参考答案.md key points."""
+"""Web-path batch test Q1–Q17 graded against docs/测试例参考答案.md key points.
+
+Each case writes a structured query dump to ``logs/query_dumps/`` (prefix ``Qxx_``)
+unless ``--no-dump``. Dumps include rerank scores, LLM input chunks, and image debug.
+"""
 
 from __future__ import annotations
 
@@ -396,7 +400,10 @@ def grade_images(result: dict, spec: dict) -> tuple[bool, list[str]]:
     return True, notes
 
 
-async def run_cases(ids: list[int], *, mode: str, wd: Path, pod: Path) -> list[dict]:
+async def run_cases(
+    ids: list[int], *, mode: str, wd: Path, pod: Path, write_dumps: bool = True
+) -> list[dict]:
+    from query_debug_dump import persist_query_debug_dump
     from query_doc_steering import strip_manual_circled_step_markers
     from query_progress_hooks import (
         finalize_inline_images,
@@ -416,6 +423,7 @@ async def run_cases(ids: list[int], *, mode: str, wd: Path, pod: Path) -> list[d
             spec = REF[cid]
             query = spec["query"]
             t0 = time.perf_counter()
+            thinking = ""
             async with query_progress_hooks():
                 set_query_media_roots([parser_root])
                 set_query_text_for_images(query.strip())
@@ -429,6 +437,18 @@ async def run_cases(ids: list[int], *, mode: str, wd: Path, pod: Path) -> list[d
                 answer = strip_manual_circled_step_markers(answer.strip())
                 inline = finalize_inline_images(answer_text=answer)
             elapsed = int((time.perf_counter() - t0) * 1000)
+            dump_path: Path | None = None
+            if write_dumps:
+                dump_path = persist_query_debug_dump(
+                    query=query,
+                    mode=mode,
+                    parser_root=parser_root,
+                    thinking=thinking or None,
+                    answer=answer or None,
+                    duration_ms=elapsed,
+                    enabled=True,
+                    name_prefix=f"Q{cid:02d}",
+                )
             row = {
                 "id": cid,
                 "query": query,
@@ -437,6 +457,7 @@ async def run_cases(ids: list[int], *, mode: str, wd: Path, pod: Path) -> list[d
                 "images": inline.get("images") or [],
                 "placements": inline.get("placements") or [],
                 "debug": inline.get("debug") or {},
+                "dump_path": str(dump_path) if dump_path else None,
             }
             text_ok, text_miss = grade_text(answer, spec)
             img_ok, img_notes = grade_images(row, spec)
@@ -459,6 +480,8 @@ async def run_cases(ids: list[int], *, mode: str, wd: Path, pod: Path) -> list[d
                 print(f"  text: {g['text_miss']}", flush=True)
             if not g["image_ok"]:
                 print(f"  img: {g['image_notes']}", flush=True)
+            if dump_path:
+                print(f"  dump: {dump_path}", flush=True)
             for c in [i.get("caption") for i in row["images"]]:
                 try:
                     print(f"  caption: {c}", flush=True)
@@ -536,6 +559,7 @@ def write_report(
         f"- 参考答案：`docs/测试例参考答案.md`",
         f"- 通过（文字+配图）：**{passed}/{len(rows)}**",
         f"- 仅文字通过：**{text_only}/{len(rows)}**",
+        f"- Query dumps：`logs/query_dumps/`（本批 JSON 见各题 `dump_path`）",
         "",
         "## 汇总",
         "",
@@ -585,6 +609,9 @@ def write_report(
         gate = (debug.get("gate") or {}).get("reason")
         if gate:
             lines.append(f"- gate：{gate}")
+        dump_path = r.get("dump_path")
+        if dump_path:
+            lines.append(f"- query dump：`{dump_path}`")
         lines.append("")
         lines.append("**答案**")
         lines.append("")
@@ -653,6 +680,11 @@ def main() -> None:
         default=os.getenv("RAG_WEB_PATH_CASE_IDS", ""),
         help="Comma-separated case ids, e.g. 2,3,8,17 or Q2,Q3 (default: all Q1–Q17)",
     )
+    parser.add_argument(
+        "--no-dump",
+        action="store_true",
+        help="Skip writing logs/query_dumps/*.json per case (default: write dumps)",
+    )
     args = parser.parse_args()
     ids = _parse_ids(args.ids)
     wd = Path(os.getenv("RAG_WEB_WORKING_DIR") or (_ROOT / "data" / "rag_storage")).resolve()
@@ -662,7 +694,11 @@ def main() -> None:
     mode = os.getenv("RAG_QUERY_MODE", "mix")
     label = ", ".join(f"Q{i}" for i in ids)
     print(f"Running {label} web path, wd={wd}", flush=True)
-    rows = asyncio.run(run_cases(ids, mode=mode, wd=wd, pod=pod))
+    if not args.no_dump:
+        print("Query dumps: logs/query_dumps/ (per case, prefix Qxx)", flush=True)
+    rows = asyncio.run(
+        run_cases(ids, mode=mode, wd=wd, pod=pod, write_dumps=not args.no_dump)
+    )
     stamp = datetime.now().astimezone().strftime("%Y%m%d_%H%M%S")
     report_dir = _ROOT / "logs" / "web_path_q1_17"
     report_dir.mkdir(parents=True, exist_ok=True)

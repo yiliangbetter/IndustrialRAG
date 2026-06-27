@@ -223,13 +223,99 @@ def build_query_dump(
     return payload
 
 
-def write_query_dump(payload: dict[str, Any]) -> Path:
+def write_query_dump(payload: dict[str, Any], *, name_prefix: str = "") -> Path:
     dump_dir = get_query_dump_dir()
     stamp = datetime.now().strftime("%Y%m%d_%H%M%S")
-    name = f"{stamp}_{_slug_query(str(payload.get('query') or ''))}_{uuid.uuid4().hex[:8]}.json"
+    prefix = f"{name_prefix.strip()}_" if name_prefix and name_prefix.strip() else ""
+    name = (
+        f"{stamp}_{prefix}{_slug_query(str(payload.get('query') or ''))}"
+        f"_{uuid.uuid4().hex[:8]}.json"
+    )
     path = dump_dir / name
     path.write_text(json.dumps(payload, ensure_ascii=False, indent=2), encoding="utf-8")
     return path
+
+
+def persist_query_debug_dump(
+    *,
+    query: str,
+    mode: str,
+    parser_root: Path,
+    thinking: str | None = None,
+    answer: str | None = None,
+    error: str | None = None,
+    duration_ms: int | None = None,
+    naive_relevance: dict[str, Any] | None = None,
+    clarify_gate: dict[str, Any] | None = None,
+    enabled: bool | None = None,
+    name_prefix: str = "",
+) -> Path | None:
+    """Write ``logs/query_dumps/*.json`` from ``query_progress_hooks`` state.
+
+    ``enabled=None`` (default) follows ``RAG_QUERY_DEBUG_DUMP``; pass ``True``/``False``
+    to force on/off (batch scripts use ``enabled=True``).
+    """
+    if enabled is False:
+        return None
+    if enabled is None and not is_query_debug_enabled():
+        return None
+
+    from image_query_refs import (  # noqa: WPS433
+        explain_query_images,
+        merge_context_for_images,
+        text_from_retrieved_docs,
+    )
+    from query_progress_hooks import (  # noqa: WPS433
+        finalize_related_images,
+        get_query_debug_state,
+    )
+
+    hook_state = get_query_debug_state()
+    if naive_relevance is None:
+        naive_relevance = hook_state.get("naive_relevance")
+        if not isinstance(naive_relevance, dict):
+            naive_relevance = None
+    retrieved_docs = hook_state.get("retrieved_docs")
+    docs_text = hook_state.get("retrieved_docs_text")
+    if not docs_text and isinstance(retrieved_docs, list):
+        docs_text = text_from_retrieved_docs(retrieved_docs)
+    retrieval_context = hook_state.get("retrieval_context")
+    merged = merge_context_for_images(docs_text or "", retrieval_context or "")
+
+    related_images = hook_state.get("related_images")
+    if not isinstance(related_images, list) or not related_images:
+        related_images = finalize_related_images()
+
+    images_debug = hook_state.get("images_debug")
+    if not isinstance(images_debug, dict) or not images_debug:
+        images_debug = explain_query_images(
+            docs_text or merged or "",
+            [parser_root],
+            query=query,
+            retrieved_docs=retrieved_docs if isinstance(retrieved_docs, list) else None,
+        )
+    payload = build_query_dump(
+        query=query,
+        mode=mode,
+        thinking=thinking,
+        answer=answer,
+        error=error,
+        duration_ms=duration_ms,
+        retrieval_context=retrieval_context if isinstance(retrieval_context, str) else None,
+        retrieved_docs=retrieved_docs if isinstance(retrieved_docs, list) else None,
+        retrieved_docs_text=docs_text if isinstance(docs_text, str) else None,
+        related_images=related_images if isinstance(related_images, list) else None,
+        images_debug=images_debug,
+        steering_report=hook_state.get("steering_report")
+        if isinstance(hook_state.get("steering_report"), dict)
+        else None,
+        naive_relevance=naive_relevance,
+        clarify_gate=clarify_gate,
+        llm_input=hook_state.get("llm_input")
+        if isinstance(hook_state.get("llm_input"), dict)
+        else None,
+    )
+    return write_query_dump(payload, name_prefix=name_prefix)
 
 
 def list_recent_dumps(*, limit: int = 15) -> list[dict[str, Any]]:
