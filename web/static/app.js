@@ -738,9 +738,7 @@ function renderClarificationPanel(loadingEl, data) {
   loadingEl.innerHTML = "";
 
   const clarificationId = String(data?.clarification_id || "").trim();
-  const originalQuery = String(
-    data?.original_query || data?.keep_original?.text || "",
-  ).trim();
+  const originalQuery = String(data?.original_query || "").trim();
   if (clarificationId) {
     loadingEl.dataset.clarificationId = clarificationId;
   }
@@ -773,9 +771,7 @@ function renderClarificationPanel(loadingEl, data) {
     const k = data?.generation?.k_answerable ?? (data?.candidates || []).length;
     intro.textContent =
       k > 0
-        ? data?.generation?.candidate_validation === "mix_document_chunks+llm_answer"
-          ? "请从下列已预答验证的推荐问法中选择，或保持原问题继续。"
-          : "请从下列已验证可检索的推荐问法中选择，或保持原问题继续。"
+        ? "请从下列已验证可检索的推荐问法中选择一条继续问答。"
         : "正在准备澄清选项…";
   }
   bodyEl.appendChild(intro);
@@ -794,11 +790,13 @@ function renderClarificationPanel(loadingEl, data) {
       btn.type = "button";
       btn.className = "clarify-option";
       const scoreTxt =
-        cand.max_rerank_score != null
-          ? ` · rerank ${cand.max_rerank_score}`
-          : cand.score != null
-            ? ` · ${cand.score}`
-            : "";
+        cand.final_score != null
+          ? ` · final ${cand.final_score}`
+          : cand.max_rerank_score != null
+            ? ` · rerank ${cand.max_rerank_score}`
+            : cand.score != null
+              ? ` · ${cand.score}`
+              : "";
       const chunkTxt =
         cand.chunk_count != null ? ` · ${cand.chunk_count} chunks` : "";
       btn.textContent = `${cand.text}${chunkTxt}${scoreTxt}`;
@@ -808,22 +806,6 @@ function renderClarificationPanel(loadingEl, data) {
           clarify_choice: "use_candidate",
           clarification_id: clarificationId || loadingEl.dataset.clarificationId,
           candidate_id: cand.id,
-        });
-      });
-      options.appendChild(btn);
-    }
-
-    const keep = data?.keep_original;
-    if (keep?.text) {
-      const btn = document.createElement("button");
-      btn.type = "button";
-      btn.className = "clarify-option clarify-keep-original";
-      btn.textContent = keep.label || "保持原问题";
-      btn.addEventListener("click", () => {
-        void submitClarifiedQuery({
-          query: originalQuery || keep.text,
-          clarify_choice: "keep_original",
-          clarification_id: clarificationId || loadingEl.dataset.clarificationId,
         });
       });
       options.appendChild(btn);

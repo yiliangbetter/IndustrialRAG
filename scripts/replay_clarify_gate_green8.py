@@ -1,15 +1,18 @@
 #!/usr/bin/env python3
-"""Replay question sets through clarify gate: pick first recommended candidate, then aquery.
+"""Replay question sets through clarify gate, then aquery (optional LLM answer).
 
-Reports per-question scores, candidate scores, pick, and whether an answer was produced.
-Original-query probe stats come from the same single ``evaluate_clarify_gate`` call as Web
-(``gate.data[\"original_probe\"]``), not a separate pre-probe.
+Reports per-question original ``final_score``, candidate ``final_score``s, random/first
+pick among recommendations, and whether aquery produced an answer with references.
 
 Examples::
 
   uv run python scripts/replay_clarify_gate_green8.py --source green8
   uv run python scripts/replay_clarify_gate_green8.py --source shili17
-  uv run python scripts/replay_clarify_gate_green8.py --source voice29
+  uv run python scripts/replay_clarify_gate_green8.py --source voice29 --pick random --checkpoint
+  uv run python scripts/replay_clarify_gate_green8.py --source voice29 --pick random --gate-only --no-dump
+
+Each aquery (non ``--gate-only``) writes ``logs/query_dumps/{source}_{id}_*.json`` with
+retrieval, ``clarify_gate`` replay metadata, and LLM input when ``--dump`` (default on).
 """
 
 from __future__ import annotations
@@ -49,6 +52,7 @@ from raganything.clarify_gate import (  # noqa: E402
     ClarifyRequired,
     clarify_candidate_k,
     clarify_candidate_min_rerank_score,
+    clarify_direct_rerank_min,
     evaluate_clarify_gate,
     resolve_clarify_bundle,
 )
@@ -76,6 +80,43 @@ def _pick_candidate(
     if strategy == "random":
         return "candidate", rng.choice(candidates)
     return "candidate", candidates[0]
+
+
+def _clarify_gate_dump_meta(
+    *,
+    case_id: str,
+    source_set: str,
+    row: dict[str, Any],
+    gate: ClarifyBypass | ClarifyRequired,
+    clarify_triggered: bool,
+) -> dict[str, Any]:
+    meta: dict[str, Any] = {
+        "replay_id": case_id,
+        "replay_source": source_set,
+        "original_query": row.get("original_query"),
+        "original_final_score": row.get("original_final_score"),
+        "pick_kind": row.get("pick_kind"),
+        "pick_candidate_id": row.get("pick_candidate_id"),
+        "pick_final_score": row.get("pick_final_score"),
+        "picked_query": row.get("final_query")
+        if row.get("pick_kind") == "candidate"
+        else None,
+    }
+    if isinstance(gate, ClarifyRequired):
+        meta["required"] = True
+        meta["gate_outcome"] = gate.gate_outcome
+        if isinstance(gate.data, dict):
+            for key, val in gate.data.items():
+                if key not in meta:
+                    meta[key] = val
+    elif isinstance(gate, ClarifyBypass):
+        meta["required"] = False
+        meta["gate_skipped"] = gate.reason
+        meta["gate_version"] = "v4"
+        if gate.probe is not None:
+            meta["original_probe"] = gate.probe.as_stats()
+    meta["clarify_triggered"] = clarify_triggered
+    return meta
 
 
 def _answer_has_reference_markers(answer: str) -> bool:
@@ -160,85 +201,89 @@ def _refs_from_bundle(bundle: Any | None) -> int:
 
 
 def _check_probe_score_logic(row: dict[str, Any], *, min_thr: float) -> tuple[bool, list[str]]:
-    """C1: answerable iff qualifying chunks with rerank >= min_thr."""
+    """C1: answerable iff final_score present (qualifying chunks exist)."""
     issues: list[str] = []
-    chunks = int(row.get("original_llm_chunks") or 0)
+    final_score = _fscore(row.get("original_final_score") or row.get("original_max_rerank"))
     answerable = bool(row.get("original_answerable"))
-    max_rs = _fscore(row.get("original_max_rerank"))
+    chunks = int(row.get("original_llm_chunks") or 0)
 
-    if answerable != (chunks > 0):
-        issues.append("answerable_ne_chunks_gt0_mismatch")
-    if chunks > 0 and max_rs is not None and max_rs < min_thr:
-        issues.append(f"qualifying_chunks_but_max_rerank_{max_rs}_lt_{min_thr}")
-    if answerable and max_rs is not None and max_rs < min_thr:
-        issues.append(f"answerable_but_max_rerank_{max_rs}_lt_{min_thr}")
-    if chunks > 0 and max_rs is None and not row.get("original_scores_unavailable"):
-        issues.append("qualifying_chunks_but_no_max_rerank")
+    if answerable != (final_score is not None):
+        issues.append("answerable_ne_has_final_score")
+    if answerable and chunks <= 0:
+        issues.append("answerable_but_chunk_count_zero")
+    if answerable and final_score is not None and final_score < min_thr:
+        issues.append(f"answerable_but_final_{final_score}_lt_{min_thr}")
+    if not answerable and final_score is not None:
+        issues.append("not_answerable_but_has_final_score")
     return not issues, issues
 
 
-def _check_gate_outcome_logic(row: dict[str, Any], *, k: int) -> tuple[bool, list[str]]:
-    """C2: reject/offer vs answerable and candidate count."""
+def _check_gate_outcome_logic(
+    row: dict[str, Any], *, k: int, direct_min: float
+) -> tuple[bool, list[str]]:
+    """C2: v4 reject / offer / direct vs final_score band."""
     issues: list[str] = []
     outcome = row.get("gate_outcome")
     reason = row.get("gate_reason") or ""
-    chunks = int(row.get("original_llm_chunks") or 0)
-    answerable = bool(row.get("original_answerable"))
+    bypass = row.get("gate_bypass")
+    final_score = _fscore(row.get("original_final_score") or row.get("original_max_rerank"))
     cands = list(row.get("candidates") or [])
 
-    if answerable != (chunks > 0):
-        issues.append("gate_answerable_ne_chunks_gt0")
-
-    if outcome == "reject":
-        if reason == "no_document_chunks":
-            if answerable or chunks > 0:
-                issues.append("reject_no_document_chunks_but_answerable")
+    effective = outcome or bypass
+    if effective == "direct":
+        if final_score is None or final_score <= direct_min:
+            issues.append("direct_but_final_not_gt_direct_min")
+        if cands:
+            issues.append("direct_but_has_candidates")
+    elif effective == "reject":
+        if reason == "no_final_chunks":
+            if final_score is not None:
+                issues.append("reject_no_final_chunks_but_has_final_score")
             if cands:
-                issues.append("reject_no_document_chunks_but_has_candidates")
-        elif reason == "cannot_fill_answerable_candidates":
-            if not answerable:
-                issues.append("cannot_fill_but_original_not_answerable")
+                issues.append("reject_no_final_chunks_but_has_candidates")
+        elif reason == "cannot_fill_high_confidence_candidates":
+            if final_score is None or final_score > direct_min:
+                issues.append("cannot_fill_but_final_not_mid_band")
             if len(cands) >= k:
                 issues.append("cannot_fill_but_candidates_ge_k")
         if not row.get("unrelated"):
             issues.append("reject_should_mark_unrelated")
-    elif outcome == "offer":
-        if not answerable or chunks <= 0:
-            issues.append("offer_but_original_not_answerable")
+    elif effective == "offer":
+        if final_score is None or final_score > direct_min:
+            issues.append("offer_but_final_not_mid_band")
         if len(cands) != k:
             issues.append(f"offer_candidates_{len(cands)}_ne_k_{k}")
         if row.get("unrelated"):
             issues.append("offer_should_not_be_unrelated")
     elif row.get("clarify_triggered"):
-        issues.append(f"unexpected_gate_outcome_{outcome}")
+        issues.append(f"unexpected_gate_outcome_{effective}")
 
     return not issues, issues
 
 
 def _check_candidates_logic(
-    candidates: list[dict[str, Any]], *, min_thr: float
+    candidates: list[dict[str, Any]], *, direct_min: float
 ) -> tuple[bool, list[str]]:
-    """C3a: each listed candidate probe stats meet threshold."""
+    """C3a: each listed candidate final_score > direct_min."""
     issues: list[str] = []
     for c in candidates:
         cid = c.get("id") or "?"
+        fs = _fscore(c.get("final_score") or c.get("max_rerank_score"))
         cc = int(c.get("chunk_count") or 0)
-        rs = _fscore(c.get("max_rerank_score"))
         if cc <= 0:
             issues.append(f"{cid}_chunk_count_zero")
-        if rs is not None and rs < min_thr:
-            issues.append(f"{cid}_max_rerank_{rs}_lt_{min_thr}")
-        elif rs is None and cc > 0:
-            issues.append(f"{cid}_missing_max_rerank")
+        if fs is None or fs <= direct_min:
+            issues.append(f"{cid}_final_{fs}_not_gt_{direct_min}")
     return not issues, issues
 
 
 def _attach_design_checks(row: dict[str, Any]) -> None:
     min_thr = float(row.get("min_rerank_threshold") or clarify_candidate_min_rerank_score())
+    direct_min = float(row.get("direct_rerank_min") or clarify_direct_rerank_min())
     k = int(row.get("k_required") or clarify_candidate_k())
     ok1, i1 = _check_probe_score_logic(row, min_thr=min_thr)
-    ok2, i2 = _check_gate_outcome_logic(row, k=k)
-    ok3, i3 = _check_candidates_logic(list(row.get("candidates") or []), min_thr=min_thr)
+    ok2, i2 = _check_gate_outcome_logic(row, k=k, direct_min=direct_min)
+    ok3, i3 = _check_candidates_logic(list(row.get("candidates") or []), direct_min=direct_min)
 
     pick_ok = True
     pick_issues: list[str] = []
@@ -246,9 +291,10 @@ def _attach_design_checks(row: dict[str, Any]) -> None:
         picked = {
             "id": row.get("pick_candidate_id"),
             "chunk_count": row.get("pick_chunk_count"),
+            "final_score": row.get("pick_final_score") or row.get("pick_max_rerank_score"),
             "max_rerank_score": row.get("pick_max_rerank_score"),
         }
-        pick_ok, pick_issues = _check_candidates_logic([picked], min_thr=min_thr)
+        pick_ok, pick_issues = _check_candidates_logic([picked], direct_min=direct_min)
         if not row.get("has_answer"):
             pick_issues.append("picked_query_no_llm_answer")
         has_ref = bool(
@@ -279,6 +325,7 @@ async def _run_aquery(
     *,
     mode: str,
     bundle: Any | None = None,
+    parser_root: Path | None = None,
 ) -> tuple[str, str, str | None, dict[str, Any]]:
     from query_progress_hooks import (  # noqa: E402
         clear_clarify_context_injection,
@@ -286,10 +333,15 @@ async def _run_aquery(
         get_query_debug_state,
         query_progress_hooks,
         set_clarify_context_injection,
+        set_query_media_roots,
+        set_query_text_for_images,
     )
 
     if bundle is not None:
         set_clarify_context_injection(bundle)
+    if parser_root is not None:
+        set_query_media_roots([parser_root.resolve()])
+        set_query_text_for_images(query.strip())
     started = time.perf_counter()
     error: str | None = None
     raw = ""
@@ -335,6 +387,8 @@ async def _replay_case(
     gate_only: bool = False,
     pick_strategy: str = "first",
     rng: random.Random | None = None,
+    parser_root: Path | None = None,
+    write_dumps: bool = False,
 ) -> dict[str, Any]:
     orig_q = (case.get("query") or case.get("standard_question") or "").strip()
     if not orig_q:
@@ -344,25 +398,32 @@ async def _replay_case(
 
     gate = await evaluate_clarify_gate(rag.lightrag, orig_q, mode=mode)
     clarify_triggered = isinstance(gate, ClarifyRequired)
-    orig_probe: dict[str, Any] = (
-        (gate.data.get("original_probe") or {})
-        if isinstance(gate, ClarifyRequired)
-        else {}
-    )
+    orig_probe: dict[str, Any] = {}
+    if isinstance(gate, ClarifyRequired):
+        orig_probe = gate.data.get("original_probe") or {}
+    elif isinstance(gate, ClarifyBypass) and gate.probe is not None:
+        orig_probe = gate.probe.as_stats()
     row: dict[str, Any] = {
         "id": case_id,
         "category": case.get("category", ""),
         "original_query": orig_q,
         "original_llm_chunks": int(orig_probe.get("chunk_count") or 0),
         "original_llm_total": int(orig_probe.get("llm_chunk_total") or 0),
+        "original_final_score": orig_probe.get("final_score"),
         "original_max_rerank": orig_probe.get("max_rerank_score"),
         "original_scores_unavailable": bool(orig_probe.get("scores_unavailable")),
         "original_answerable": bool(orig_probe.get("answerable")),
         "min_rerank_threshold": clarify_candidate_min_rerank_score(),
+        "direct_rerank_min": clarify_direct_rerank_min(),
         "k_required": clarify_candidate_k(),
         "source_set": case.get("source_set", ""),
         "clarify_triggered": clarify_triggered,
-        "gate_outcome": gate.gate_outcome if isinstance(gate, ClarifyRequired) else None,
+        "gate_outcome": (
+            gate.gate_outcome
+            if isinstance(gate, ClarifyRequired)
+            else (gate.reason if isinstance(gate, ClarifyBypass) else None)
+        ),
+        "gate_bypass": gate.reason if isinstance(gate, ClarifyBypass) else None,
         "candidates": [],
         "pick_kind": None,
         "pick_text": None,
@@ -383,6 +444,7 @@ async def _replay_case(
         "standard_answer": (case.get("standard_answer") or "").strip(),
         "aquery_error": None,
         "duration_ms": None,
+        "dump_path": None,
     }
 
     bundle = None
@@ -397,6 +459,7 @@ async def _replay_case(
                 "id": c.get("id"),
                 "text": c.get("text"),
                 "chunk_count": c.get("chunk_count"),
+                "final_score": c.get("final_score"),
                 "max_rerank_score": c.get("max_rerank_score"),
             }
             for c in (data.get("candidates") or [])
@@ -422,6 +485,7 @@ async def _replay_case(
             row["pick_text"] = final_q
             row["pick_candidate_id"] = pick_payload.get("id")
             row["pick_chunk_count"] = pick_payload.get("chunk_count")
+            row["pick_final_score"] = pick_payload.get("final_score")
             row["pick_max_rerank_score"] = pick_payload.get("max_rerank_score")
             bypass = await evaluate_clarify_gate(
                 rag.lightrag,
@@ -453,9 +517,12 @@ async def _replay_case(
         row["gate_bypass"] = gate.reason if isinstance(gate, ClarifyBypass) else None
         final_q = orig_q
 
+    if isinstance(gate, ClarifyBypass) and gate.reason == "direct":
+        row["clarify_triggered"] = False
+
     started = time.perf_counter()
-    _thinking, answer, err, aquery_meta = await _run_aquery(
-        rag, final_q, mode=mode, bundle=bundle
+    thinking, answer, err, aquery_meta = await _run_aquery(
+        rag, final_q, mode=mode, bundle=bundle, parser_root=parser_root
     )
     row["duration_ms"] = int((time.perf_counter() - started) * 1000)
     row["aquery_error"] = err
@@ -471,6 +538,31 @@ async def _replay_case(
     row["llm_input_reference_lines"] = list(
         aquery_meta.get("llm_input_reference_lines") or []
     )
+    if write_dumps and parser_root is not None:
+        from query_debug_dump import persist_query_debug_dump  # noqa: E402
+
+        source_set = str(case.get("source_set") or "")
+        dump_prefix = f"{source_set}_{case_id}".replace("/", "_")
+        dump_path = persist_query_debug_dump(
+            query=final_q,
+            mode=mode,
+            parser_root=parser_root,
+            thinking=(thinking or None),
+            answer=answer or None,
+            error=err,
+            duration_ms=row["duration_ms"],
+            clarify_gate=_clarify_gate_dump_meta(
+                case_id=str(case_id),
+                source_set=source_set,
+                row=row,
+                gate=gate,
+                clarify_triggered=clarify_triggered,
+            ),
+            enabled=True,
+            name_prefix=dump_prefix,
+        )
+        if dump_path is not None:
+            row["dump_path"] = str(dump_path)
     _attach_design_checks(row)
     return row
 
@@ -536,13 +628,18 @@ def _format_report(
 ) -> str:
     lines: list[str] = []
     lines.append("=" * 72)
-    lines.append(f"{source} 澄清门控批测 (v3 document-chunk gate)")
+    lines.append(f"{source} 澄清门控批测 (v4 final-score gate)")
     lines.append("=" * 72)
     lines.append(f"time: {datetime.now(timezone.utc).isoformat()}")
     lines.append(f"working_dir: {wd}")
     lines.append(f"min_rerank: {clarify_candidate_min_rerank_score()}")
+    lines.append(f"direct_rerank_min: {clarify_direct_rerank_min()}")
     lines.append(f"k_required: {clarify_candidate_k()}")
     lines.append(f"mode: gate_only={gate_only}")
+    if not gate_only:
+        from query_debug_dump import get_query_dump_dir  # noqa: E402
+
+        lines.append(f"query_dumps: {get_query_dump_dir()}")
     lines.append(f"cases: {len(rows)}")
     lines.append("")
 
@@ -560,6 +657,7 @@ def _format_report(
             f"  原问 LLM qualifying={r.get('original_llm_chunks')} "
             f"total={r.get('original_llm_total')} "
             f"max_rerank={r.get('original_max_rerank')} "
+            f"final={r.get('original_final_score')} "
             f"answerable={r.get('original_answerable')}"
             + (" scores_unavailable" if r.get("original_scores_unavailable") else "")
         )
@@ -569,14 +667,15 @@ def _format_report(
             else:
                 lines.append("  澄清推荐问法:")
                 for c in r.get("candidates") or []:
-                    rs = c.get("max_rerank_score")
+                    rs = c.get("final_score") if c.get("final_score") is not None else c.get("max_rerank_score")
                     cc = c.get("chunk_count")
                     lines.append(
-                        f"    - [{c.get('id')}] chunks={cc} max_rerank={rs} | {c.get('text')}"
+                        f"    - [{c.get('id')}] chunks={cc} final={rs} | {c.get('text')}"
                     )
                 if not gate_only and r.get("pick_kind") not in (None, "gate_only"):
                     lines.append(
-                        f"  选用: {r['pick_kind']} | {r['pick_text']}"
+                        f"  选用: {r['pick_kind']} id={r.get('pick_candidate_id')} "
+                        f"final={r.get('pick_final_score')} | {r['pick_text']}"
                     )
         else:
             lines.append(f"  gate_bypass={r.get('gate_bypass')}")
@@ -590,14 +689,18 @@ def _format_report(
             )
         if r.get("aquery_error"):
             lines.append(f"  error: {r['aquery_error']}")
+        if r.get("dump_path"):
+            lines.append(f"  dump: {r['dump_path']}")
         lines.append("")
 
     n_clarify = sum(1 for r in rows if r["clarify_triggered"])
     n_reject = sum(1 for r in rows if r.get("gate_outcome") == "reject")
     n_offer = sum(1 for r in rows if r.get("gate_outcome") == "offer")
+    n_direct = sum(1 for r in rows if r.get("gate_outcome") == "direct")
     lines.append("=" * 72)
     lines.append(
-        f"汇总: 总题 {len(rows)} | 触发门控 {n_clarify} | 拒答 {n_reject} | 澄清 Offer {n_offer}"
+        f"汇总: 总题 {len(rows)} | 直答 {n_direct} | 触发门控 {n_clarify} | "
+        f"拒答 {n_reject} | 澄清 Offer {n_offer}"
     )
     lines.append("")
     lines.append("set  id  orig_chunks  max_rerank  gate  cands  outcome  question")
@@ -621,19 +724,20 @@ def _format_design_report(
 ) -> str:
     lines: list[str] = []
     lines.append("=" * 72)
-    lines.append(f"{source} 澄清门控设计逻辑验证 (v3)")
+    lines.append(f"{source} 澄清门控设计逻辑验证 (v4)")
     lines.append("=" * 72)
     lines.append(f"time: {datetime.now(timezone.utc).isoformat()}")
     lines.append(f"working_dir: {wd}")
     lines.append(f"min_rerank: {clarify_candidate_min_rerank_score()}")
+    lines.append(f"direct_rerank_min: {clarify_direct_rerank_min()}")
     lines.append(f"k_required: {clarify_candidate_k()}")
     lines.append(f"pick_strategy: {pick_strategy}")
     lines.append(f"cases: {len(rows)}")
     lines.append("")
     lines.append("验证项:")
-    lines.append("  C1 原问可答 <=> qualifying chunks>0 且 max_rerank>=阈值")
-    lines.append("  C2 gate_outcome 与可答/推荐条数符合 v3 设计")
-    lines.append("  C3 推荐问 probe 可答；随机点选后 LLM 有回答且 bundle/答案含 reference")
+    lines.append("  C1 原问可答 <=> final_score 非空")
+    lines.append("  C2 gate_outcome 与 final_score 三档符合 v4 设计")
+    lines.append("  C3 推荐问 final>direct_min；点选后 LLM 有回答且含 reference")
     lines.append("")
 
     n_all_ok = 0
@@ -645,7 +749,8 @@ def _format_design_report(
         )
         lines.append(
             f"  gate={r.get('gate_outcome')} reason={r.get('gate_reason') or '-'} "
-            f"qualifying={r.get('original_llm_chunks')} max_rerank={r.get('original_max_rerank')} "
+            f"qualifying={r.get('original_llm_chunks')} final={r.get('original_final_score')} "
+            f"max_rerank={r.get('original_max_rerank')} "
             f"answerable={r.get('original_answerable')}"
         )
         for key, label in (
@@ -657,7 +762,7 @@ def _format_design_report(
             block = dc.get(key) or {}
             ok = block.get("ok")
             issues = block.get("issues") or []
-            if key == "c3_picked_answer" and r.get("gate_outcome") != "offer":
+            if key == "c3_picked_answer" and r.get("gate_outcome") not in ("offer",):
                 lines.append(f"  {label}: SKIP (no offer pick)")
                 continue
             if (
@@ -738,6 +843,7 @@ def _format_design_report(
     lines.append("=" * 72)
     lines.append(
         f"汇总: {n_all_ok}/{len(rows)} 题 design_checks.all_ok | "
+        f"direct={sum(1 for r in rows if r.get('gate_outcome') == 'direct')} "
         f"reject={sum(1 for r in rows if r.get('gate_outcome') == 'reject')} "
         f"offer={sum(1 for r in rows if r.get('gate_outcome') == 'offer')}"
     )
@@ -772,6 +878,7 @@ async def _main(args: argparse.Namespace) -> None:
     cases, source_labels = _load_all_cases(args.source, limit=args.limit)
     source_label = args.source if args.source != "all" else "+".join(source_labels)
     rng = random.Random(args.seed if args.seed is not None else time.time_ns())
+    write_dumps = args.dump and not args.gate_only
 
     rows: list[dict[str, Any]] = []
     args.out_jsonl.parent.mkdir(parents=True, exist_ok=True)
@@ -788,6 +895,8 @@ async def _main(args: argparse.Namespace) -> None:
                 gate_only=args.gate_only,
                 pick_strategy=args.pick,
                 rng=rng,
+                parser_root=pod,
+                write_dumps=write_dumps,
             )
             rows.append(row)
             if args.checkpoint:
@@ -797,7 +906,8 @@ async def _main(args: argparse.Namespace) -> None:
             print(
                 f"  chunks={row.get('original_llm_chunks')} rerank={row.get('original_max_rerank')} "
                 f"gate={row.get('gate_outcome')} cands={len(row.get('candidates') or [])} "
-                f"design={'OK' if dc.get('all_ok') else 'FAIL'}",
+                f"design={'OK' if dc.get('all_ok') else 'FAIL'}"
+                + (f" dump={row.get('dump_path')}" if row.get("dump_path") else ""),
                 flush=True,
             )
     finally:
@@ -842,6 +952,12 @@ def main() -> None:
         "--gate-only",
         action="store_true",
         help="Only evaluate clarify gate (no aquery after pick)",
+    )
+    p.add_argument(
+        "--dump",
+        action=argparse.BooleanOptionalAction,
+        default=True,
+        help="Write logs/query_dumps/*.json per aquery (default: on; skipped with --gate-only)",
     )
     p.add_argument(
         "--pick",

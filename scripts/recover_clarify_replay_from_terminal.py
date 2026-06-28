@@ -139,7 +139,7 @@ def _format_report(
 
         if row.get("gate_outcome") == "reject":
             lines.append(
-                f"  拒答: {gate_row.get('pick_text') or gate_row.get('gate_reason') or 'no_document_chunks'}"
+                f"  拒答: {gate_row.get('pick_text') or gate_row.get('gate_reason') or 'no_final_chunks'}"
             )
             continue
 

@@ -1,4 +1,4 @@
-"""Clarify gate v3: KG filtering, context rebuild, and cached query bundles."""
+"""Clarify gate v4: KG filtering, context rebuild, and cached query bundles."""
 
 from __future__ import annotations
 
@@ -115,17 +115,22 @@ class RetrievalProbeResult:
     min_rerank_threshold: float
     llm_chunk_total: int
     scores_unavailable: bool
+    final_score: float | None = None
+    direct_rerank_min: float | None = None
     bundle: CachedQueryBundle | None = None
 
     def as_stats(self) -> dict[str, Any]:
         return {
             "answerable": self.answerable,
             "chunk_count": self.chunk_count,
+            "final_score": self.final_score,
             "max_rerank_score": self.max_rerank_score,
             "min_rerank_threshold": self.min_rerank_threshold,
+            "direct_rerank_min": self.direct_rerank_min,
             "mode": self.mode,
             "llm_chunk_total": self.llm_chunk_total,
             "scores_unavailable": self.scores_unavailable,
+            "gate_version": "v4",
         }
 
 

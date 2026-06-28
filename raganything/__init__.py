@@ -10,8 +10,6 @@ from .naive_relevance import (
 from .clarify_gate import (
     evaluate_clarify_gate as evaluate_clarify_gate,
     is_clarify_gate_enabled as is_clarify_gate_enabled,
-    classify_query_relevance as classify_query_relevance,
-    probe_query_score as probe_query_score,
     probe_llm_retrieval as probe_llm_retrieval,
     ClarifyBypass as ClarifyBypass,
     ClarifyRequired as ClarifyRequired,
@@ -88,8 +86,7 @@ __all__ = [
     "format_relevance_report",
     "evaluate_clarify_gate",
     "is_clarify_gate_enabled",
-    "classify_query_relevance",
-    "probe_query_score",
+    "probe_llm_retrieval",
     "ClarifyBypass",
     "ClarifyRequired",
 ]

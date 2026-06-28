@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Batch-test clarify gate on a question set; print scores and trigger status."""
+"""Batch-test clarify gate v4 on a question set; print final_score and gate outcome."""
 
 from __future__ import annotations
 
@@ -29,11 +29,9 @@ from score_query_relevance import _load_cases  # noqa: E402
 from raganything.clarify_gate import (  # noqa: E402
     ClarifyBypass,
     ClarifyRequired,
-    classify_query_relevance,
-    clarify_threshold_lower,
-    clarify_threshold_upper,
+    clarify_direct_rerank_min,
     evaluate_clarify_gate,
-    probe_query_score,
+    probe_llm_retrieval,
 )
 
 _SOURCE_PRESETS = {
@@ -48,91 +46,51 @@ async def _run(source: Path, *, limit: int, out: Path | None) -> None:
     pod = (_ROOT / "data" / "pipeline_parse").resolve()
     rag, _, _ = await rpc._build_rag(wd, pod)
     cases = _load_cases(source, limit=limit)
-    lo, hi = clarify_threshold_lower(), clarify_threshold_upper()
+    direct_min = clarify_direct_rerank_min()
     lines: list[str] = []
-    lines.append(f"Clarify gate batch test — {source.name}")
-    lines.append(f"thresholds: lower={lo} upper={hi}")
-    lines.append(f"rule: score >= {hi} -> pass; [{lo}, {hi}) -> case_b; < {lo} -> case_a")
+    lines.append(f"Clarify gate v4 batch — {source.name}")
+    lines.append(f"CLARIFY_DIRECT_RERANK_MIN={direct_min}")
+    lines.append("rule: final=None reject; final>min direct; else offer/reject")
     lines.append(f"cases: {len(cases)}")
     lines.append("")
-    clarify_rows: list[tuple] = []
-    pass_rows: list[tuple] = []
+
     for case in cases:
         q = case["query"]
         cid = case.get("id", "?")
-        probe = await probe_query_score(rag.lightrag, q)
-        sc = probe.get("max_cosine_similarity")
-        try:
-            score_f = float(sc) if sc is not None else None
-        except (TypeError, ValueError):
-            score_f = None
-        band = classify_query_relevance(score_f, lower=lo, upper=hi).value
+        probe = await probe_llm_retrieval(rag.lightrag, q, mode="mix")
+        final_score = probe.get("final_score")
         result = await evaluate_clarify_gate(rag.lightrag, q, mode="mix")
         if isinstance(result, ClarifyRequired):
+            outcome = result.gate_outcome
+            reason = result.data.get("gate_reason")
             n_cand = len(result.data.get("candidates") or [])
-            unanswerable = bool(result.data.get("unanswerable"))
-            triggered = "YES" if not unanswerable else "UNANSWERABLE"
-            clarify_rows.append((cid, score_f, band, triggered, n_cand, q))
-            line = (
-                f"#{cid} score={score_f:.3f} band={band} CLARIFY={triggered} "
-                f"candidates={n_cand}"
+            lines.append(
+                f"#{cid} final={final_score} {outcome}/{reason} candidates={n_cand}  {q[:50]}"
+            )
+        elif isinstance(result, ClarifyBypass):
+            lines.append(
+                f"#{cid} final={final_score} bypass={result.reason}  {q[:50]}"
             )
         else:
-            triggered = "NO"
-            pass_rows.append((cid, score_f, band, triggered, result.reason, q))
-            score_s = f"{score_f:.3f}" if score_f is not None else "None"
-            line = f"#{cid} score={score_s} band={band} CLARIFY=NO bypass={result.reason}"
-        lines.append(line)
-        lines.append(f"  {q}")
-        lines.append("")
-        print(line)
-        print(f"  {q}")
-        print()
-    lines.append("=" * 60)
-    lines.append(f"Summary: clarify triggered {len(clarify_rows)}/{len(cases)}")
-    lines.append("")
-    lines.append("Triggered:")
-    for row in clarify_rows:
-        lines.append(f"  id={row[0]} score={row[1]:.3f} band={row[2]} candidates={row[4]} | {row[5]}")
-    lines.append("")
-    lines.append("Not triggered (pass):")
-    for row in pass_rows:
-        score_s = f"{row[1]:.3f}" if row[1] is not None else "None"
-        lines.append(f"  id={row[0]} score={score_s} band={row[2]} bypass={row[4]} | {row[5]}")
-    lines.append("")
-    lines.append(f"Score < {hi} (user expectation: should clarify):")
-    all_rows = clarify_rows + pass_rows
-    for row in sorted(all_rows, key=lambda r: (r[1] is None, r[1] or 0)):
-        score_f = row[1]
-        if score_f is not None and score_f < hi:
-            trig = row[3]
-            band = row[2]
-            qtxt = row[-1]
-            lines.append(f"  score={score_f:.3f} clarify={trig} band={band} | {qtxt}")
+            lines.append(f"#{cid} final={final_score} unknown  {q[:50]}")
+
     text = "\n".join(lines) + "\n"
-    print("=" * 60)
-    print(f"Summary: clarify triggered {len(clarify_rows)}/{len(cases)}")
+    print(text)
     if out:
-        out.parent.mkdir(parents=True, exist_ok=True)
         out.write_text(text, encoding="utf-8")
-        print(f"Report written: {out}")
+        print(f"Wrote {out}")
+
+    await rag.finalize_storages()
 
 
 def main() -> None:
     p = argparse.ArgumentParser(description=__doc__)
-    p.add_argument(
-        "--source",
-        default="green8",
-        help="Preset (green8, shili17) or path to question file",
-    )
+    p.add_argument("--source", default="shili17", choices=sorted(_SOURCE_PRESETS))
     p.add_argument("--limit", type=int, default=0)
     p.add_argument("--out", type=Path, default=None)
     args = p.parse_args()
-    src = _SOURCE_PRESETS.get(args.source, Path(args.source))
-    out = args.out
-    if out is None and args.source == "green8":
-        out = _ROOT / "logs" / "clarify_gate_green8_report.txt"
-    asyncio.run(_run(src.resolve(), limit=args.limit, out=out))
+    source = _SOURCE_PRESETS[args.source]
+    asyncio.run(_run(source, limit=args.limit, out=args.out))
 
 
 if __name__ == "__main__":

@@ -1,11 +1,11 @@
-"""Clarification gate before mix aquery (v3).
+"""Clarification gate before mix aquery (v4).
 
-Gate on **document chunks** (mix retrieval + rerank >= MIN_RERANK_SCORE):
-- chunk_count == 0: ClarifyReject (no LLM, no recommendations).
-- chunk_count > 0: generate k recommendations; each candidate must pass rerank probe.
-- User selection injects cached CachedQueryBundle (ClarifyBypass, no re-retrieval).
+Three-band gate on **final rerank score** (max among qualifying document chunks):
+- ``final_score is None`` → reject (no chunk >= MIN_RERANK_SCORE).
+- ``final_score > CLARIFY_DIRECT_RERANK_MIN`` (default 7) → direct aquery.
+- else → offer k recommendations; each candidate must probe with ``final_score >`` threshold.
 
-See ``docs/澄清门控设计方案_v3.md``.
+See ``docs/澄清门控设计方案_v4.md``.
 """
 
 from __future__ import annotations
@@ -16,7 +16,6 @@ import re
 import time
 import uuid
 from dataclasses import dataclass
-from enum import Enum
 from typing import Any, Literal
 
 from lightrag import QueryParam
@@ -38,20 +37,23 @@ CLARIFY_CANNOT_FILL_MESSAGE = (
     "请换种说法或联系技术支持。"
 )
 
+GATE_VERSION = "v4"
+
 
 class ClarifyGateError(Exception):
     """Base error for clarification gate."""
 
 
 class ClarifyValidationError(ClarifyGateError):
-    """Invalid use_candidate / keep_original / clarification_id pairing."""
+    """Invalid use_candidate / clarification_id pairing."""
 
 
 @dataclass(frozen=True)
 class ClarifyBypass:
     """Proceed to aquery without showing clarification UI."""
 
-    reason: Literal["disabled", "use_candidate", "keep_original"]
+    reason: Literal["disabled", "direct", "use_candidate"]
+    probe: RetrievalProbeResult | None = None
 
 
 @dataclass(frozen=True)
@@ -74,6 +76,16 @@ def _env_int(name: str, default: int) -> int:
         return default
     try:
         return int(raw)
+    except ValueError:
+        return default
+
+
+def _env_float(name: str, default: float) -> float:
+    raw = (os.getenv(name) or "").strip()
+    if not raw:
+        return default
+    try:
+        return float(raw)
     except ValueError:
         return default
 
@@ -127,6 +139,10 @@ def clarify_candidate_min_rerank_score() -> float:
         return 0.28
 
 
+def clarify_direct_rerank_min() -> float:
+    return _env_float("CLARIFY_DIRECT_RERANK_MIN", 7.0)
+
+
 def _chunk_rerank_score(doc: dict[str, Any]) -> float | None:
     """CrossEncoder ``rerank_score`` only (not vector ``score`` fallback)."""
     raw = doc.get("rerank_score")
@@ -154,35 +170,38 @@ def _probe_query_param(mode: str) -> QueryParam:
 def _summarize_llm_chunks(
     chunks: list[dict[str, Any]], *, min_thr: float
 ) -> dict[str, Any]:
-    scored: list[float] = []
-    qualifying: list[dict[str, Any]] = []
+    qualifying_scores: list[float] = []
     for chunk in chunks:
         if not isinstance(chunk, dict):
             continue
         rs = _chunk_rerank_score(chunk)
-        if rs is None:
-            continue
-        scored.append(rs)
-        if rs >= min_thr:
-            qualifying.append(chunk)
+        if rs is not None and rs >= min_thr:
+            qualifying_scores.append(rs)
 
-    if not scored:
+    if not qualifying_scores:
         return {
             "answerable": False,
             "chunk_count": 0,
+            "final_score": None,
             "max_rerank_score": None,
             "llm_chunk_total": len(chunks),
             "scores_unavailable": bool(chunks),
         }
 
-    max_score = max(scored)
+    final_score = round(max(qualifying_scores), 4)
     return {
-        "answerable": len(qualifying) > 0,
-        "chunk_count": len(qualifying),
-        "max_rerank_score": round(max_score, 4),
+        "answerable": True,
+        "chunk_count": len(qualifying_scores),
+        "final_score": final_score,
+        "max_rerank_score": final_score,
         "llm_chunk_total": len(chunks),
         "scores_unavailable": False,
     }
+
+
+def _probe_passes_direct_threshold(probe: RetrievalProbeResult) -> bool:
+    fs = probe.final_score
+    return fs is not None and fs > clarify_direct_rerank_min()
 
 
 async def probe_llm_retrieval(
@@ -191,7 +210,7 @@ async def probe_llm_retrieval(
     *,
     mode: str = "mix",
 ) -> dict[str, Any]:
-    """Run mix retrieval probe and return chunk stats (backward-compatible dict)."""
+    """Run mix retrieval probe and return chunk stats."""
     result = await probe_llm_retrieval_full(lightrag, query, mode=mode)
     return result.as_stats()
 
@@ -205,6 +224,7 @@ async def probe_llm_retrieval_full(
     """Run Web-equivalent mix retrieval and build a KG-filtered CachedQueryBundle."""
     q = (query or "").strip()
     min_thr = clarify_candidate_min_rerank_score()
+    direct_min = clarify_direct_rerank_min()
     empty = RetrievalProbeResult(
         query=q,
         mode=mode,
@@ -214,6 +234,8 @@ async def probe_llm_retrieval_full(
         min_rerank_threshold=min_thr,
         llm_chunk_total=0,
         scores_unavailable=False,
+        final_score=None,
+        direct_rerank_min=direct_min,
         bundle=None,
     )
     if not q:
@@ -251,15 +273,18 @@ async def probe_llm_retrieval_full(
     if stats.get("answerable") and bundle is None and raw_data:
         bundle = build_cached_bundle(q, context_str=context_str, raw_data=raw_data)
 
+    final_score = stats.get("final_score")
     return RetrievalProbeResult(
         query=q,
         mode=param.mode,
         answerable=bool(stats.get("answerable")),
         chunk_count=int(stats.get("chunk_count") or 0),
-        max_rerank_score=stats.get("max_rerank_score"),
+        max_rerank_score=final_score,
         min_rerank_threshold=min_thr,
         llm_chunk_total=int(stats.get("llm_chunk_total") or 0),
         scores_unavailable=bool(stats.get("scores_unavailable")),
+        final_score=final_score,
+        direct_rerank_min=direct_min,
         bundle=bundle if stats.get("answerable") else None,
     )
 
@@ -275,10 +300,9 @@ def _purge_clarification_store() -> None:
         _CLARIFICATION_STORE.pop(key, None)
 
 
-def _register_clarification_v3(
+def _register_clarification(
     *,
     original_query: str,
-    keep_original: dict[str, Any] | None,
     candidates: list[dict[str, Any]],
     options: dict[str, dict[str, Any]],
     generation: dict[str, Any],
@@ -289,7 +313,6 @@ def _register_clarification_v3(
         "created": time.time(),
         "original_query": original_query,
         "options": options,
-        "keep_original": keep_original,
         "candidates": {c["id"]: c["text"] for c in candidates},
         "generation": generation,
     }
@@ -328,50 +351,6 @@ def validate_use_candidate(
     return isinstance(expected, str) and expected.strip() == text
 
 
-def _query_matches_keep_original(rec: dict[str, Any], query_text: str) -> bool:
-    text = (query_text or "").strip()
-    if not text:
-        return False
-    keep = rec.get("keep_original")
-    if isinstance(keep, dict):
-        expected = (keep.get("text") or keep.get("query") or "").strip()
-        if expected and expected == text:
-            return True
-    original = (rec.get("original_query") or "").strip()
-    return original == text
-
-
-def validate_keep_original(clarification_id: str | None, query_text: str) -> bool:
-    rec = _get_clarification_record(clarification_id)
-    if not rec:
-        return False
-    return _query_matches_keep_original(rec, query_text)
-
-
-def _resolve_keep_clarification_id(
-    clarification_id: str | None, query_text: str
-) -> str | None:
-    """Match keep_original by id; fall back to the newest in-memory offer for the same query."""
-    cid = (clarification_id or "").strip()
-    if cid and validate_keep_original(cid, query_text):
-        return cid
-    _purge_clarification_store()
-    text = (query_text or "").strip()
-    if not text:
-        return None
-    best: tuple[float, str] | None = None
-    now = time.time()
-    for store_id, rec in _CLARIFICATION_STORE.items():
-        if now - float(rec.get("created", 0)) > _STORE_TTL_SEC:
-            continue
-        if not _query_matches_keep_original(rec, text):
-            continue
-        created = float(rec.get("created", 0))
-        if best is None or created > best[0]:
-            best = (created, store_id)
-    return best[1] if best else None
-
-
 def resolve_clarify_bundle(
     clarification_id: str | None,
     clarify_choice: str,
@@ -379,28 +358,18 @@ def resolve_clarify_bundle(
     candidate_id: str | None = None,
 ) -> CachedQueryBundle | None:
     choice = (clarify_choice or "").strip().lower()
+    if choice != "use_candidate":
+        return None
     cid = (clarification_id or "").strip()
-    if choice == "keep_original":
-        resolved = _resolve_keep_clarification_id(clarification_id, query_text)
-        if not resolved:
-            return None
-        cid = resolved
+    if not validate_use_candidate(cid, candidate_id, query_text):
+        return None
     rec = _get_clarification_record(cid)
     if not rec:
         return None
     options = rec.get("options")
     if not isinstance(options, dict):
         return None
-
-    if choice == "keep_original":
-        entry = options.get("keep_original")
-    elif choice == "use_candidate":
-        if not validate_use_candidate(cid, candidate_id, query_text):
-            return None
-        entry = options.get((candidate_id or "").strip())
-    else:
-        return None
-
+    entry = options.get((candidate_id or "").strip())
     if not isinstance(entry, dict):
         return None
     bundle = entry.get("bundle")
@@ -480,7 +449,7 @@ async def _generate_candidate_lines(
     return _parse_candidate_lines(raw, limit=k + 2)
 
 
-async def _collect_answerable_candidates(
+async def _collect_high_confidence_candidates(
     lightrag: Any,
     *,
     query: str,
@@ -491,6 +460,7 @@ async def _collect_answerable_candidates(
     k_target = clarify_candidate_k()
     max_rounds = clarify_candidate_max_rounds()
     max_probes = clarify_candidate_max_probes()
+    direct_min = clarify_direct_rerank_min()
     seen: set[str] = {query.strip()}
     answerable: list[dict[str, Any]] = []
     option_entries: dict[str, dict[str, Any]] = {}
@@ -523,7 +493,7 @@ async def _collect_answerable_candidates(
             seen.add(line)
             probes_used += 1
             probe = await probe_llm_retrieval_full(lightrag, line, mode=mode)
-            if not probe.answerable or probe.bundle is None:
+            if not _probe_passes_direct_threshold(probe) or probe.bundle is None:
                 continue
 
             cid = f"c{len(answerable) + 1}"
@@ -532,9 +502,10 @@ async def _collect_answerable_candidates(
                     "id": cid,
                     "text": line,
                     "chunk_count": probe.chunk_count,
-                    "max_rerank_score": probe.max_rerank_score,
+                    "final_score": probe.final_score,
+                    "max_rerank_score": probe.final_score,
                     "min_rerank_threshold": probe.min_rerank_threshold,
-                    "answerable": True,
+                    "direct_rerank_min": direct_min,
                 }
             )
             option_entries[cid] = {
@@ -562,9 +533,14 @@ async def _collect_answerable_candidates(
         "rounds_used": rounds_used,
         "probes_used": probes_used,
         "strategy": strategy,
-        "candidate_validation": "mix_document_chunks",
+        "candidate_validation": "final_score_gt_direct_min",
         "min_rerank_threshold": clarify_candidate_min_rerank_score(),
-        "reason": "filled_k" if len(answerable) >= k_target else "cannot_fill_answerable_candidates",
+        "direct_rerank_min": direct_min,
+        "reason": (
+            "filled_k"
+            if len(answerable) >= k_target
+            else "cannot_fill_high_confidence_candidates"
+        ),
     }
     return answerable, option_entries, meta
 
@@ -582,25 +558,24 @@ def build_clarification_payload(
     original_probe: dict[str, Any],
     candidates: list[dict[str, Any]],
     generation: dict[str, Any],
-    keep_original: dict[str, Any] | None = None,
     message: str | None = None,
 ) -> dict[str, Any]:
     reject = gate_outcome == "reject"
     payload: dict[str, Any] = {
         "clarification_id": clarification_id,
         "original_query": original_query,
+        "gate_version": GATE_VERSION,
         "gate_outcome": gate_outcome,
         "gate_reason": gate_reason,
         "original_probe": original_probe,
         "candidates": candidates,
         "generation": generation,
-        "keep_original": keep_original,
+        "keep_original": None,
     }
     if reject:
         payload["unrelated"] = True
         payload["unanswerable"] = True
         payload["message"] = message or CLARIFY_UNRELATED_MESSAGE
-        payload["keep_original"] = None
     else:
         payload["unrelated"] = False
         payload["unanswerable"] = False
@@ -616,18 +591,12 @@ async def evaluate_clarify_gate(
     clarification_id: str | None = None,
     candidate_id: str | None = None,
 ) -> _ClarifyResult:
-    """Classify query by document chunks or build clarification UI payload."""
+    """Classify query by final rerank score or build clarification UI payload."""
     q = (query or "").strip()
     if not q:
         raise ClarifyGateError("empty query")
 
     choice = (clarify_choice or "").strip().lower()
-    if choice == "keep_original":
-        if not _resolve_keep_clarification_id(clarification_id, q):
-            raise ClarifyValidationError(
-                "澄清会话已过期或服务已重启，请重新提问后再点「保持原问题」"
-            )
-        return ClarifyBypass("keep_original")
     if choice == "use_candidate":
         if not validate_use_candidate(clarification_id, candidate_id, q):
             raise ClarifyValidationError(
@@ -640,18 +609,20 @@ async def evaluate_clarify_gate(
 
     query_mode = (mode or "mix").strip() or "mix"
     original_probe = await probe_llm_retrieval_full(lightrag, q, mode=query_mode)
+    final_score = original_probe.final_score
+    direct_min = clarify_direct_rerank_min()
 
-    if not original_probe.answerable or original_probe.bundle is None:
+    if final_score is None:
         generation = {
             "k_requested": clarify_candidate_k(),
             "k_answerable": 0,
             "rounds_used": 0,
             "probes_used": 0,
-            "reason": "no_document_chunks",
+            "direct_rerank_min": direct_min,
+            "reason": "no_final_chunks",
         }
-        clarification_id_out = _register_clarification_v3(
+        clarification_id_out = _register_clarification(
             original_query=q,
-            keep_original=None,
             candidates=[],
             options={},
             generation=generation,
@@ -660,7 +631,7 @@ async def evaluate_clarify_gate(
             clarification_id=clarification_id_out,
             original_query=q,
             gate_outcome="reject",
-            gate_reason="no_document_chunks",
+            gate_reason="no_final_chunks",
             original_probe=_probe_summary(original_probe),
             candidates=[],
             generation=generation,
@@ -668,30 +639,20 @@ async def evaluate_clarify_gate(
         )
         return ClarifyRequired(data, gate_outcome="reject")
 
-    keep_original = {
-        "label": "保持原问题",
-        "text": q,
-        "chunk_count": original_probe.chunk_count,
-        "max_rerank_score": original_probe.max_rerank_score,
-        "clarify_choice": "keep_original",
-    }
-    options: dict[str, dict[str, Any]] = {
-        "keep_original": {"query": q, "bundle": original_probe.bundle},
-    }
+    if final_score > direct_min:
+        return ClarifyBypass("direct", probe=original_probe)
 
-    candidates, candidate_options, generation = await _collect_answerable_candidates(
+    candidates, candidate_options, generation = await _collect_high_confidence_candidates(
         lightrag,
         query=q,
         original_bundle=original_probe.bundle,
         mode=query_mode,
     )
-    options.update(candidate_options)
 
     k_target = clarify_candidate_k()
     if len(candidates) < k_target:
-        clarification_id_out = _register_clarification_v3(
+        clarification_id_out = _register_clarification(
             original_query=q,
-            keep_original=None,
             candidates=[],
             options={},
             generation=generation,
@@ -700,7 +661,7 @@ async def evaluate_clarify_gate(
             clarification_id=clarification_id_out,
             original_query=q,
             gate_outcome="reject",
-            gate_reason="cannot_fill_answerable_candidates",
+            gate_reason="cannot_fill_high_confidence_candidates",
             original_probe=_probe_summary(original_probe),
             candidates=[],
             generation=generation,
@@ -708,11 +669,10 @@ async def evaluate_clarify_gate(
         )
         return ClarifyRequired(data, gate_outcome="reject")
 
-    clarification_id_out = _register_clarification_v3(
+    clarification_id_out = _register_clarification(
         original_query=q,
-        keep_original=keep_original,
         candidates=candidates,
-        options=options,
+        options=candidate_options,
         generation=generation,
     )
     data = build_clarification_payload(
@@ -723,49 +683,5 @@ async def evaluate_clarify_gate(
         original_probe=_probe_summary(original_probe),
         candidates=candidates,
         generation=generation,
-        keep_original=keep_original,
     )
     return ClarifyRequired(data, gate_outcome="offer")
-
-
-# --- Backward-compatible stubs (v2 naive gate; deprecated in v3) ---
-
-
-def clarify_threshold() -> float:
-    return 0.6
-
-
-def clarify_threshold_lower() -> float:
-    return clarify_threshold()
-
-
-def clarify_threshold_upper() -> float:
-    return clarify_threshold()
-
-
-class ClarifyBand(str, Enum):
-    UNRELATED = "unrelated"
-    CLARIFY = "clarify"
-
-
-def classify_query_relevance(
-    score: float | None,
-    *,
-    threshold: float | None = None,
-    lower: float | None = None,
-    upper: float | None = None,
-) -> ClarifyBand:
-    del upper
-    thr = clarify_threshold() if threshold is None else threshold
-    if lower is not None:
-        thr = lower
-    if score is None or score < thr:
-        return ClarifyBand.UNRELATED
-    return ClarifyBand.CLARIFY
-
-
-async def probe_query_score(lightrag: Any, query: str) -> dict[str, Any]:
-    from raganything.naive_relevance import probe_chunk_vector_score
-
-    chunks_vdb = lightrag.chunks_vdb
-    return await probe_chunk_vector_score(chunks_vdb, query)

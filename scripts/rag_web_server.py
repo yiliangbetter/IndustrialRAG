@@ -140,7 +140,7 @@ class QueryBody(BaseModel):
     )
     clarify_choice: str | None = Field(
         None,
-        description="Bypass gate: use_candidate | keep_original",
+        description="Bypass gate: use_candidate",
     )
     clarification_id: str | None = Field(
         None,
@@ -285,10 +285,7 @@ async def _evaluate_clarify_gate(body: QueryBody, mode: str) -> Any:
             body.candidate_id,
         )
 
-    if isinstance(result, ClarifyBypass) and result.reason in (
-        "keep_original",
-        "use_candidate",
-    ):
+    if isinstance(result, ClarifyBypass) and result.reason == "use_candidate":
         bundle = resolve_clarify_bundle(
             body.clarification_id,
             body.clarify_choice or result.reason,
@@ -805,9 +802,22 @@ async def api_query(body: QueryBody):
     q = body.query.strip()
     parser_root = Path(state.parser_output_dir).resolve()
 
-    from raganything.clarify_gate import ClarifyRequired  # noqa: WPS433
+    from raganything.clarify_gate import ClarifyBypass, ClarifyRequired  # noqa: WPS433
 
     gate_result = await _evaluate_clarify_gate(body, mode)
+    clarify_gate_meta: dict[str, Any] | None = None
+    if isinstance(gate_result, ClarifyBypass) and gate_result.reason == "direct":
+        probe_stats = (
+            gate_result.probe.as_stats()
+            if gate_result.probe is not None
+            else None
+        )
+        clarify_gate_meta = {
+            "required": False,
+            "gate_skipped": "direct",
+            "gate_version": "v4",
+            "original_probe": probe_stats,
+        }
     if isinstance(gate_result, ClarifyRequired):
         dump_path = _persist_query_debug_dump(
             query=q,
@@ -880,6 +890,7 @@ async def api_query(body: QueryBody):
         answer=answer,
         duration_ms=int((time.perf_counter() - started) * 1000),
         naive_relevance=naive_rel,
+        clarify_gate=clarify_gate_meta,
     )
     payload: dict[str, Any] = {
         "thinking": thinking,
@@ -899,7 +910,7 @@ async def _query_stream_events(q: str, mode: str, body: QueryBody) -> AsyncItera
     from query_doc_steering import strip_manual_circled_step_markers  # noqa: WPS433
     from query_progress_hooks import query_progress_hooks, get_naive_relevance, set_query_lightrag, set_query_media_roots, set_query_text_for_images  # noqa: WPS433
     from stream_cot_parser import StreamCotParser  # noqa: WPS433
-    from raganything.clarify_gate import ClarifyRequired  # noqa: WPS433
+    from raganything.clarify_gate import ClarifyBypass, ClarifyRequired  # noqa: WPS433
 
     q = q.strip()
     parser_root = Path(state.parser_output_dir).resolve()
@@ -911,6 +922,20 @@ async def _query_stream_events(q: str, mode: str, body: QueryBody) -> AsyncItera
         yield _sse({"type": "error", "message": detail})
         yield _sse({"type": "done", "mode": mode, "error": True})
         return
+
+    clarify_gate_meta: dict[str, Any] | None = None
+    if isinstance(gate_result, ClarifyBypass) and gate_result.reason == "direct":
+        probe_stats = (
+            gate_result.probe.as_stats()
+            if gate_result.probe is not None
+            else None
+        )
+        clarify_gate_meta = {
+            "required": False,
+            "gate_skipped": "direct",
+            "gate_version": "v4",
+            "original_probe": probe_stats,
+        }
 
     if isinstance(gate_result, ClarifyRequired):
         dump_path = _persist_query_debug_dump(
@@ -929,7 +954,7 @@ async def _query_stream_events(q: str, mode: str, body: QueryBody) -> AsyncItera
                 "text": (
                     gate_result.data.get("message")
                     if gate_result.gate_outcome == "reject"
-                    else "需要澄清：请选择更明确的问法，或保持原问题。"
+                    else "需要澄清：请从下列推荐问法中选择一条。"
                 ),
             }
         )
@@ -1098,6 +1123,7 @@ async def _query_stream_events(q: str, mode: str, body: QueryBody) -> AsyncItera
                             answer=final_answer,
                             duration_ms=int((time.perf_counter() - started) * 1000),
                             naive_relevance=naive_rel,
+                            clarify_gate=clarify_gate_meta,
                         )
                         if naive_rel is not None and not get_naive_relevance():
                             yield _sse({"type": "naive_relevance", "data": naive_rel})
