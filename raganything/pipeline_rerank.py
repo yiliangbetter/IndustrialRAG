@@ -62,6 +62,29 @@ def rerank_release_after_gate() -> bool:
     return _env_flag("RERANK_RELEASE_AFTER_GATE")
 
 
+def _rerank_batch_size() -> int:
+    raw = (os.getenv("RERANK_BATCH_SIZE") or "").strip()
+    if raw.isdigit():
+        return max(1, int(raw))
+    device = _resolve_rerank_device()
+    return 8 if device == "cpu" else 32
+
+
+def _cross_encoder_predict(ce: Any, pairs: list[tuple[str, str]]) -> Any:
+    """Run CrossEncoder.predict with P1 tuning (batch, no progress bar, inference_mode)."""
+    predict_kw: dict[str, Any] = {
+        "batch_size": _rerank_batch_size(),
+        "show_progress_bar": False,
+    }
+    try:
+        import torch
+
+        with torch.inference_mode():
+            return ce.predict(pairs, **predict_kw)
+    except ImportError:
+        return ce.predict(pairs, **predict_kw)
+
+
 def release_cross_encoder() -> None:
     """Drop the global CrossEncoder singleton and free GPU memory if applicable."""
     global _cross_encoder_id, _cross_encoder_device, _cross_encoder
@@ -193,7 +216,7 @@ async def hf_cross_encoder_rerank(
     try:
         ce = _get_cross_encoder(model)
         pairs = [(query, d) for d in documents]
-        scores = await asyncio.to_thread(ce.predict, pairs)
+        scores = await asyncio.to_thread(_cross_encoder_predict, ce, pairs)
         try:
             scores_list = scores.tolist()  # type: ignore[union-attr]
         except Exception:

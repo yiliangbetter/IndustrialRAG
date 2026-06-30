@@ -17,7 +17,8 @@
 | **CPU rerank 对照试验** | ✅ 已做 | `logs/bench_clarify_green8_20260630_100814.txt` |
 | **P0 CUDA 验收** | ✅ 通过 | `logs/bench_probe_timing_green8_20260630_133338.txt` |
 | **green8 端到端 gate** | ✅ 通过 | `logs/bench_clarify_green8_20260630_133531.txt` |
-| **P1 B2** batch / inference_mode | ⏳ 未做 | |
+| **P1 B2** batch / inference_mode | ✅ 已上线 | `RERANK_BATCH_SIZE`、predict 无 progress bar |
+| **P1 验收** | ⚪ 边际收益 | `logs/bench_probe_timing_green8_p1_20260630.txt` — 与 P0 同量级，方差仍来自 mix |
 | **P2 C1** 子进程 rerank | ⏳ 未做 | |
 
 ### P0 验收摘要（CUDA + release，`133338` repeat×2）
@@ -69,13 +70,28 @@ RERANK_RELEASE_AFTER_GATE=1
 
 - `evaluate_clarify_gate` 在 probe 路径 `finally` 中按 `RERANK_RELEASE_AFTER_GATE=1` 再 release 一次
 
-### P1 — predict 本身提速（不改变单例策略时仍有帮助）
+### P1 — predict 本身提速 ✅ 已实施
 
-**B2：predict 参数**
+**B2：predict 参数** — **已完成**
 
-- `RERANK_BATCH_SIZE`（默认 32 或按 GPU/CPU 调）：传给 `CrossEncoder.predict(..., batch_size=...)`
-- `torch.inference_mode()` 包裹 predict（若 ST 版本未内置）
-- `show_progress_bar=False`（避免 tqdm 开销）
+- `RERANK_BATCH_SIZE`：传给 `CrossEncoder.predict(..., batch_size=...)`；未设时 cuda 默认 32、cpu 默认 8
+- `torch.inference_mode()` 包裹 predict
+- `show_progress_bar=False`
+- **不改变** merge 池大小、单 chunk `rerank_score` 或 gate `final_score` 逻辑
+
+### P1 验收摘要（P0 + P1，`p1_20260630` repeat×2）
+
+与 P0-only（`133338`）对照：
+
+| 指标 | P0 `133338` | P0+P1 `p1_20260630` |
+|------|-------------|---------------------|
+| first-pass min | 20.3s | **19.0s** |
+| first-pass med | **27.5s** | 60.4s |
+| first-pass max | **63.8s** | 94.7s |
+| #14 repeat | 33s → 40s (1.24×) | 73s → 74s (**1.00×**) |
+| `final` 分数 | 与 P1 跑次一致（如 #2=3.3813） | 未变 |
+
+**结论**：P1 未带来稳定、显著的端到端 probe 缩短；首轮 med/max 差异主要来自 **mix 检索路径随机性**（关键词、pool 大小），不是 batch_size 本身。P1 价值在于推理路径更规范、可配 `RERANK_BATCH_SIZE`；**热机劣化仍靠 P0 release 解决**。若需再提速，看中期轻量 probe / keyword 稳定，而非继续堆 P1 参数。
 
 ### P2 — 仍不够时
 
@@ -201,6 +217,7 @@ uv run python scripts/standalone_rerank_stress.py --model Qwen/Qwen3-Reranker-0.
 | `scripts/standalone_rerank_stress.py` | 孤立 rerank |
 | `logs/bench_probe_timing_green8_repeat2.txt` | P0 前 CUDA repeat 对照 |
 | `logs/bench_probe_timing_green8_20260630_133338.txt` | **P0 后验收** |
+| `logs/bench_probe_timing_green8_p1_20260630.txt` | P0+P1 对照 |
 | `logs/bench_clarify_green8_20260630_133531.txt` | P0 后 green8 端到端 |
 | `logs/query_dumps/20260630_094523_仿形效果不好_*.json` | P0 前 #4 reject 183s 样例 |
 
