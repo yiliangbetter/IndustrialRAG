@@ -208,6 +208,10 @@ def _capture_llm_context_from_build_result(ctx: Any) -> None:
         if isinstance(maybe_raw, dict):
             raw_data = maybe_raw
             _last_probe_raw_data.set(copy.deepcopy(maybe_raw))
+    if raw_data is not None:
+        from raganything.clarify_context import scope_kg_to_llm_chunks  # noqa: WPS433
+
+        context_str, raw_data = scope_kg_to_llm_chunks(raw_data, context_str)
     if context_str:
         _retrieval_context.set(context_str)
     if raw_data is not None:
@@ -230,6 +234,27 @@ def _capture_llm_context_from_build_result(ctx: Any) -> None:
                 "references": [],
             }
         )
+
+
+def _apply_kg_scope_to_query_context(ctx: Any) -> Any:
+    """Filter KG on the live ``QueryContextResult`` before the answer LLM runs."""
+    if ctx is None or isinstance(ctx, str):
+        return ctx
+    context_str = getattr(ctx, "context", None)
+    raw_data = getattr(ctx, "raw_data", None)
+    if not isinstance(raw_data, dict):
+        return ctx
+    from lightrag.base import QueryContextResult  # noqa: WPS433
+    from raganything.clarify_context import scope_kg_to_llm_chunks  # noqa: WPS433
+
+    scoped_context, scoped_raw = scope_kg_to_llm_chunks(
+        raw_data,
+        context_str if isinstance(context_str, str) else None,
+    )
+    return QueryContextResult(
+        context=scoped_context or "",
+        raw_data=scoped_raw or raw_data,
+    )
 
 
 def get_naive_relevance() -> dict[str, Any] | None:
@@ -544,6 +569,7 @@ async def query_progress_hooks() -> AsyncIterator[asyncio.Queue[dict[str, str]]]
                 context=str(injected.get("context_str") or ""),
                 raw_data=copy.deepcopy(injected.get("raw_data") or {}),
             )
+            ctx = _apply_kg_scope_to_query_context(ctx)
             _capture_llm_context_from_build_result(ctx)
             _sync_query_debug_snapshot()
             return ctx
@@ -554,6 +580,7 @@ async def query_progress_hooks() -> AsyncIterator[asyncio.Queue[dict[str, str]]]
             _query_text.set(query)
             await _ensure_naive_relevance_scored(query)
         ctx = await orig_build_ctx(*args, **kwargs)
+        ctx = _apply_kg_scope_to_query_context(ctx)
         _capture_llm_context_from_build_result(ctx)
         _sync_query_debug_snapshot()
         return ctx

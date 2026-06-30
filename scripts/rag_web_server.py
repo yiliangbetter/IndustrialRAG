@@ -292,9 +292,9 @@ async def _evaluate_clarify_gate(body: QueryBody, mode: str) -> Any:
             body.query.strip(),
             body.candidate_id,
         )
-        if bundle is None:
-            raise HTTPException(400, "clarification cache expired or invalid")
-        set_clarify_context_injection(bundle)
+        # Route 1: inject probe cache. Route 2 (CLARIFY_CANDIDATE_SKIP_PROBE): full aquery.
+        if bundle is not None:
+            set_clarify_context_injection(bundle)
 
     return result
 

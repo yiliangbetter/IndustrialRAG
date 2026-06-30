@@ -8,18 +8,81 @@ warning and skips reranking.
 from __future__ import annotations
 
 import asyncio
+import gc
 import logging
 import os
 from functools import partial
 from pathlib import Path
 from typing import Any, Callable
 
-__all__ = ["build_rerank_model_func_from_env"]
+__all__ = [
+    "build_rerank_model_func_from_env",
+    "hf_cross_encoder_rerank",
+    "release_cross_encoder",
+    "rerank_release_after_gate",
+    "rerank_release_after_predict",
+]
 
 logger = logging.getLogger(__name__)
 
 _cross_encoder_id: str | None = None
+_cross_encoder_device: str | None = None
 _cross_encoder: Any = None
+
+
+def _resolve_rerank_device() -> str:
+    explicit = (
+        os.getenv("RERANK_HF_DEVICE") or os.getenv("RERANK_DEVICE") or ""
+    ).strip()
+    if explicit:
+        return explicit.lower()
+    try:
+        import torch
+
+        if torch.cuda.is_available():
+            return "cuda"
+        if hasattr(torch.backends, "mps") and torch.backends.mps.is_available():
+            return "mps"
+    except ImportError:
+        pass
+    return "cpu"
+
+
+def _env_flag(name: str) -> bool:
+    return (os.getenv(name) or "").strip().lower() in ("1", "true", "yes")
+
+
+def rerank_release_after_predict() -> bool:
+    """When true, drop CrossEncoder singleton after each ``hf_cross_encoder_rerank`` predict."""
+    return _env_flag("RERANK_RELEASE_AFTER_PREDICT")
+
+
+def rerank_release_after_gate() -> bool:
+    """When true, drop CrossEncoder singleton when ``evaluate_clarify_gate`` finishes."""
+    return _env_flag("RERANK_RELEASE_AFTER_GATE")
+
+
+def release_cross_encoder() -> None:
+    """Drop the global CrossEncoder singleton and free GPU memory if applicable."""
+    global _cross_encoder_id, _cross_encoder_device, _cross_encoder
+    if _cross_encoder is None:
+        return
+    device = (_cross_encoder_device or _resolve_rerank_device() or "").lower()
+    ce = _cross_encoder
+    _cross_encoder = None
+    _cross_encoder_id = None
+    _cross_encoder_device = None
+    del ce
+    gc.collect()
+    if device.startswith("cuda"):
+        try:
+            import torch
+
+            if torch.cuda.is_available():
+                torch.cuda.empty_cache()
+        except ImportError:
+            pass
+    logger.debug("RERANK hf: released CrossEncoder (device was %s)", device or "unknown")
 
 
 def _hf_hub_offline_requested() -> bool:
@@ -61,8 +124,13 @@ def _hub_snapshot_dir_cross_encoder(repo_id: str, hf_home: str) -> Path | None:
 
 
 def _get_cross_encoder(model_id: str) -> Any:
-    global _cross_encoder_id, _cross_encoder
-    if _cross_encoder is not None and _cross_encoder_id == model_id:
+    global _cross_encoder_id, _cross_encoder_device, _cross_encoder
+    device = _resolve_rerank_device()
+    if (
+        _cross_encoder is not None
+        and _cross_encoder_id == model_id
+        and _cross_encoder_device == device
+    ):
         return _cross_encoder
     try:
         from sentence_transformers import CrossEncoder
@@ -93,6 +161,7 @@ def _get_cross_encoder(model_id: str) -> Any:
             )
         else:
             logger.info("RERANK hf: loading CrossEncoder from hub/cache for %s", model_id)
+    kwargs["device"] = device
     try:
         _cross_encoder = CrossEncoder(load_id, **kwargs)
     except Exception as e:
@@ -106,6 +175,8 @@ def _get_cross_encoder(model_id: str) -> Any:
         raise
 
     _cross_encoder_id = model_id
+    _cross_encoder_device = device
+    logger.info("RERANK hf: CrossEncoder loaded on device=%s", device)
     return _cross_encoder
 
 
@@ -119,23 +190,27 @@ async def hf_cross_encoder_rerank(
     """Rerank with a local ``sentence_transformers.CrossEncoder`` (no HTTP API)."""
     if not documents:
         return []
-    ce = _get_cross_encoder(model)
-    pairs = [(query, d) for d in documents]
-    scores = await asyncio.to_thread(ce.predict, pairs)
     try:
-        scores_list = scores.tolist()  # type: ignore[union-attr]
-    except Exception:
-        scores_list = [float(s) for s in scores]
-    order = sorted(
-        range(len(scores_list)),
-        key=lambda i: float(scores_list[i]),
-        reverse=True,
-    )
-    if top_n is not None and top_n > 0:
-        order = order[:top_n]
-    return [
-        {"index": i, "relevance_score": float(scores_list[i])} for i in order
-    ]
+        ce = _get_cross_encoder(model)
+        pairs = [(query, d) for d in documents]
+        scores = await asyncio.to_thread(ce.predict, pairs)
+        try:
+            scores_list = scores.tolist()  # type: ignore[union-attr]
+        except Exception:
+            scores_list = [float(s) for s in scores]
+        order = sorted(
+            range(len(scores_list)),
+            key=lambda i: float(scores_list[i]),
+            reverse=True,
+        )
+        if top_n is not None and top_n > 0:
+            order = order[:top_n]
+        return [
+            {"index": i, "relevance_score": float(scores_list[i])} for i in order
+        ]
+    finally:
+        if rerank_release_after_predict():
+            release_cross_encoder()
 
 
 def build_rerank_model_func_from_env() -> Callable[..., Any] | None:

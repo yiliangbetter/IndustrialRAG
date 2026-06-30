@@ -43,6 +43,58 @@ def filter_kg_by_chunk_ids(
     return filtered_entities, filtered_relations
 
 
+def chunk_ids_from_llm_chunks(chunks: list[dict[str, Any]] | None) -> set[str]:
+    ids: set[str] = set()
+    for chunk in chunks or []:
+        if not isinstance(chunk, dict):
+            continue
+        cid = chunk.get("chunk_id") or chunk.get("id")
+        if cid:
+            ids.add(str(cid))
+    return ids
+
+
+def scope_kg_to_llm_chunks(
+    raw_data: dict[str, Any] | None,
+    context_str: str | None = None,
+) -> tuple[str | None, dict[str, Any] | None]:
+    """Keep only KG rows backed by surviving LLM document chunks; rebuild context."""
+    if not isinstance(raw_data, dict):
+        return context_str, raw_data
+
+    data = raw_data.get("data")
+    if not isinstance(data, dict):
+        return context_str, raw_data
+
+    chunks = [row for row in (data.get("chunks") or []) if isinstance(row, dict)]
+    references = [row for row in (data.get("references") or []) if isinstance(row, dict)]
+    entities = [row for row in (data.get("entities") or []) if isinstance(row, dict)]
+    relationships = [
+        row for row in (data.get("relationships") or []) if isinstance(row, dict)
+    ]
+
+    chunk_ids = chunk_ids_from_llm_chunks(chunks)
+    entities_filtered, relationships_filtered = filter_kg_by_chunk_ids(
+        entities, relationships, chunk_ids
+    )
+
+    raw_filtered = copy.deepcopy(raw_data)
+    filtered_data = raw_filtered.setdefault("data", {})
+    filtered_data["entities"] = entities_filtered
+    filtered_data["relationships"] = relationships_filtered
+    filtered_data["chunks"] = chunks
+    filtered_data["references"] = references
+
+    rebuilt_context = rebuild_kg_context_str(
+        entities_filtered,
+        relationships_filtered,
+        chunks,
+        references,
+    )
+    final_context = rebuilt_context.strip() or (context_str or "").strip() or None
+    return final_context, raw_filtered
+
+
 def rebuild_kg_context_str(
     entities: list[dict[str, Any]],
     relationships: list[dict[str, Any]],
@@ -153,42 +205,24 @@ def build_cached_bundle(
     references = [
         ref for ref in (data.get("references") or []) if isinstance(ref, dict)
     ]
-    entities = [
-        row for row in (data.get("entities") or []) if isinstance(row, dict)
-    ]
-    relationships = [
-        row for row in (data.get("relationships") or []) if isinstance(row, dict)
-    ]
 
-    chunk_ids = {str(chunk.get("chunk_id")) for chunk in chunks if chunk.get("chunk_id")}
-    entities_filtered, relationships_filtered = filter_kg_by_chunk_ids(
-        entities, relationships, chunk_ids
-    )
+    final_context, raw_filtered = scope_kg_to_llm_chunks(raw_data, context_str)
+    if not isinstance(raw_filtered, dict):
+        return None
 
-    raw_filtered = copy.deepcopy(raw_data)
-    filtered_data = raw_filtered.setdefault("data", {})
-    filtered_data["entities"] = entities_filtered
-    filtered_data["relationships"] = relationships_filtered
-    filtered_data["chunks"] = chunks
-    filtered_data["references"] = references
-
-    rebuilt_context = rebuild_kg_context_str(
-        entities_filtered,
-        relationships_filtered,
-        chunks,
-        references,
-    )
-    final_context = rebuilt_context.strip() or (context_str or "").strip()
+    filtered_data = raw_filtered.get("data") or {}
+    entities_filtered = filtered_data.get("entities") or []
+    relationships_filtered = filtered_data.get("relationships") or []
 
     return CachedQueryBundle(
         query=(query or "").strip(),
-        context_str=final_context,
+        context_str=final_context or "",
         raw_data=raw_filtered,
         document_chunks=chunks,
         entities_filtered=entities_filtered,
         relationships_filtered=relationships_filtered,
         reference_list=references,
-        chunk_ids=chunk_ids,
+        chunk_ids=chunk_ids_from_llm_chunks(chunks),
     )
 
 

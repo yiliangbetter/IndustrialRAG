@@ -26,6 +26,10 @@ from raganything.clarify_context import (
     build_cached_bundle,
     format_chunk_previews,
 )
+from raganything.pipeline_rerank import (
+    release_cross_encoder,
+    rerank_release_after_gate,
+)
 
 CLARIFY_UNRELATED_MESSAGE = (
     "您的问题与当前知识库内容关联度较低，暂无法基于知识库作答。"
@@ -54,6 +58,7 @@ class ClarifyBypass:
 
     reason: Literal["disabled", "direct", "use_candidate"]
     probe: RetrievalProbeResult | None = None
+    gate_timing: dict[str, Any] | None = None
 
 
 @dataclass(frozen=True)
@@ -143,6 +148,11 @@ def clarify_direct_rerank_min() -> float:
     return _env_float("CLARIFY_DIRECT_RERANK_MIN", 7.0)
 
 
+def clarify_candidate_skip_probe() -> bool:
+    """Route 2: accept LLM-generated recommendations without per-candidate rerank probe."""
+    return _env_bool("CLARIFY_CANDIDATE_SKIP_PROBE", False)
+
+
 def _chunk_rerank_score(doc: dict[str, Any]) -> float | None:
     """CrossEncoder ``rerank_score`` only (not vector ``score`` fallback)."""
     raw = doc.get("rerank_score")
@@ -202,6 +212,10 @@ def _summarize_llm_chunks(
 def _probe_passes_direct_threshold(probe: RetrievalProbeResult) -> bool:
     fs = probe.final_score
     return fs is not None and fs > clarify_direct_rerank_min()
+
+
+def _elapsed_s(start: float) -> float:
+    return round(time.perf_counter() - start, 1)
 
 
 async def probe_llm_retrieval(
@@ -418,6 +432,7 @@ async def _generate_candidate_lines(
     bundle: CachedQueryBundle | None,
     count: int,
     exclude: set[str],
+    parse_limit: int | None = None,
 ) -> list[str]:
     k = max(count, 1)
     exclude_block = ""
@@ -446,7 +461,44 @@ async def _generate_candidate_lines(
     )
 
     raw = await _call_lightrag_llm(lightrag, prompt, system_prompt=system)
-    return _parse_candidate_lines(raw, limit=k + 2)
+    return _parse_candidate_lines(raw, limit=parse_limit if parse_limit is not None else k + 2)
+
+
+def _candidate_generation_batch_size(
+    *,
+    strategy: str,
+    k_target: int,
+    answerable_count: int,
+    skip_probe: bool,
+) -> int:
+    if strategy == "first":
+        return 1
+    need = max(k_target - answerable_count, 1)
+    if skip_probe:
+        return need
+    return max(need + 2, k_target)
+
+
+def _append_llm_only_candidate(
+    *,
+    answerable: list[dict[str, Any]],
+    option_entries: dict[str, dict[str, Any]],
+    line: str,
+    direct_min: float,
+) -> None:
+    cid = f"c{len(answerable) + 1}"
+    answerable.append(
+        {
+            "id": cid,
+            "text": line,
+            "chunk_count": None,
+            "final_score": None,
+            "max_rerank_score": None,
+            "min_rerank_threshold": clarify_candidate_min_rerank_score(),
+            "direct_rerank_min": direct_min,
+        }
+    )
+    option_entries[cid] = {"query": line, "bundle": None}
 
 
 async def _collect_high_confidence_candidates(
@@ -461,39 +513,80 @@ async def _collect_high_confidence_candidates(
     max_rounds = clarify_candidate_max_rounds()
     max_probes = clarify_candidate_max_probes()
     direct_min = clarify_direct_rerank_min()
+    skip_probe = clarify_candidate_skip_probe()
     seen: set[str] = {query.strip()}
     answerable: list[dict[str, Any]] = []
     option_entries: dict[str, dict[str, Any]] = {}
     rounds_used = 0
     probes_used = 0
+    gen_rounds: list[dict[str, Any]] = []
+    probe_attempts: list[dict[str, Any]] = []
     while rounds_used < max_rounds and len(answerable) < k_target:
-        if max_probes is not None and probes_used >= max_probes:
+        if not skip_probe and max_probes is not None and probes_used >= max_probes:
             break
 
         rounds_used += 1
-        if strategy == "first":
-            batch_size = 1
-        else:
-            need = k_target - len(answerable)
-            batch_size = max(need + 2, k_target)
+        batch_size = _candidate_generation_batch_size(
+            strategy=strategy,
+            k_target=k_target,
+            answerable_count=len(answerable),
+            skip_probe=skip_probe,
+        )
 
+        t_gen = time.perf_counter()
         lines = await _generate_candidate_lines(
             lightrag,
             query=query,
             bundle=original_bundle,
             count=batch_size,
             exclude=seen,
+            parse_limit=batch_size if skip_probe else None,
+        )
+        gen_rounds.append(
+            {
+                "round": rounds_used,
+                "duration_s": _elapsed_s(t_gen),
+                "lines_requested": batch_size,
+                "lines_returned": len(lines),
+            }
         )
 
         for line in lines:
-            if max_probes is not None and probes_used >= max_probes:
+            if not skip_probe and max_probes is not None and probes_used >= max_probes:
                 break
             if line in seen:
                 continue
             seen.add(line)
+
+            if skip_probe:
+                _append_llm_only_candidate(
+                    answerable=answerable,
+                    option_entries=option_entries,
+                    line=line,
+                    direct_min=direct_min,
+                )
+                if strategy == "first" and answerable:
+                    break
+                if len(answerable) >= k_target:
+                    break
+                continue
+
             probes_used += 1
+            t_probe = time.perf_counter()
             probe = await probe_llm_retrieval_full(lightrag, line, mode=mode)
-            if not _probe_passes_direct_threshold(probe) or probe.bundle is None:
+            probe_s = _elapsed_s(t_probe)
+            passed = _probe_passes_direct_threshold(probe) and probe.bundle is not None
+            probe_attempts.append(
+                {
+                    "index": probes_used,
+                    "round": rounds_used,
+                    "text": line[:100],
+                    "duration_s": probe_s,
+                    "final_score": probe.final_score,
+                    "passed": passed,
+                }
+            )
+            if not passed:
                 continue
 
             cid = f"c{len(answerable) + 1}"
@@ -527,13 +620,20 @@ async def _collect_high_confidence_candidates(
             rekeyed_options[new_id] = option_entries[old_id]
     option_entries = rekeyed_options
 
+    gen_total = round(sum(float(r.get("duration_s") or 0) for r in gen_rounds), 1)
+    probe_total = round(
+        sum(float(p.get("duration_s") or 0) for p in probe_attempts), 1
+    )
     meta = {
         "k_requested": k_target,
         "k_answerable": len(answerable),
         "rounds_used": rounds_used,
         "probes_used": probes_used,
         "strategy": strategy,
-        "candidate_validation": "final_score_gt_direct_min",
+        "candidate_skip_probe": skip_probe,
+        "candidate_validation": (
+            "llm_only" if skip_probe else "final_score_gt_direct_min"
+        ),
         "min_rerank_threshold": clarify_candidate_min_rerank_score(),
         "direct_rerank_min": direct_min,
         "reason": (
@@ -541,6 +641,13 @@ async def _collect_high_confidence_candidates(
             if len(answerable) >= k_target
             else "cannot_fill_high_confidence_candidates"
         ),
+        "gate_timing": {
+            "candidate_gen_rounds": gen_rounds,
+            "candidate_probes": probe_attempts,
+            "candidate_gen_total_s": gen_total,
+            "candidate_probe_total_s": probe_total,
+            "clarify_loop_total_s": round(gen_total + probe_total, 1),
+        },
     }
     return answerable, option_entries, meta
 
@@ -607,10 +714,30 @@ async def evaluate_clarify_gate(
     if not is_clarify_gate_enabled(mode):
         return ClarifyBypass("disabled")
 
+    try:
+        return await _evaluate_clarify_gate_probed(
+            lightrag,
+            q,
+            mode=mode,
+        )
+    finally:
+        if rerank_release_after_gate():
+            release_cross_encoder()
+
+
+async def _evaluate_clarify_gate_probed(
+    lightrag: Any,
+    q: str,
+    *,
+    mode: str | None = None,
+) -> _ClarifyResult:
     query_mode = (mode or "mix").strip() or "mix"
+    t_orig = time.perf_counter()
     original_probe = await probe_llm_retrieval_full(lightrag, q, mode=query_mode)
+    orig_probe_s = _elapsed_s(t_orig)
     final_score = original_probe.final_score
     direct_min = clarify_direct_rerank_min()
+    gate_timing: dict[str, Any] = {"original_probe_s": orig_probe_s}
 
     if final_score is None:
         generation = {
@@ -620,6 +747,7 @@ async def evaluate_clarify_gate(
             "probes_used": 0,
             "direct_rerank_min": direct_min,
             "reason": "no_final_chunks",
+            "gate_timing": {**gate_timing, "gate_total_s": orig_probe_s},
         }
         clarification_id_out = _register_clarification(
             original_query=q,
@@ -640,7 +768,8 @@ async def evaluate_clarify_gate(
         return ClarifyRequired(data, gate_outcome="reject")
 
     if final_score > direct_min:
-        return ClarifyBypass("direct", probe=original_probe)
+        gate_timing["gate_total_s"] = orig_probe_s
+        return ClarifyBypass("direct", probe=original_probe, gate_timing=gate_timing)
 
     candidates, candidate_options, generation = await _collect_high_confidence_candidates(
         lightrag,
@@ -648,6 +777,15 @@ async def evaluate_clarify_gate(
         original_bundle=original_probe.bundle,
         mode=query_mode,
     )
+    loop_timing = dict(generation.get("gate_timing") or {})
+    gate_timing = {
+        **gate_timing,
+        **loop_timing,
+        "gate_total_s": round(
+            orig_probe_s + float(loop_timing.get("clarify_loop_total_s") or 0), 1
+        ),
+    }
+    generation["gate_timing"] = gate_timing
 
     k_target = clarify_candidate_k()
     if len(candidates) < k_target:
