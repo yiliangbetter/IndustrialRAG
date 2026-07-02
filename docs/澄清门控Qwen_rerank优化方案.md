@@ -3,6 +3,7 @@
 > 日期：2026-06-30（P0 已落地并验证）  
 > 前提：**继续使用 Qwen rerank**（`Qwen/Qwen3-Reranker-0.6B`），不切换到 BGE（BGE 虽快但分数尺度与 Qwen 不一致，易混淆阈值）。  
 > 关联诊断：[`docs/澄清门控gate耗时诊断报告_20260629.md`](./澄清门控gate耗时诊断报告_20260629.md)  
+> **代码实现说明**：[`docs/澄清门控Qwen_rerank优化实现说明.md`](./澄清门控Qwen_rerank优化实现说明.md)  
 > 路线 2（skip probe）：[`docs/澄清门控优化路线.md`](./澄清门控优化路线.md)
 
 ---
@@ -210,8 +211,9 @@ uv run python scripts/standalone_rerank_stress.py --model Qwen/Qwen3-Reranker-0.
 
 | 路径 | 说明 |
 |------|------|
-| `raganything/pipeline_rerank.py` | `RERANK_HF_DEVICE`、`release_cross_encoder`、B1/B3 开关 |
+| `raganything/pipeline_rerank.py` | `RERANK_HF_DEVICE`、`release_cross_encoder`、B1/B3 开关、P1 predict |
 | `raganything/clarify_gate.py` | gate v4、B3 gate 结束 release |
+| [`docs/澄清门控Qwen_rerank优化实现说明.md`](./澄清门控Qwen_rerank优化实现说明.md) | **代码级实现说明（含代码块）** |
 | `scripts/bench_probe_timing_green8.py` | probe 耗时 + VRAM |
 | `scripts/bench_clarify_green8.py` | gate/answer 分阶段批测 |
 | `scripts/standalone_rerank_stress.py` | 孤立 rerank |

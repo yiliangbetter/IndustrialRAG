@@ -1,8 +1,15 @@
 #!/usr/bin/env python3
-"""Web-path batch test Q1–Q17 graded against docs/测试例参考答案.md key points.
+"""Web-path batch test Q1–Q17 (shili17) graded against docs/测试例参考答案.md.
 
-Each case writes a structured query dump to ``logs/query_dumps/`` (prefix ``Qxx_``)
-unless ``--no-dump``. Dumps include rerank scores, LLM input chunks, and image debug.
+Each case runs a clarify-gate probe (``probe_llm_retrieval_full``) to record
+``final_score``. Shili17 expects **direct** gate (``final_score > CLARIFY_DIRECT_RERANK_MIN``,
+default 7) on every question; sub-threshold scores are flagged prominently.
+
+Then the full web ``aquery`` answer path runs (no clarify pick UI). Query dumps go to
+``logs/query_dumps/`` (prefix ``Qxx_``) unless ``--no-dump``.
+
+Use ``--rounds N`` to run the full batch N times; each round writes its own report
+(``…_r01.md``, ``…_r02.md``, … when N > 1).
 """
 
 from __future__ import annotations
@@ -17,6 +24,7 @@ import sys
 import time
 from datetime import datetime
 from pathlib import Path
+from typing import Any
 from urllib.parse import parse_qs, urlparse
 
 from dotenv import load_dotenv
@@ -201,6 +209,15 @@ REF: dict[int, dict] = {
         "image_answer_pairs": True,
     },
 }
+
+
+def _format_duration(seconds: float) -> str:
+    """Human-readable duration for reports (minutes + seconds)."""
+    if seconds >= 60:
+        minutes = int(seconds // 60)
+        remainder = seconds % 60
+        return f"{minutes}m {remainder:.1f}s"
+    return f"{seconds:.1f}s"
 
 
 def _load_rpc():
@@ -400,8 +417,151 @@ def grade_images(result: dict, spec: dict) -> tuple[bool, list[str]]:
     return True, notes
 
 
+def _gate_band(
+    final_score: float | None, *, direct_min: float, answerable: bool
+) -> str:
+    """Map probe stats to v4 gate band (reject / offer / direct)."""
+    if not answerable or final_score is None:
+        return "reject"
+    if final_score > direct_min:
+        return "direct"
+    return "offer"
+
+
+def _gate_direct_ok(gate_probe: dict[str, Any] | None) -> bool | None:
+    """True when probe qualifies for Web direct path (final > direct_min)."""
+    if not gate_probe:
+        return None
+    fs = gate_probe.get("final_score")
+    direct_min = gate_probe.get("direct_rerank_min")
+    if not gate_probe.get("answerable") or fs is None:
+        return False
+    try:
+        return float(fs) > float(direct_min)
+    except (TypeError, ValueError):
+        return False
+
+
+def _format_gate_final_score(gate_probe: dict[str, Any]) -> str:
+    """Human-readable final_score; None only on reject (not offer)."""
+    fs = gate_probe.get("final_score")
+    if isinstance(fs, (int, float)):
+        return f"{fs:.4f}"
+
+    min_thr = gate_probe.get("min_rerank_threshold")
+    llm_total = int(gate_probe.get("llm_chunk_total") or 0)
+    max_any = gate_probe.get("max_rerank_any")
+    if gate_probe.get("scores_unavailable"):
+        return f"无 final（{llm_total} 个 chunk 均无 rerank_score）"
+    if llm_total == 0:
+        return "无 final（probe 未取到 LLM chunk）"
+    if isinstance(max_any, (int, float)):
+        return f"无 final（池内最高 rerank={max_any:.4f} < min_rerank {min_thr}）"
+    return f"无 final（无 chunk ≥ min_rerank {min_thr}）"
+
+
+def _gate_alert_message(cid: int, gate_probe: dict[str, Any]) -> str:
+    direct_min = gate_probe.get("direct_rerank_min")
+    band = gate_probe.get("gate_band")
+    fs_txt = _format_gate_final_score(gate_probe)
+    if band == "offer":
+        kind = f"offer（有分但未 > {direct_min}）"
+    elif band == "reject":
+        kind = "reject（不可答，无 qualifying final）"
+    else:
+        kind = str(band)
+    return (
+        f"Q{cid:02d} gate 未达 direct：{kind} · final_score={fs_txt} "
+        f"· qualifying_chunks={gate_probe.get('chunk_count')} · "
+        f"llm_chunks={gate_probe.get('llm_chunk_total')}"
+    )
+
+
+def _print_gate_alert(cid: int, gate_probe: dict[str, Any]) -> None:
+    banner = "!" * 72
+    print(f"\n{banner}", flush=True)
+    print(f"  *** GATE ALERT（shili17 期望 final > 7）***", flush=True)
+    print(f"  {_gate_alert_message(cid, gate_probe)}", flush=True)
+    print(f"{banner}\n", flush=True)
+
+
+def _collect_gate_failures(rows: list[dict]) -> list[dict]:
+    out: list[dict] = []
+    for row in rows:
+        gp = row.get("gate_probe")
+        if not isinstance(gp, dict):
+            continue
+        if gp.get("gate_direct_ok") is False:
+            out.append(row)
+    return out
+
+
+def _print_gate_failure_summary(rows: list[dict]) -> int:
+    failures = _collect_gate_failures(rows)
+    probed = sum(1 for r in rows if isinstance(r.get("gate_probe"), dict))
+    direct_ok = probed - len(failures)
+    if probed:
+        print(
+            f"\nGate direct（final > 7）：{direct_ok}/{probed} 达标",
+            flush=True,
+        )
+    if not failures:
+        return 0
+    print(
+        f"\n{'=' * 72}\n"
+        f"GATE DIRECT 未达标 {len(failures)}/{probed} — shili17 期望全部 > 7\n"
+        f"{'=' * 72}",
+        flush=True,
+    )
+    for row in failures:
+        print(f"  • {_gate_alert_message(int(row['id']), row['gate_probe'])}", flush=True)
+        print(f"    问句：{row.get('query', '')[:60]}", flush=True)
+    print(f"{'=' * 72}\n", flush=True)
+    return len(failures)
+
+
+async def _run_gate_probe(lightrag: Any, query: str, *, mode: str) -> dict[str, Any]:
+    from raganything.clarify_gate import (  # noqa: WPS433
+        clarify_direct_rerank_min,
+        probe_llm_retrieval_full,
+    )
+
+    t0 = time.perf_counter()
+    probe = await probe_llm_retrieval_full(lightrag, query, mode=mode)
+    elapsed_s = time.perf_counter() - t0
+    direct_min = clarify_direct_rerank_min()
+    gate_band = _gate_band(
+        probe.final_score,
+        direct_min=direct_min,
+        answerable=probe.answerable,
+    )
+    payload = {
+        "final_score": probe.final_score,
+        "chunk_count": probe.chunk_count,
+        "llm_chunk_total": probe.llm_chunk_total,
+        "answerable": probe.answerable,
+        "min_rerank_threshold": probe.min_rerank_threshold,
+        "direct_rerank_min": direct_min,
+        "gate_band": gate_band,
+        "scores_unavailable": probe.scores_unavailable,
+        "max_rerank_any": probe.max_rerank_any,
+        "duration_ms": int(elapsed_s * 1000),
+        "duration_s": round(elapsed_s, 2),
+        "duration_text": _format_duration(elapsed_s),
+        "mode": probe.mode,
+    }
+    payload["gate_direct_ok"] = _gate_direct_ok(payload)
+    return payload
+
+
 async def run_cases(
-    ids: list[int], *, mode: str, wd: Path, pod: Path, write_dumps: bool = True
+    ids: list[int],
+    *,
+    mode: str,
+    wd: Path,
+    pod: Path,
+    write_dumps: bool = True,
+    skip_gate: bool = False,
 ) -> list[dict]:
     from query_debug_dump import persist_query_debug_dump
     from query_doc_steering import strip_manual_circled_step_markers
@@ -422,6 +582,18 @@ async def run_cases(
         for cid in ids:
             spec = REF[cid]
             query = spec["query"]
+            gate_probe: dict[str, Any] | None = None
+            if not skip_gate:
+                gate_probe = await _run_gate_probe(rag.lightrag, query, mode=mode)
+                fs_txt = _format_gate_final_score(gate_probe)
+                print(
+                    f"Q{cid:02d} gate {gate_probe.get('gate_band')} "
+                    f"final={fs_txt} chunks={gate_probe.get('chunk_count')} "
+                    f"{gate_probe.get('duration_text')}",
+                    flush=True,
+                )
+                if gate_probe.get("gate_direct_ok") is False:
+                    _print_gate_alert(cid, gate_probe)
             t0 = time.perf_counter()
             thinking = ""
             async with query_progress_hooks():
@@ -436,7 +608,9 @@ async def run_cases(
                 thinking, answer = parse_complete_cot(raw or "")
                 answer = strip_manual_circled_step_markers(answer.strip())
                 inline = finalize_inline_images(answer_text=answer)
-            elapsed = int((time.perf_counter() - t0) * 1000)
+            elapsed_ms = int((time.perf_counter() - t0) * 1000)
+            elapsed_s = elapsed_ms / 1000.0
+            elapsed_text = _format_duration(elapsed_s)
             dump_path: Path | None = None
             if write_dumps:
                 dump_path = persist_query_debug_dump(
@@ -445,15 +619,18 @@ async def run_cases(
                     parser_root=parser_root,
                     thinking=thinking or None,
                     answer=answer or None,
-                    duration_ms=elapsed,
+                    duration_ms=elapsed_ms,
                     enabled=True,
                     name_prefix=f"Q{cid:02d}",
                 )
             row = {
                 "id": cid,
                 "query": query,
+                "gate_probe": gate_probe,
                 "answer": answer,
-                "duration_ms": elapsed,
+                "duration_ms": elapsed_ms,
+                "duration_s": round(elapsed_s, 2),
+                "duration_text": elapsed_text,
                 "images": inline.get("images") or [],
                 "placements": inline.get("placements") or [],
                 "debug": inline.get("debug") or {},
@@ -473,7 +650,7 @@ async def run_cases(
             print(
                 f"Q{cid:02d} {'PASS' if g['ok'] else 'FAIL'} "
                 f"text={g['text_ok']} img={g['image_ok']} "
-                f"{elapsed}ms imgs={len(row['images'])} pl={len(row['placements'])}",
+                f"{elapsed_text} imgs={len(row['images'])} pl={len(row['placements'])}",
                 flush=True,
             )
             if not g["text_ok"]:
@@ -545,38 +722,86 @@ def write_report(
     mode: str,
     wd: Path,
     media_root: Path,
+    round_no: int | None = None,
+    rounds_total: int | None = None,
 ) -> None:
     passed = sum(1 for r in rows if r["grade"]["ok"])
     text_only = sum(1 for r in rows if r["grade"]["text_ok"])
+    gate_failures = _collect_gate_failures(rows)
+    probed = sum(1 for r in rows if isinstance(r.get("gate_probe"), dict))
+    direct_ok = probed - len(gate_failures)
     ids_label = ", ".join(f"Q{r['id']}" for r in rows)
     lines = [
         f"# Web 路径批测（{ids_label}）",
         "",
         f"- 时间：{datetime.now().astimezone().isoformat()}",
-        f"- 模式：{mode}",
-        f"- 工作目录：`{wd}`",
-        f"- 媒体根：`{media_root}`",
-        f"- 参考答案：`docs/测试例参考答案.md`",
-        f"- 通过（文字+配图）：**{passed}/{len(rows)}**",
-        f"- 仅文字通过：**{text_only}/{len(rows)}**",
-        f"- Query dumps：`logs/query_dumps/`（本批 JSON 见各题 `dump_path`）",
-        "",
-        "## 汇总",
-        "",
-        "| ID | 结果 | 文字 | 配图 | 耗时(ms) | 图数 | 图注摘要 |",
-        "|----|------|------|------|----------|------|----------|",
     ]
+    if round_no is not None and rounds_total is not None and rounds_total > 1:
+        lines.append(f"- 轮次：**{round_no}/{rounds_total}**")
+    lines.extend(
+        [
+            f"- 模式：{mode}",
+            f"- 工作目录：`{wd}`",
+            f"- 媒体根：`{media_root}`",
+            f"- 参考答案：`docs/测试例参考答案.md`",
+            f"- 通过（文字+配图）：**{passed}/{len(rows)}**",
+            f"- 仅文字通过：**{text_only}/{len(rows)}**",
+        ]
+    )
+    if probed:
+        lines.append(
+            f"- Gate direct（final > 7，shili17 期望全达标）：**{direct_ok}/{probed}**"
+        )
+    lines.extend(
+        [
+            f"- Query dumps：`logs/query_dumps/`（本批 JSON 见各题 `dump_path`）",
+            "",
+        ]
+    )
+    if gate_failures:
+        lines.extend(
+            [
+                "## ⚠️ Gate direct 未达标（offer：有分但 ≤7；reject：无 final）",
+                "",
+                "shili17 期望每题门控 probe 均为 **direct**（`final_score > CLARIFY_DIRECT_RERANK_MIN`）。",
+                "",
+            ]
+        )
+        for row in gate_failures:
+            gp = row["gate_probe"]
+            fs_txt = _format_gate_final_score(gp)
+            lines.append(
+                f"- **Q{row['id']}** · {fs_txt} · band=`{gp.get('gate_band')}` · "
+                f"chunks={gp.get('chunk_count')} · {row.get('query', '')}"
+            )
+        lines.append("")
+    lines.extend(
+        [
+            "## 汇总",
+            "",
+            "| ID | 结果 | 文字 | 配图 | gate final | gate | 耗时 | 图数 | 图注摘要 |",
+            "|----|------|------|------|------------|------|------|------|----------|",
+        ]
+    )
     for r in rows:
         g = r["grade"]
         caps = [str(i.get("caption") or "") for i in r.get("images") or []]
         cap_summary = "; ".join(c for c in caps if c) or "—"
         if len(cap_summary) > 48:
             cap_summary = cap_summary[:45] + "…"
+        gp = r.get("gate_probe") or {}
+        fs = gp.get("final_score")
+        fs_cell = _format_gate_final_score(gp) if gp else "—"
+        gate_band = str(gp.get("gate_band") or "—")
+        if gp.get("gate_direct_ok") is False:
+            fs_cell = f"**⚠️ {fs_cell}**"
+            gate_band = f"**⚠️ {gate_band}**"
         lines.append(
             f"| Q{r['id']} | {'✓' if g['ok'] else '✗'} | "
             f"{'✓' if g['text_ok'] else '✗'} | "
             f"{'✓' if g['image_ok'] else '✗'} | "
-            f"{r['duration_ms']} | {len(r.get('images') or [])} | {cap_summary} |"
+            f"{fs_cell} | {gate_band} | "
+            f"{r.get('duration_text') or _format_duration((r.get('duration_ms') or 0) / 1000)} | {len(r.get('images') or [])} | {cap_summary} |"
         )
     lines.append("")
     for r in rows:
@@ -588,8 +813,25 @@ def write_report(
         lines.append(f"**问题**：{r['query']}")
         lines.append("")
         lines.append(
-            f"*耗时 {r['duration_ms']} ms · 文字 {g['text_ok']} · 配图 {g['image_ok']}*"
+            f"*答题耗时 {r.get('duration_text') or _format_duration((r.get('duration_ms') or 0) / 1000)} · 文字 {g['text_ok']} · 配图 {g['image_ok']}*"
         )
+        gp = r.get("gate_probe") or {}
+        if gp:
+            fs_txt = _format_gate_final_score(gp)
+            prefix = "- 门控 probe："
+            if gp.get("gate_direct_ok") is False:
+                prefix = (
+                    f"- **⚠️ GATE 未达 direct（期望 final > {gp.get('direct_rerank_min')}）** · "
+                    "门控 probe："
+                )
+            lines.append(
+                f"{prefix}band=`{gp.get('gate_band')}` · "
+                f"final_score={fs_txt} · qualifying_chunks={gp.get('chunk_count')} · "
+                f"llm_chunks={gp.get('llm_chunk_total')} · "
+                f"probe耗时={gp.get('duration_text') or _format_duration((gp.get('duration_ms') or 0) / 1000)} · "
+                f"min_rerank={gp.get('min_rerank_threshold')} · "
+                f"direct_min={gp.get('direct_rerank_min')}"
+            )
         lines.append(f"- 参考答案要点：{_expected_image_hint(spec)}")
         if g["text_miss"]:
             lines.append(f"- 文字缺失：{', '.join(g['text_miss'])}")
@@ -673,6 +915,69 @@ def _parse_ids(raw: str | None) -> list[int]:
     return out
 
 
+async def run_all_rounds(
+    ids: list[int],
+    *,
+    mode: str,
+    wd: Path,
+    pod: Path,
+    write_dumps: bool,
+    skip_gate: bool,
+    rounds: int,
+    report_dir: Path,
+    session_stamp: str,
+    suffix: str,
+) -> tuple[list[dict[str, Any]], bool]:
+    """Run one or more full batches in a single event loop (required for --rounds > 1)."""
+    round_summaries: list[dict[str, Any]] = []
+    any_fail = False
+
+    for rnd in range(1, rounds + 1):
+        if rounds > 1:
+            print(f"\n{'=' * 60}\n=== Round {rnd}/{rounds} ===\n{'=' * 60}", flush=True)
+        rows = await run_cases(
+            ids,
+            mode=mode,
+            wd=wd,
+            pod=pod,
+            write_dumps=write_dumps,
+            skip_gate=skip_gate,
+        )
+        round_tag = f"_r{rnd:02d}" if rounds > 1 else ""
+        json_path = report_dir / f"{session_stamp}_{suffix}{round_tag}.json"
+        md_path = report_dir / f"{session_stamp}_{suffix}{round_tag}.md"
+        json_path.write_text(json.dumps(rows, ensure_ascii=False, indent=2), encoding="utf-8")
+        write_report(
+            md_path,
+            rows,
+            mode=mode,
+            wd=wd,
+            media_root=pod,
+            round_no=rnd if rounds > 1 else None,
+            rounds_total=rounds if rounds > 1 else None,
+        )
+        passed = sum(1 for r in rows if r["grade"]["ok"])
+        gate_fail_count = _print_gate_failure_summary(rows)
+        print(f"\nReport: {md_path}", flush=True)
+        print(f"Answer grade: {passed}/{len(rows)} passed", flush=True)
+        round_fail = bool(gate_fail_count) or passed < len(rows)
+        if round_fail:
+            any_fail = True
+        round_summaries.append(
+            {
+                "round": rnd,
+                "md_path": str(md_path),
+                "json_path": str(json_path),
+                "passed": passed,
+                "total": len(rows),
+                "gate_fail_count": gate_fail_count,
+                "ok": not round_fail,
+            }
+        )
+
+    return round_summaries, any_fail
+
+
 def main() -> None:
     parser = argparse.ArgumentParser(description="Web-path batch test vs 测试例参考答案")
     parser.add_argument(
@@ -681,11 +986,24 @@ def main() -> None:
         help="Comma-separated case ids, e.g. 2,3,8,17 or Q2,Q3 (default: all Q1–Q17)",
     )
     parser.add_argument(
+        "--skip-gate",
+        action="store_true",
+        help="Skip clarify gate probe (no final_score; faster, old behavior)",
+    )
+    parser.add_argument(
         "--no-dump",
         action="store_true",
         help="Skip writing logs/query_dumps/*.json per case (default: write dumps)",
     )
+    parser.add_argument(
+        "--rounds",
+        type=int,
+        default=int(os.getenv("RAG_WEB_PATH_ROUNDS", "1")),
+        help="Run the full batch N times consecutively (default: 1; env RAG_WEB_PATH_ROUNDS)",
+    )
     args = parser.parse_args()
+    if args.rounds < 1:
+        raise SystemExit("--rounds must be >= 1")
     ids = _parse_ids(args.ids)
     wd = Path(os.getenv("RAG_WEB_WORKING_DIR") or (_ROOT / "data" / "rag_storage")).resolve()
     pod = Path(
@@ -693,24 +1011,47 @@ def main() -> None:
     ).resolve()
     mode = os.getenv("RAG_QUERY_MODE", "mix")
     label = ", ".join(f"Q{i}" for i in ids)
-    print(f"Running {label} web path, wd={wd}", flush=True)
+    rounds_label = f", {args.rounds} round(s)" if args.rounds > 1 else ""
+    print(f"Running {label} web path{rounds_label}, wd={wd}", flush=True)
     if not args.no_dump:
         print("Query dumps: logs/query_dumps/ (per case, prefix Qxx)", flush=True)
-    rows = asyncio.run(
-        run_cases(ids, mode=mode, wd=wd, pod=pod, write_dumps=not args.no_dump)
-    )
-    stamp = datetime.now().astimezone().strftime("%Y%m%d_%H%M%S")
+    if not args.skip_gate:
+        print("Gate probe: probe_llm_retrieval_full (mix + rerank, final_score)", flush=True)
     report_dir = _ROOT / "logs" / "web_path_q1_17"
     report_dir.mkdir(parents=True, exist_ok=True)
+    session_stamp = datetime.now().astimezone().strftime("%Y%m%d_%H%M%S")
     suffix = f"q{'_'.join(str(i) for i in ids)}" if len(ids) < 17 else "all"
-    json_path = report_dir / f"{stamp}_{suffix}.json"
-    md_path = report_dir / f"{stamp}_{suffix}.md"
-    json_path.write_text(json.dumps(rows, ensure_ascii=False, indent=2), encoding="utf-8")
-    write_report(md_path, rows, mode=mode, wd=wd, media_root=pod)
-    passed = sum(1 for r in rows if r["grade"]["ok"])
-    print(f"\nReport: {md_path}", flush=True)
-    print(f"Total: {passed}/{len(rows)} passed", flush=True)
-    if passed < len(rows):
+    round_summaries, any_fail = asyncio.run(
+        run_all_rounds(
+            ids,
+            mode=mode,
+            wd=wd,
+            pod=pod,
+            write_dumps=not args.no_dump,
+            skip_gate=args.skip_gate,
+            rounds=args.rounds,
+            report_dir=report_dir,
+            session_stamp=session_stamp,
+            suffix=suffix,
+        )
+    )
+
+    if args.rounds > 1:
+        print(f"\n{'=' * 60}\nMulti-round summary ({args.rounds} rounds)", flush=True)
+        for s in round_summaries:
+            status = "OK" if s["ok"] else "FAIL"
+            gate_txt = (
+                f", gate_fail={s['gate_fail_count']}" if s["gate_fail_count"] else ""
+            )
+            print(
+                f"  r{s['round']:02d} {status} answer={s['passed']}/{s['total']}{gate_txt} "
+                f"→ {s['md_path']}",
+                flush=True,
+            )
+        ok_rounds = sum(1 for s in round_summaries if s["ok"])
+        print(f"Rounds passed: {ok_rounds}/{args.rounds}", flush=True)
+
+    if any_fail:
         sys.exit(1)
 
 

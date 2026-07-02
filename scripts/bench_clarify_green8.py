@@ -298,9 +298,10 @@ async def _bench_case(
 
     if isinstance(gate, ClarifyBypass) and gate.reason == "direct":
         if not gate_only:
+            bundle = gate.probe.bundle if gate.probe is not None else None
             t0 = time.perf_counter()
             _thinking, answer, err, _meta = await _run_aquery(
-                rag, orig_q, mode=mode, bundle=None, parser_root=parser_root
+                rag, orig_q, mode=mode, bundle=bundle, parser_root=parser_root
             )
             answer_ms = int((time.perf_counter() - t0) * 1000)
             ans = (answer or "").strip()

@@ -128,12 +128,26 @@ function appendMessage(role, text, extraClass = "") {
   return el;
 }
 
+const PHASE_STATUS_TEXT = {
+  retrieve: "正在检索知识库…",
+  rerank: "正在 Rerank…",
+  generate: "正在生成回答…",
+  bundle: "正在复用检索结果…",
+  clarify: "正在生成推荐问法…",
+};
+
+function phaseStatusText(phase, fallback) {
+  if (fallback) return fallback;
+  if (phase && PHASE_STATUS_TEXT[phase]) return PHASE_STATUS_TEXT[phase];
+  return "正在处理您的问题…";
+}
+
 function createLoadingMessage() {
   const el = document.createElement(`d` + `iv`);
   el.className = "msg assistant loading";
   el.innerHTML = `
     <div class="loading-body">
-      <span class="loading-text">正在检索知识库…</span>
+      <span class="loading-text">正在处理您的问题…</span>
       <span class="loading-dots" aria-hidden="true"><i></i><i></i><i></i></span>
     </div>
   `;
@@ -144,9 +158,9 @@ function createLoadingMessage() {
   return el;
 }
 
-function setLoadingStatus(el, text) {
+function setLoadingStatus(el, text, phase) {
   const textEl = el.querySelector(".loading-text");
-  if (textEl && text) textEl.textContent = text;
+  if (textEl) textEl.textContent = phaseStatusText(phase, text);
 }
 
 function stopLoadingMessage(el) {
@@ -197,6 +211,29 @@ function prepareAssistantStream(el) {
   pinMessagesEnd();
   scrollMessages(true);
   watchMessageResize(el);
+
+  const pendingScope = el.dataset.pendingRetrievalScope;
+  if (pendingScope) {
+    delete el.dataset.pendingRetrievalScope;
+    try {
+      showRetrievalScope(
+        {
+          scopeEl,
+          thinkingBlock,
+          thinkingText,
+          imagesEl,
+          answerLabel,
+          answerMd,
+          thinkingRaw: "",
+          answerRaw: "",
+          inlineFiguresApplied: false,
+        },
+        JSON.parse(pendingScope),
+      );
+    } catch {
+      /* ignore */
+    }
+  }
 
   return {
     thinkingBlock,
@@ -275,6 +312,132 @@ function answerBodyForPlacement(rawText) {
   return cut >= 0 ? text.slice(0, cut).trim() : text;
 }
 
+/** ### heading title containing match_start (machine section in listing answers). */
+function machineSectionTitleAtOffset(rawText, matchStart) {
+  const body = answerBodyForPlacement(rawText);
+  if (matchStart == null || matchStart < 0) return "";
+  const before = body.slice(0, matchStart);
+  const matches = [...before.matchAll(/^###\s+([^\n]+)/gm)];
+  if (!matches.length) return "";
+  return matches[matches.length - 1][1].trim();
+}
+
+function normalizeSectionTitle(title) {
+  return (title || "").replace(/\s+/g, "").trim();
+}
+
+function findSectionHeading(root, sectionTitle) {
+  if (!root || !sectionTitle) return null;
+  const want = normalizeSectionTitle(sectionTitle);
+  for (const h3 of root.querySelectorAll("h3")) {
+    const got = normalizeSectionTitle(h3.textContent || "");
+    if (!got) continue;
+    if (got === want || got.includes(want) || want.includes(got)) return h3;
+  }
+  return null;
+}
+
+function machineHintFromSourceKey(sourceKey) {
+  return (sourceKey || "")
+    .replace(/\s+/g, "")
+    .replace(/维护保养手册.*$/i, "")
+    .replace(/手册.*$/i, "")
+    .trim();
+}
+
+function sectionForImageIndex(imageIndex, placements, rawText, images) {
+  const pl = (placements || []).find((p) => p.image_index === imageIndex);
+  if (pl) return machineSectionTitleAtOffset(rawText, pl.match_start ?? 0);
+  const img = images?.[imageIndex];
+  if (!img) return "";
+  const hint = machineHintFromSourceKey(img.source_key);
+  if (!hint) return "";
+  const body = answerBodyForPlacement(rawText);
+  for (const m of body.matchAll(/^###\s+([^\n]+)/gm)) {
+    const title = normalizeSectionTitle(m[1]);
+    if (title.includes(hint) || hint.includes(title)) return m[1].trim();
+  }
+  return "";
+}
+
+/** Dedup key from normalized caption; fall back to media URL when caption is empty. */
+function imageDisplayDedupKey(img) {
+  const cap = normalizePlacementLine(img?.caption || "");
+  if (cap.length >= 8) return cap;
+  return (img?.url || "").trim();
+}
+
+function filterPlacementsBySectionDedup(placements, images, rawText) {
+  const seenBySection = new Map();
+  const sorted = [...placements].sort(
+    (a, b) => (a.match_start || 0) - (b.match_start || 0)
+  );
+  const kept = [];
+  for (const pl of sorted) {
+    const img = images[pl.image_index];
+    if (!img) continue;
+    const section =
+      machineSectionTitleAtOffset(rawText, pl.match_start ?? 0) || "_";
+    const key = imageDisplayDedupKey(img);
+    if (!seenBySection.has(section)) seenBySection.set(section, new Set());
+    const sectionSeen = seenBySection.get(section);
+    if (key && sectionSeen.has(key)) continue;
+    if (key) sectionSeen.add(key);
+    kept.push(pl);
+  }
+  return kept;
+}
+
+function dedupImagesForDisplay(images, rawText, placements) {
+  const seenBySection = new Map();
+  return (images || []).filter((img, idx) => {
+    const section =
+      sectionForImageIndex(idx, placements, rawText, images) || "_";
+    const key = imageDisplayDedupKey(img);
+    if (!key) return true;
+    if (!seenBySection.has(section)) seenBySection.set(section, new Set());
+    const sectionSeen = seenBySection.get(section);
+    if (sectionSeen.has(key)) return false;
+    sectionSeen.add(key);
+    return true;
+  });
+}
+
+function findInsertPointInSection(root, rawText, placement) {
+  if (!root) return null;
+  const sectionTitle = machineSectionTitleAtOffset(
+    rawText,
+    placement?.match_start ?? 0
+  );
+  const sectionH3 = findSectionHeading(root, sectionTitle);
+  if (!sectionH3) return null;
+
+  const rawLine = lineAtPlacementOffset(rawText, placement);
+  if (!rawLine) return null;
+
+  let el = sectionH3.nextElementSibling;
+  while (el && el.nodeName !== "H3") {
+    const lis = el.matches?.("li") ? [el] : [...(el.querySelectorAll?.("li") || [])];
+    for (const li of lis) {
+      if (placementLinesMatch(li.textContent || "", rawLine)) return li;
+    }
+    if (el.matches?.("p")) {
+      let segment = "";
+      for (const child of el.childNodes) {
+        if (child.nodeName === "BR") {
+          if (placementLinesMatch(segment, rawLine)) return child;
+          segment = "";
+          continue;
+        }
+        segment += child.textContent || "";
+      }
+      if (placementLinesMatch(segment, rawLine)) return el;
+    }
+    el = el.nextElementSibling;
+  }
+  return null;
+}
+
 function lineAtMatchStart(rawText, matchStart) {
   if (!rawText || matchStart == null || matchStart < 0) return "";
   const body = answerBodyForPlacement(rawText);
@@ -344,6 +507,8 @@ function findInsertPointByOffset(root, rawText, placement) {
 }
 
 function findInsertPointForPlacement(root, rawText, placement) {
+  const inSection = findInsertPointInSection(root, rawText, placement);
+  if (inSection) return inSection;
   const byOffset = findInsertPointByOffset(root, rawText, placement);
   if (byOffset) return byOffset;
   const rawLine = lineAtPlacementOffset(rawText, placement);
@@ -468,19 +633,18 @@ function showAnswerImageFallback(ui, images) {
 function applyInlineImages(ui, ev) {
   if (!ui?.answerMd || !ev?.placements?.length || !ev?.images?.length) return;
   if (ui.imagesEl) ui.imagesEl.hidden = true;
-  renderMarkdown(ui.answerMd, ui.answerRaw || "");
-  const ordered = [...ev.placements].sort(
-    (a, b) => (a.match_start || 0) - (b.match_start || 0)
+  const rawText = ui.answerRaw || "";
+  renderMarkdown(ui.answerMd, rawText);
+  const ordered = filterPlacementsBySectionDedup(
+    ev.placements,
+    ev.images,
+    rawText
   );
   let inserted = 0;
   for (const pl of ordered) {
     const img = ev.images[pl.image_index];
     if (!img || !pl.anchor_text) continue;
-    const insertAfter = findInsertPointForPlacement(
-      ui.answerMd,
-      ui.answerRaw || "",
-      pl
-    );
+    const insertAfter = findInsertPointForPlacement(ui.answerMd, rawText, pl);
     if (!insertAfter) continue;
     const wrapper = document.createElement("div");
     wrapper.innerHTML = figureHtml(img);
@@ -489,12 +653,17 @@ function applyInlineImages(ui, ev) {
     if (insertFigureAfterAnchor(insertAfter, fig)) inserted += 1;
   }
   ui.inlineFiguresApplied = inserted > 0;
-  if (!ui.inlineFiguresApplied && ev.images?.length) {
-    const appended = appendFiguresToAnswerEnd(ui.answerMd, ev.images);
+  const displayImages = dedupImagesForDisplay(
+    ev.images,
+    rawText,
+    ev.placements
+  );
+  if (!ui.inlineFiguresApplied && displayImages.length) {
+    const appended = appendFiguresToAnswerEnd(ui.answerMd, displayImages);
     ui.inlineFiguresApplied = appended > 0;
   }
-  if (!ui.inlineFiguresApplied && ev.images?.length) {
-    showAnswerImageFallback(ui, ev.images);
+  if (!ui.inlineFiguresApplied && displayImages.length) {
+    showAnswerImageFallback(ui, displayImages);
   }
   scrollMessages();
 }
@@ -769,9 +938,12 @@ function renderClarificationPanel(loadingEl, data) {
       "您的问题与当前知识库内容关联度较低，暂无法基于知识库作答。请尝试换种说法，或联系技术支持。";
   } else {
     const k = data?.generation?.k_answerable ?? (data?.candidates || []).length;
+    const hasKeepOriginal = Boolean(data?.keep_original?.query);
     intro.textContent =
       k > 0
-        ? "请从下列已验证可检索的推荐问法中选择一条继续问答。"
+        ? hasKeepOriginal
+          ? "请从下列推荐问法中选择一条，或保持原问继续作答。"
+          : "请从下列已验证可检索的推荐问法中选择一条继续问答。"
         : "正在准备澄清选项…";
   }
   bodyEl.appendChild(intro);
@@ -784,6 +956,26 @@ function renderClarificationPanel(loadingEl, data) {
   if (showOptions) {
     const options = document.createElement(`d` + `iv`);
     options.className = "clarify-options";
+
+    const keepOriginal = data?.keep_original;
+    if (keepOriginal?.query) {
+      const keepBtn = document.createElement("button");
+      keepBtn.type = "button";
+      keepBtn.className = "clarify-option clarify-keep-original";
+      const keepScore =
+        keepOriginal.final_score != null ? ` · final ${keepOriginal.final_score}` : "";
+      const keepHint =
+        keepOriginal.bundle_cached === false ? "（将重新检索）" : "";
+      keepBtn.textContent = `保持原问继续${keepScore}${keepHint}`;
+      keepBtn.addEventListener("click", () => {
+        void submitClarifiedQuery({
+          query: keepOriginal.query,
+          clarify_choice: "keep_original",
+          clarification_id: clarificationId || loadingEl.dataset.clarificationId,
+        });
+      });
+      options.appendChild(keepBtn);
+    }
 
     for (const cand of data?.candidates || []) {
       const btn = document.createElement("button");
@@ -876,10 +1068,14 @@ async function streamQuery(queryOrOpts, loadingEl) {
 
   const handleEvent = (ev) => {
     if (ev.type === "status") {
-      if (!gotContent) setLoadingStatus(loadingEl, ev.text);
+      if (!gotContent) setLoadingStatus(loadingEl, ev.text, ev.phase);
       return;
     }
     if (ev.type === "retrieval_scope") {
+      if (loadingEl.classList.contains("loading")) {
+        loadingEl.dataset.pendingRetrievalScope = JSON.stringify(ev);
+        return;
+      }
       if (!ui) {
         ui = prepareAssistantStream(loadingEl);
         gotContent = true;

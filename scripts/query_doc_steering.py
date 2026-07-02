@@ -4,12 +4,14 @@ Rules live in code (``MACHINE_PROFILES``), not per-machine ``.env`` entries.
 When a profile matches, unrelated manual PDFs can be dropped after rerank
 (see ``query_progress_hooks``); a report is exposed for the Web UI / logs.
 
-Rerank scores come only from CrossEncoder (``pipeline_rerank``). Table-matrix
-sibling chunks may be merged into the pre-rerank pool (or the LLM batch as a
-fallback) when ``table_matrix_matches_query`` agrees; no synthetic scores."""
+Rerank scores come from CrossEncoder (``pipeline_rerank``). Foreword catalog
+chunks (``本手册适用产品型号``) may be merged from KV after rerank or at the
+LLM batch when ``RAG_CATALOG_QUERY_BOOST`` is on. Table-matrix sibling chunks
+may be merged similarly when ``table_matrix_matches_query`` agrees."""
 
 from __future__ import annotations
 
+import copy
 import json
 import os
 import re
@@ -238,6 +240,235 @@ def _path_hits_deny(path: str, deny: list[str]) -> str | None:
         return None
     hit = next((s for s in deny if s in path), None)
     return hit
+
+
+_CATALOG_MODEL_MARKER = "本手册适用产品型号"
+
+
+def _asks_manual_applicability_models(query: str) -> bool:
+    """Foreword-style: which product models a named manual applies to."""
+    q = (query or "").strip()
+    if not q:
+        return False
+    return bool(
+        re.search(
+            r"适用(?:于)?(?:哪些|什么|哪(?:些|种)|多少).*?(?:型号|机型)|"
+            r"(?:手册|说明书).*适用.*?(?:型号|机型)|"
+            r"(?:型号|机型).*适用",
+            q,
+        )
+    )
+
+
+def is_catalog_product_model_query(query: str) -> bool:
+    """Broad product-line / model-count questions (not single-machine maintenance)."""
+    q = (query or "").strip()
+    if not q:
+        return False
+    asks_scope = bool(
+        re.search(
+            r"哪些|多少|一共|总共|全部|有哪些|几种|列举|清单|概况|多少个|一共有多少|多少种",
+            q,
+        )
+    )
+    asks_models = bool(re.search(r"型号|机型|产品", q))
+    if not (asks_scope and asks_models):
+        return False
+    if _asks_manual_applicability_models(q):
+        return True
+    if resolve_machine_profile(query):
+        return False
+    return True
+
+
+def _default_min_rerank_score() -> float:
+    if (os.getenv("RAG_USE_CLARIFY_UPPER_AS_MIN_RERANK") or "").strip().lower() in (
+        "1",
+        "true",
+        "yes",
+    ):
+        raw = os.getenv("QUERY_SCORE_THRESHOLD_UPPER") or "0.45"
+        try:
+            return float(raw)
+        except ValueError:
+            return 0.45
+    raw = os.getenv("MIN_RERANK_SCORE") or "0.28"
+    try:
+        return float(raw)
+    except ValueError:
+        return 0.28
+
+
+def catalog_query_min_rerank_score() -> float:
+    raw = os.getenv("RAG_CATALOG_QUERY_MIN_RERANK_SCORE") or "0.0"
+    try:
+        return max(0.0, float(raw))
+    except ValueError:
+        return 0.0
+
+
+def _chunk_has_catalog_marker(doc: dict) -> bool:
+    return _CATALOG_MODEL_MARKER in str(doc.get("content") or "")
+
+
+def _catalog_chunk_relevant_to_query(query: str, doc: dict) -> bool:
+    """Keep foreword catalog lines whose path/body overlap query terms."""
+    if not _chunk_has_catalog_marker(doc):
+        return False
+    path = _doc_path(doc)
+    profile = resolve_machine_profile(query)
+    if profile:
+        deny = list(profile.get("deny_path_substrings") or [])
+        if _path_hits_deny(path, deny):
+            return False
+        phrases = profile.get("query_phrases") or []
+        if path and phrases:
+            pn = path.replace(" ", "")
+            if not any(str(p).replace(" ", "") in pn for p in phrases if str(p).strip()):
+                return False
+    terms = _query_discriminative_terms(query)
+    if not terms:
+        return True
+    blob = f"{path} {str(doc.get('content') or '')[:500]}"
+    return any(len(term) >= 3 and term in blob for term in terms)
+
+
+def _load_catalog_chunks_from_storage() -> list[dict]:
+    out: list[dict] = []
+    for chunk_id, row in _load_text_chunk_map().items():
+        if not isinstance(row, dict):
+            continue
+        content = str(row.get("content") or "")
+        if _CATALOG_MODEL_MARKER not in content:
+            continue
+        doc = dict(row)
+        doc.setdefault("content", content)
+        doc.setdefault("id", chunk_id)
+        out.append(doc)
+    return out
+
+
+def supplement_catalog_product_model_chunks(
+    query: str,
+    docs: list[dict],
+    *,
+    rerank_pool: list[dict] | None = None,
+) -> list[dict]:
+    """Ensure each relevant manual's foreword ``本手册适用产品型号`` chunk is present."""
+    if not _env_bool("RAG_CATALOG_QUERY_BOOST", True):
+        return docs
+    if not is_catalog_product_model_query(query):
+        return docs
+
+    seen_paths: set[str] = set()
+    merged: list[dict] = []
+
+    def add_doc(doc: dict) -> None:
+        path = _doc_path(doc)
+        if not path or path in seen_paths:
+            return
+        if not _catalog_chunk_relevant_to_query(query, doc):
+            return
+        seen_paths.add(path)
+        boosted = dict(doc)
+        boosted["rerank_score"] = max(float(boosted.get("rerank_score") or 0), 0.99)
+        merged.append(boosted)
+
+    for doc in docs:
+        add_doc(doc)
+    for doc in rerank_pool or []:
+        add_doc(doc)
+    for doc in _load_catalog_chunks_from_storage():
+        add_doc(doc)
+
+    if not merged:
+        return docs
+    return merged + [d for d in docs if _doc_path(d) not in seen_paths]
+
+
+def supplement_llm_catalog_chunks(
+    query: str,
+    llm_docs: list[dict],
+    *,
+    rerank_pool: list[dict] | None = None,
+) -> tuple[list[dict], int]:
+    """Prepend missing foreword catalog chunks to the LLM batch."""
+    ids_before = {_chunk_doc_id(d) for d in llm_docs if _chunk_doc_id(d)}
+    merged = supplement_catalog_product_model_chunks(
+        query, llm_docs, rerank_pool=rerank_pool
+    )
+    added = sum(
+        1
+        for doc in merged
+        if _chunk_has_catalog_marker(doc)
+        and (cid := _chunk_doc_id(doc))
+        and cid not in ids_before
+    )
+    if added <= 0:
+        return llm_docs, 0
+    return merged, added
+
+
+def record_catalog_boost(*, post_rerank: int = 0, llm: int = 0) -> None:
+    if post_rerank <= 0 and llm <= 0:
+        return
+    prev = _last_filter_report.get()
+    payload = dict(prev) if isinstance(prev, dict) else {}
+    boost = dict(payload.get("catalog_boost") or {})
+    if post_rerank > 0:
+        boost["post_rerank_added"] = post_rerank
+    if llm > 0:
+        boost["llm_added"] = llm
+    payload["catalog_boost"] = boost
+    _last_filter_report.set(payload)
+
+
+def supplement_clarify_injection_catalog(
+    query: str, injection: dict[str, Any]
+) -> dict[str, Any]:
+    """Patch a cached clarify injection with missing foreword catalog chunks."""
+    if not isinstance(injection, dict):
+        return injection
+    raw = injection.get("raw_data")
+    if not isinstance(raw, dict):
+        return injection
+    data = raw.get("data")
+    if not isinstance(data, dict):
+        return injection
+    chunks = [row for row in (data.get("chunks") or []) if isinstance(row, dict)]
+    supplemented = supplement_catalog_product_model_chunks(
+        query, chunks, rerank_pool=chunks
+    )
+    ids_before = {_chunk_doc_id(d) for d in chunks if _chunk_doc_id(d)}
+    added = any(
+        _chunk_has_catalog_marker(doc)
+        and (cid := _chunk_doc_id(doc))
+        and cid not in ids_before
+        for doc in supplemented
+    )
+    if not added:
+        return injection
+    new_raw = copy.deepcopy(raw)
+    new_raw.setdefault("data", {})["chunks"] = supplemented
+    from raganything.clarify_context import scope_kg_to_llm_chunks  # noqa: WPS433
+
+    context_str, scoped_raw = scope_kg_to_llm_chunks(
+        new_raw, str(injection.get("context_str") or "")
+    )
+    return {
+        "context_str": context_str or str(injection.get("context_str") or ""),
+        "raw_data": scoped_raw or new_raw,
+    }
+
+
+def build_catalog_model_listing_prompt(query: str) -> str:
+    if not is_catalog_product_model_query(query):
+        return ""
+    return (
+        "用户询问产品线/型号总览：请按检索到的每一份手册分别列出正文中"
+        f"「{_CATALOG_MODEL_MARKER}」一行里的全部型号；"
+        "有几份来源含该行就列几份，不得只汇总其中部分来源。"
+    )
 
 
 def _query_discriminative_terms(query: str) -> list[str]:
@@ -734,6 +965,9 @@ def build_cross_manual_listing_answer_prompt(query: str) -> str:
 def build_query_user_prompt(query: str) -> str:
     """Merge optional LLM hints for LightRAG ``user_prompt``."""
     parts: list[str] = []
+    catalog = build_catalog_model_listing_prompt(query)
+    if catalog:
+        parts.append(catalog)
     subject = build_query_subject_chunk_prompt(query)
     if subject:
         parts.append(subject)
@@ -776,7 +1010,46 @@ def install_doc_filter_on_rerank() -> None:
 
 
 def install_catalog_rerank_threshold() -> None:
-    """Deprecated: catalog-specific min_rerank override removed."""
+    """Lower ``min_rerank_score`` for product-line catalog queries."""
+    import lightrag.operate as op
+    import lightrag.utils as ut
+
+    orig = ut.process_chunks_unified
+    if getattr(orig, "_catalog_rerank_wrapped", False):
+        return
+
+    async def _wrapped(
+        query: str,
+        unique_chunks: list[dict],
+        query_param: Any,
+        global_config: dict,
+        source_type: str = "mixed",
+        chunk_token_limit: int | None = None,
+    ):
+        prev_min: float | None = None
+        if is_catalog_product_model_query(query) and _env_bool(
+            "RAG_CATALOG_QUERY_RERANK", True
+        ):
+            prev_min = float(
+                global_config.get("min_rerank_score", _default_min_rerank_score())
+            )
+            global_config["min_rerank_score"] = catalog_query_min_rerank_score()
+        try:
+            return await orig(
+                query,
+                unique_chunks,
+                query_param,
+                global_config,
+                source_type,
+                chunk_token_limit,
+            )
+        finally:
+            if prev_min is not None:
+                global_config["min_rerank_score"] = prev_min
+
+    _wrapped._catalog_rerank_wrapped = True  # type: ignore[attr-defined]
+    ut.process_chunks_unified = _wrapped  # type: ignore[method-assign]
+    op.process_chunks_unified = _wrapped  # type: ignore[method-assign]
 
 
 def install_query_context_hooks() -> None:
@@ -810,5 +1083,6 @@ def install_query_context_hooks() -> None:
 
 
 def install_query_steering_hooks() -> None:
-    """LLM user_prompt hooks only (no rerank score steering)."""
+    """Catalog rerank threshold + LLM user_prompt hooks (idempotent)."""
+    install_catalog_rerank_threshold()
     install_query_context_hooks()

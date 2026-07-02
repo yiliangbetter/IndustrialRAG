@@ -13,16 +13,47 @@ from typing import Any
 PHASE_RETRIEVE = "retrieve"
 PHASE_RERANK = "rerank"
 PHASE_GENERATE = "generate"
+PHASE_BUNDLE = "bundle"
+PHASE_CLARIFY = "clarify"
 
 PHASE_TEXT = {
     PHASE_RETRIEVE: "正在检索知识库…",
-    PHASE_RERANK: "正在重排序文档片段…",
+    PHASE_RERANK: "正在 Rerank…",
     PHASE_GENERATE: "正在生成回答…",
+    PHASE_BUNDLE: "正在复用检索结果…",
+    PHASE_CLARIFY: "正在生成推荐问法…",
 }
+
+
+def progress_hooks_active() -> bool:
+    """True when ``query_progress_hooks()`` is active in this async context."""
+    return _progress_queue.get() is not None
+
+
+async def emit_query_phase(phase: str) -> None:
+    """Emit a UI status line for the current query phase (gate or answer)."""
+    await _emit(phase)
 
 _progress_queue: ContextVar[asyncio.Queue[dict[str, str]] | None] = ContextVar(
     "progress_queue", default=None
 )
+_gate_probe_active: ContextVar[bool] = ContextVar("gate_probe_active", default=False)
+
+
+@contextlib.contextmanager
+def gate_probe_scope():
+    """Mark ``aquery_data`` as clarify-gate probe; suppress answer-phase SSE noise."""
+    token = _gate_probe_active.set(True)
+    try:
+        yield
+    finally:
+        _gate_probe_active.reset(token)
+
+
+def gate_probe_active() -> bool:
+    return _gate_probe_active.get()
+
+
 _retrieval_context: ContextVar[str | None] = ContextVar("retrieval_context", default=None)
 _retrieved_docs_text: ContextVar[str | None] = ContextVar("retrieved_docs_text", default=None)
 _media_roots: ContextVar[list[Path] | None] = ContextVar("media_roots", default=None)
@@ -32,6 +63,9 @@ _llm_chunks_for_images: ContextVar[list[dict] | None] = ContextVar(
     "llm_chunks_for_images", default=None
 )
 _rerank_docs: ContextVar[list[dict] | None] = ContextVar("rerank_docs", default=None)
+_rerank_docs_raw: ContextVar[list[dict] | None] = ContextVar(
+    "rerank_docs_raw", default=None
+)
 _rerank_figure_pool: ContextVar[list[dict] | None] = ContextVar(
     "rerank_figure_pool", default=None
 )
@@ -70,10 +104,43 @@ _last_probe_raw_data: ContextVar[dict[str, Any] | None] = ContextVar(
 _clarify_context_injection: ContextVar[dict[str, Any] | None] = ContextVar(
     "clarify_context_injection", default=None
 )
-# Worker tasks copy ContextVar; parent dump reads this shared snapshot instead.
+# Worker tasks copy ContextVar; parent finalize/dump reads these module-level snapshots.
 _query_debug_snapshot: dict[str, Any] = {}
-# Survives hook teardown so dumps can be written after ``async with`` exits.
 _retained_query_debug_snapshot: dict[str, Any] = {}
+_retained_llm_chunks_for_images: list[dict[str, Any]] = []
+_retained_rerank_docs: list[dict[str, Any]] = []
+_retained_rerank_docs_raw: list[dict[str, Any]] = []
+
+
+def _chunks_from_hook_raw_data(raw_data: Any) -> list[dict]:
+    if not isinstance(raw_data, dict):
+        return []
+    data = raw_data.get("data")
+    if not isinstance(data, dict):
+        return []
+    return [c for c in (data.get("chunks") or []) if isinstance(c, dict)]
+
+
+def _docs_for_image_finalize(snap: dict[str, Any] | None = None) -> list[dict]:
+    """LLM chunks visible to ``finalize_inline_images`` (worker-safe)."""
+    live = _llm_chunks_for_images.get()
+    if live:
+        return list(live)
+    if _retained_llm_chunks_for_images:
+        return list(_retained_llm_chunks_for_images)
+    snap = snap if isinstance(snap, dict) else _active_query_debug_snapshot()
+    from_snap = snap.get("llm_chunks_for_images")
+    if isinstance(from_snap, list) and from_snap:
+        return list(from_snap)
+    llm_input = snap.get("llm_input")
+    if isinstance(llm_input, dict):
+        from_input = llm_input.get("chunks")
+        if isinstance(from_input, list) and from_input:
+            return [c for c in from_input if isinstance(c, dict)]
+    retrieved = snap.get("retrieved_docs")
+    if isinstance(retrieved, list) and retrieved:
+        return list(retrieved)
+    return list(_retrieved_docs.get() or [])
 
 
 def _retain_query_debug_snapshot() -> None:
@@ -124,7 +191,9 @@ def get_query_debug_state() -> dict[str, Any]:
         "retrieval_context": _retrieval_context.get(),
         "retrieved_docs_text": _retrieved_docs_text.get(),
         "retrieved_docs": _retrieved_docs.get(),
-        "llm_chunks_for_images": _llm_chunks_for_images.get(),
+        "llm_chunks_for_images": _llm_chunks_for_images.get()
+        or list(_retained_llm_chunks_for_images)
+        or None,
         "related_images": list(_related_images_selected.get() or []),
         "inline_placements": list(_inline_placements.get() or []),
         "steering_report": dict(_steering_report.get() or {}),
@@ -330,11 +399,7 @@ def finalize_inline_images(
         limit = default_image_selection_limit()
 
     snap = get_query_debug_state()
-    docs = list(
-        snap.get("llm_chunks_for_images")
-        or _llm_chunks_for_images.get()
-        or []
-    )
+    docs = _docs_for_image_finalize(snap)
     roots = _media_roots.get()
     q = (_query_text.get() or "").strip()
     answer = (answer_text or _answer_text.get() or "").strip()
@@ -511,10 +576,17 @@ def _sync_llm_chunks_for_images(query: str, chunks: list[dict]) -> None:
     _llm_chunks_rerank_figure_supplement.set(added)
     try:
         from query_doc_steering import (  # noqa: WPS433
+            record_catalog_boost,
             record_table_matrix_boost,
+            supplement_llm_catalog_chunks,
             supplement_llm_table_matrix_chunks,
         )
 
+        merged, catalog_added = supplement_llm_catalog_chunks(
+            query, merged, rerank_pool=rerank_pool
+        )
+        if catalog_added:
+            record_catalog_boost(llm=catalog_added)
         merged, matrix_added = supplement_llm_table_matrix_chunks(
             query, merged, rerank_pool=rerank_pool
         )
@@ -524,7 +596,25 @@ def _sync_llm_chunks_for_images(query: str, chunks: list[dict]) -> None:
         matrix_added = 0
     _llm_chunks_table_matrix_supplement.set(matrix_added)
     _llm_chunks_for_images.set(merged)
+    _retained_llm_chunks_for_images.clear()
+    _retained_llm_chunks_for_images.extend(merged)
     _retrieved_docs.set(merged)
+    if not (_rerank_figure_pool.get() or []):
+        try:
+            from image_query_refs import (  # noqa: WPS433
+                _doc_content,
+                extract_image_refs_from_context,
+            )
+
+            fig_docs = [
+                doc
+                for doc in merged
+                if extract_image_refs_from_context(_doc_content(doc).strip())
+            ]
+            if fig_docs:
+                _rerank_figure_pool.set(fig_docs)
+        except Exception:
+            pass
     docs_text = text_from_retrieved_docs(merged).strip()
     if docs_text:
         _retrieved_docs_text.set(docs_text)
@@ -533,13 +623,47 @@ def _sync_llm_chunks_for_images(query: str, chunks: list[dict]) -> None:
 
 def _sync_retrieved_docs_after_rerank(final_docs: list[dict]) -> None:
     """Snapshot rerank pool for optional subject-figure supplement at LLM chunk sync."""
-    _rerank_docs.set(list(final_docs or []))
+    docs = list(final_docs or [])
+    _rerank_docs.set(docs)
+    _retained_rerank_docs.clear()
+    _retained_rerank_docs.extend(docs)
+
+
+def _sync_rerank_docs_raw(docs: list[dict]) -> None:
+    """CrossEncoder output before catalog KV boost (gate scoring)."""
+    raw = list(docs or [])
+    _rerank_docs_raw.set(raw)
+    _retained_rerank_docs_raw.clear()
+    _retained_rerank_docs_raw.extend(raw)
+
+
+def get_rerank_pool_chunks() -> list[dict]:
+    """Post-rerank document pool (includes ``rerank_score`` when rerank ran)."""
+    rerank = _rerank_docs.get()
+    if rerank:
+        return list(rerank)
+    if _retained_rerank_docs:
+        return list(_retained_rerank_docs)
+    return []
+
+
+def get_rerank_pool_chunks_raw() -> list[dict]:
+    """CrossEncoder scores before catalog KV supplement (for gate on catalog queries)."""
+    raw = _rerank_docs_raw.get()
+    if raw:
+        return list(raw)
+    if _retained_rerank_docs_raw:
+        return list(_retained_rerank_docs_raw)
+    return []
 
 
 def get_llm_input_chunks() -> list[dict]:
     """LLM-bound chunks from the latest hooked query (includes ``rerank_score`` when rerank ran)."""
     raw = _llm_chunks_for_images.get() or _retrieved_docs.get() or []
-    return list(raw)
+    if raw:
+        return list(raw)
+    # Gate probe uses ``only_need_context`` (no ``process_chunks_unified``); scores live on rerank pool.
+    return get_rerank_pool_chunks()
 
 
 @contextlib.asynccontextmanager
@@ -552,6 +676,9 @@ async def query_progress_hooks() -> AsyncIterator[asyncio.Queue[dict[str, str]]]
     token = _progress_queue.set(q)
     _query_debug_snapshot.clear()
     _retained_query_debug_snapshot.clear()
+    _retained_llm_chunks_for_images.clear()
+    _retained_rerank_docs.clear()
+    _retained_rerank_docs_raw.clear()
 
     orig_build_ctx = op._build_query_context
     orig_naive_query = op.naive_query
@@ -564,13 +691,33 @@ async def query_progress_hooks() -> AsyncIterator[asyncio.Queue[dict[str, str]]]
         if injected:
             from lightrag.base import QueryContextResult  # noqa: WPS433
 
-            await _emit(PHASE_RETRIEVE)
+            try:
+                from raganything.query_timing_trace import trace_event
+
+                trace_event("clarify_inject", skipped="retrieve_and_rerank")
+            except ImportError:
+                pass
+            await _emit(PHASE_BUNDLE)
+            query = args[0] if args else kwargs.get("query", "")
+            if isinstance(query, str) and query.strip():
+                _query_text.set(query)
+                try:
+                    from query_doc_steering import (  # noqa: WPS433
+                        supplement_clarify_injection_catalog,
+                    )
+
+                    injected = supplement_clarify_injection_catalog(query, injected)
+                except Exception:
+                    pass
             ctx = QueryContextResult(
                 context=str(injected.get("context_str") or ""),
                 raw_data=copy.deepcopy(injected.get("raw_data") or {}),
             )
             ctx = _apply_kg_scope_to_query_context(ctx)
             _capture_llm_context_from_build_result(ctx)
+            bundle_chunks = _chunks_from_hook_raw_data(getattr(ctx, "raw_data", None))
+            if bundle_chunks and isinstance(query, str) and query.strip():
+                _sync_llm_chunks_for_images(query, bundle_chunks)
             _sync_query_debug_snapshot()
             return ctx
 
@@ -582,6 +729,14 @@ async def query_progress_hooks() -> AsyncIterator[asyncio.Queue[dict[str, str]]]
         ctx = await orig_build_ctx(*args, **kwargs)
         ctx = _apply_kg_scope_to_query_context(ctx)
         _capture_llm_context_from_build_result(ctx)
+        if gate_probe_active() and isinstance(query, str) and query.strip():
+            rerank_docs = list(_rerank_docs.get() or [])
+            if rerank_docs:
+                _sync_llm_chunks_for_images(query, rerank_docs)
+            else:
+                bundle_chunks = _chunks_from_hook_raw_data(getattr(ctx, "raw_data", None))
+                if bundle_chunks:
+                    _sync_llm_chunks_for_images(query, bundle_chunks)
         _sync_query_debug_snapshot()
         return ctx
 
@@ -618,6 +773,21 @@ async def query_progress_hooks() -> AsyncIterator[asyncio.Queue[dict[str, str]]]
         docs = await orig_rerank(
             query, pool, global_config, enable_rerank, top_n
         )
+        _sync_rerank_docs_raw(list(docs or []))
+        try:
+            from query_doc_steering import (  # noqa: WPS433
+                record_catalog_boost,
+                supplement_catalog_product_model_chunks,
+            )
+
+            before_catalog = len(docs)
+            docs = supplement_catalog_product_model_chunks(
+                query, docs, rerank_pool=docs
+            )
+            if len(docs) > before_catalog:
+                record_catalog_boost(post_rerank=len(docs) - before_catalog)
+        except Exception:
+            pass
         try:
             from query_doc_steering import filter_retrieved_docs_by_query  # noqa: WPS433
 
@@ -686,7 +856,8 @@ async def query_progress_hooks() -> AsyncIterator[asyncio.Queue[dict[str, str]]]
             # Plan B: passthrough chunks to the answer LLM (demo granularity).
             # Snapshot the same batch for Plan A inline images; do not narrow/sanitize return.
             _sync_llm_chunks_for_images(query, chunks)
-            await _emit(PHASE_GENERATE)
+            if not gate_probe_active():
+                await _emit(PHASE_GENERATE)
             try:
                 import sys
 
@@ -698,13 +869,15 @@ async def query_progress_hooks() -> AsyncIterator[asyncio.Queue[dict[str, str]]]
                 report = consume_filter_report()
                 if report:
                     _steering_report.set(report)
-                    q = _progress_queue.get()
-                    if q is not None:
-                        q.put_nowait(report)
+                    if not gate_probe_active():
+                        q = _progress_queue.get()
+                        if q is not None:
+                            q.put_nowait(report)
             except Exception:
                 pass
             return chunks
-        await _emit(PHASE_GENERATE)
+        if not gate_probe_active():
+            await _emit(PHASE_GENERATE)
         try:
             import sys
 
@@ -716,9 +889,10 @@ async def query_progress_hooks() -> AsyncIterator[asyncio.Queue[dict[str, str]]]
             report = consume_filter_report()
             if report:
                 _steering_report.set(report)
-                q = _progress_queue.get()
-                if q is not None:
-                    q.put_nowait(report)
+                if not gate_probe_active():
+                    q = _progress_queue.get()
+                    if q is not None:
+                        q.put_nowait(report)
         except Exception:
             pass
         return chunks
@@ -746,6 +920,7 @@ async def query_progress_hooks() -> AsyncIterator[asyncio.Queue[dict[str, str]]]
         _retrieved_docs.set(None)
         _llm_chunks_for_images.set(None)
         _rerank_docs.set(None)
+        _rerank_docs_raw.set(None)
         _rerank_figure_pool.set(None)
         _llm_chunks_rerank_figure_supplement.set(0)
         _llm_chunks_table_matrix_supplement.set(0)
@@ -764,6 +939,12 @@ async def query_progress_hooks() -> AsyncIterator[asyncio.Queue[dict[str, str]]]
 
 
 async def _emit(phase: str) -> None:
+    try:
+        from raganything.query_timing_trace import trace_event
+
+        trace_event("phase", phase=phase)
+    except ImportError:
+        pass
     q = _progress_queue.get()
     if q is None:
         return

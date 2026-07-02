@@ -192,6 +192,7 @@ def build_query_dump(
     clarify_gate: dict[str, Any] | None = None,
     llm_input: dict[str, Any] | None = None,
     duration_ms: int | None = None,
+    web_timing: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
     payload: dict[str, Any] = {
         "schema": _SCHEMA,
@@ -218,6 +219,8 @@ def build_query_dump(
         payload["naive_relevance"] = naive_relevance
     if isinstance(clarify_gate, dict) and clarify_gate:
         payload["clarify_gate"] = clarify_gate
+    if isinstance(web_timing, dict) and web_timing:
+        payload["web_timing"] = web_timing
     if isinstance(llm_input, dict) and llm_input:
         payload["llm_input"] = llm_input
     return payload
@@ -249,6 +252,7 @@ def persist_query_debug_dump(
     clarify_gate: dict[str, Any] | None = None,
     enabled: bool | None = None,
     name_prefix: str = "",
+    web_timing: dict[str, Any] | None = None,
 ) -> Path | None:
     """Write ``logs/query_dumps/*.json`` from ``query_progress_hooks`` state.
 
@@ -314,6 +318,7 @@ def persist_query_debug_dump(
         llm_input=hook_state.get("llm_input")
         if isinstance(hook_state.get("llm_input"), dict)
         else None,
+        web_timing=web_timing,
     )
     return write_query_dump(payload, name_prefix=name_prefix)
 

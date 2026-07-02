@@ -169,6 +169,7 @@ class RetrievalProbeResult:
     scores_unavailable: bool
     final_score: float | None = None
     direct_rerank_min: float | None = None
+    max_rerank_any: float | None = None
     bundle: CachedQueryBundle | None = None
 
     def as_stats(self) -> dict[str, Any]:
@@ -177,6 +178,7 @@ class RetrievalProbeResult:
             "chunk_count": self.chunk_count,
             "final_score": self.final_score,
             "max_rerank_score": self.max_rerank_score,
+            "max_rerank_any": self.max_rerank_any,
             "min_rerank_threshold": self.min_rerank_threshold,
             "direct_rerank_min": self.direct_rerank_min,
             "mode": self.mode,

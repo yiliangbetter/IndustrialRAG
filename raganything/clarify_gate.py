@@ -56,7 +56,7 @@ class ClarifyValidationError(ClarifyGateError):
 class ClarifyBypass:
     """Proceed to aquery without showing clarification UI."""
 
-    reason: Literal["disabled", "direct", "use_candidate"]
+    reason: Literal["disabled", "direct", "use_candidate", "keep_original"]
     probe: RetrievalProbeResult | None = None
     gate_timing: dict[str, Any] | None = None
 
@@ -181,12 +181,19 @@ def _summarize_llm_chunks(
     chunks: list[dict[str, Any]], *, min_thr: float
 ) -> dict[str, Any]:
     qualifying_scores: list[float] = []
+    all_rerank_scores: list[float] = []
     for chunk in chunks:
         if not isinstance(chunk, dict):
             continue
         rs = _chunk_rerank_score(chunk)
-        if rs is not None and rs >= min_thr:
-            qualifying_scores.append(rs)
+        if rs is not None:
+            all_rerank_scores.append(rs)
+            if rs >= min_thr:
+                qualifying_scores.append(rs)
+
+    max_rerank_any = (
+        round(max(all_rerank_scores), 4) if all_rerank_scores else None
+    )
 
     if not qualifying_scores:
         return {
@@ -194,8 +201,9 @@ def _summarize_llm_chunks(
             "chunk_count": 0,
             "final_score": None,
             "max_rerank_score": None,
+            "max_rerank_any": max_rerank_any,
             "llm_chunk_total": len(chunks),
-            "scores_unavailable": bool(chunks),
+            "scores_unavailable": bool(chunks) and not all_rerank_scores,
         }
 
     final_score = round(max(qualifying_scores), 4)
@@ -204,6 +212,7 @@ def _summarize_llm_chunks(
         "chunk_count": len(qualifying_scores),
         "final_score": final_score,
         "max_rerank_score": final_score,
+        "max_rerank_any": max_rerank_any,
         "llm_chunk_total": len(chunks),
         "scores_unavailable": False,
     }
@@ -268,21 +277,68 @@ async def probe_llm_retrieval_full(
         if str(scripts) not in sys.path:
             sys.path.insert(0, str(scripts))
         from query_progress_hooks import (  # noqa: WPS433
+            gate_probe_scope,
             get_last_probe_raw_data,
             get_llm_input_chunks,
+            get_rerank_pool_chunks,
+            get_rerank_pool_chunks_raw,
             get_retrieval_context,
+            progress_hooks_active,
             query_progress_hooks,
         )
 
-        async with query_progress_hooks():
-            await lightrag.aquery_data(q, param)
+        def _probe_chunks_and_stats() -> tuple[list[dict[str, Any]], dict[str, Any]]:
+            def _pick_best(
+                *candidates: tuple[list[dict[str, Any]], dict[str, Any]],
+            ) -> tuple[list[dict[str, Any]], dict[str, Any]]:
+                best_chunks, best_stats = candidates[0]
+                best_final = best_stats.get("final_score")
+                for chunks, stats in candidates[1:]:
+                    cand_final = stats.get("final_score")
+                    if cand_final is None:
+                        continue
+                    if best_final is None or float(cand_final) > float(best_final):
+                        best_chunks, best_stats = chunks, stats
+                        best_final = cand_final
+                return best_chunks, best_stats
+
             chunks = get_llm_input_chunks()
+            pool = get_rerank_pool_chunks()
+            raw_pool = get_rerank_pool_chunks_raw()
+            candidates: list[tuple[list[dict[str, Any]], dict[str, Any]]] = [
+                (chunks, _summarize_llm_chunks(chunks, min_thr=min_thr)),
+            ]
+            if pool:
+                candidates.append(
+                    (pool, _summarize_llm_chunks(pool, min_thr=min_thr))
+                )
+            if raw_pool and raw_pool is not pool:
+                candidates.append(
+                    (raw_pool, _summarize_llm_chunks(raw_pool, min_thr=min_thr))
+                )
+            return _pick_best(*candidates)
+
+        async def _run_probe() -> None:
+            with gate_probe_scope():
+                await lightrag.aquery_data(q, param)
+
+        if progress_hooks_active():
+            await _run_probe()
+            chunks, stats = _probe_chunks_and_stats()
             context_str = get_retrieval_context()
             raw_data = get_last_probe_raw_data()
+        else:
+            async with query_progress_hooks():
+                await _run_probe()
+                chunks, stats = _probe_chunks_and_stats()
+                context_str = get_retrieval_context()
+                raw_data = get_last_probe_raw_data()
     except Exception:
         chunks = []
+        stats = {}
 
-    stats = _summarize_llm_chunks(chunks, min_thr=min_thr)
+    if not stats:
+        stats = _summarize_llm_chunks(chunks, min_thr=min_thr)
     bundle = build_cached_bundle(q, context_str=context_str, raw_data=raw_data)
     if stats.get("answerable") and bundle is None and raw_data:
         bundle = build_cached_bundle(q, context_str=context_str, raw_data=raw_data)
@@ -299,6 +355,7 @@ async def probe_llm_retrieval_full(
         scores_unavailable=bool(stats.get("scores_unavailable")),
         final_score=final_score,
         direct_rerank_min=direct_min,
+        max_rerank_any=stats.get("max_rerank_any"),
         bundle=bundle if stats.get("answerable") else None,
     )
 
@@ -320,12 +377,14 @@ def _register_clarification(
     candidates: list[dict[str, Any]],
     options: dict[str, dict[str, Any]],
     generation: dict[str, Any],
+    original_bundle: CachedQueryBundle | None = None,
 ) -> str:
     _purge_clarification_store()
     clarification_id = str(uuid.uuid4())
     _CLARIFICATION_STORE[clarification_id] = {
         "created": time.time(),
         "original_query": original_query,
+        "original_bundle": original_bundle,
         "options": options,
         "candidates": {c["id"]: c["text"] for c in candidates},
         "generation": generation,
@@ -344,6 +403,20 @@ def _get_clarification_record(clarification_id: str | None) -> dict[str, Any] | 
         _CLARIFICATION_STORE.pop(cid, None)
         return None
     return rec
+
+
+def validate_keep_original(
+    clarification_id: str | None,
+    query_text: str,
+) -> bool:
+    rec = _get_clarification_record(clarification_id)
+    if not rec:
+        return False
+    text = (query_text or "").strip()
+    if not text:
+        return False
+    expected = (rec.get("original_query") or "").strip()
+    return text == expected
 
 
 def validate_use_candidate(
@@ -372,9 +445,17 @@ def resolve_clarify_bundle(
     candidate_id: str | None = None,
 ) -> CachedQueryBundle | None:
     choice = (clarify_choice or "").strip().lower()
+    cid = (clarification_id or "").strip()
+    if choice == "keep_original":
+        if not validate_keep_original(cid, query_text):
+            return None
+        rec = _get_clarification_record(cid)
+        if not rec:
+            return None
+        bundle = rec.get("original_bundle")
+        return bundle if isinstance(bundle, CachedQueryBundle) else None
     if choice != "use_candidate":
         return None
-    cid = (clarification_id or "").strip()
     if not validate_use_candidate(cid, candidate_id, query_text):
         return None
     rec = _get_clarification_record(cid)
@@ -514,6 +595,19 @@ async def _collect_high_confidence_candidates(
     max_probes = clarify_candidate_max_probes()
     direct_min = clarify_direct_rerank_min()
     skip_probe = clarify_candidate_skip_probe()
+    try:
+        import sys
+        from pathlib import Path
+
+        root = Path(__file__).resolve().parent.parent
+        scripts = root / "scripts"
+        if str(scripts) not in sys.path:
+            sys.path.insert(0, str(scripts))
+        from query_progress_hooks import PHASE_CLARIFY, emit_query_phase  # noqa: WPS433
+
+        await emit_query_phase(PHASE_CLARIFY)
+    except Exception:
+        pass
     seen: set[str] = {query.strip()}
     answerable: list[dict[str, Any]] = []
     option_entries: dict[str, dict[str, Any]] = {}
@@ -666,6 +760,7 @@ def build_clarification_payload(
     candidates: list[dict[str, Any]],
     generation: dict[str, Any],
     message: str | None = None,
+    keep_original: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
     reject = gate_outcome == "reject"
     payload: dict[str, Any] = {
@@ -686,6 +781,8 @@ def build_clarification_payload(
     else:
         payload["unrelated"] = False
         payload["unanswerable"] = False
+        if keep_original is not None:
+            payload["keep_original"] = keep_original
     return payload
 
 
@@ -710,6 +807,12 @@ async def evaluate_clarify_gate(
                 "invalid clarification_id / candidate_id / query for use_candidate"
             )
         return ClarifyBypass("use_candidate")
+    if choice == "keep_original":
+        if not validate_keep_original(clarification_id, q):
+            raise ClarifyValidationError(
+                "invalid clarification_id / query for keep_original"
+            )
+        return ClarifyBypass("keep_original")
 
     if not is_clarify_gate_enabled(mode):
         return ClarifyBypass("disabled")
@@ -812,7 +915,16 @@ async def _evaluate_clarify_gate_probed(
         candidates=candidates,
         options=candidate_options,
         generation=generation,
+        original_bundle=original_probe.bundle,
     )
+    keep_original: dict[str, Any] | None = None
+    if original_probe.answerable and int(original_probe.chunk_count or 0) > 0:
+        keep_original = {
+            "query": q,
+            "clarify_choice": "keep_original",
+            "final_score": original_probe.final_score,
+            "bundle_cached": original_probe.bundle is not None,
+        }
     data = build_clarification_payload(
         clarification_id=clarification_id_out,
         original_query=q,
@@ -821,5 +933,6 @@ async def _evaluate_clarify_gate_probed(
         original_probe=_probe_summary(original_probe),
         candidates=candidates,
         generation=generation,
+        keep_original=keep_original,
     )
     return ClarifyRequired(data, gate_outcome="offer")

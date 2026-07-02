@@ -140,11 +140,11 @@ class QueryBody(BaseModel):
     )
     clarify_choice: str | None = Field(
         None,
-        description="Bypass gate: use_candidate",
+        description="Bypass gate: use_candidate | keep_original",
     )
     clarification_id: str | None = Field(
         None,
-        description="Required with clarify_choice=use_candidate",
+        description="Required with clarify_choice=use_candidate or keep_original",
     )
     candidate_id: str | None = Field(
         None,
@@ -250,15 +250,44 @@ async def _resolve_naive_relevance(query: str, mode: str) -> dict[str, Any] | No
     )
 
 
+async def _inject_clarify_bundle_for_bypass(gate_result: Any, body: QueryBody) -> bool:
+    """Inject cached probe bundle in the **current** task context (for answer aquery)."""
+    from raganything.clarify_gate import ClarifyBypass, resolve_clarify_bundle  # noqa: WPS433
+    from query_progress_hooks import set_clarify_context_injection  # noqa: WPS433
+
+    if not isinstance(gate_result, ClarifyBypass):
+        return False
+    bundle = None
+    if gate_result.reason == "direct" and gate_result.probe is not None:
+        bundle = gate_result.probe.bundle
+    elif gate_result.reason in ("use_candidate", "keep_original"):
+        bundle = resolve_clarify_bundle(
+            body.clarification_id,
+            body.clarify_choice or gate_result.reason,
+            body.query.strip(),
+            body.candidate_id,
+        )
+    if bundle is None:
+        return False
+    set_clarify_context_injection(bundle)
+    if gate_result.reason == "direct":
+        import logging
+
+        logging.getLogger(__name__).info(
+            "direct answer reuses gate probe bundle query=%r chunks=%d",
+            body.query.strip()[:80],
+            len(bundle.document_chunks),
+        )
+    return True
+
+
 async def _evaluate_clarify_gate(body: QueryBody, mode: str) -> Any:
     from raganything.clarify_gate import (  # noqa: WPS433
         ClarifyBypass,
         ClarifyRequired,
         ClarifyValidationError,
         evaluate_clarify_gate,
-        resolve_clarify_bundle,
     )
-    from query_progress_hooks import set_clarify_context_injection  # noqa: WPS433
 
     if state.rag is None:
         raise HTTPException(503, "RAG engine not initialized")
@@ -285,18 +314,37 @@ async def _evaluate_clarify_gate(body: QueryBody, mode: str) -> Any:
             body.candidate_id,
         )
 
-    if isinstance(result, ClarifyBypass) and result.reason == "use_candidate":
-        bundle = resolve_clarify_bundle(
-            body.clarification_id,
-            body.clarify_choice or result.reason,
-            body.query.strip(),
-            body.candidate_id,
-        )
-        # Route 1: inject probe cache. Route 2 (CLARIFY_CANDIDATE_SKIP_PROBE): full aquery.
-        if bundle is not None:
-            set_clarify_context_injection(bundle)
+    await _inject_clarify_bundle_for_bypass(result, body)
 
     return result
+
+
+def _clarify_bypass_meta(gate_result: Any) -> dict[str, Any] | None:
+    from raganything.clarify_gate import ClarifyBypass  # noqa: WPS433
+    from query_progress_hooks import get_clarify_context_injection  # noqa: WPS433
+
+    if not isinstance(gate_result, ClarifyBypass):
+        return None
+    if gate_result.reason == "direct":
+        probe_stats = (
+            gate_result.probe.as_stats() if gate_result.probe is not None else None
+        )
+        bundle = gate_result.probe.bundle if gate_result.probe is not None else None
+        return {
+            "required": False,
+            "gate_skipped": "direct",
+            "gate_version": "v4",
+            "original_probe": probe_stats,
+            "bundle_reused": bundle is not None,
+        }
+    if gate_result.reason in ("keep_original", "use_candidate"):
+        return {
+            "required": False,
+            "gate_skipped": gate_result.reason,
+            "gate_version": "v4",
+            "bundle_reused": get_clarify_context_injection() is not None,
+        }
+    return None
 
 
 def _clear_clarify_injection_if_set() -> None:
@@ -316,6 +364,7 @@ def _persist_query_debug_dump(
     duration_ms: int | None = None,
     naive_relevance: dict[str, Any] | None = None,
     clarify_gate: dict[str, Any] | None = None,
+    web_timing: dict[str, Any] | None = None,
 ) -> Path | None:
     from query_debug_dump import persist_query_debug_dump  # noqa: WPS433
 
@@ -329,7 +378,93 @@ def _persist_query_debug_dump(
         duration_ms=duration_ms,
         naive_relevance=naive_relevance,
         clarify_gate=clarify_gate,
+        web_timing=web_timing,
     )
+
+
+def _extract_gate_internal_timing(gate_result: Any) -> dict[str, Any] | None:
+    from raganything.clarify_gate import ClarifyBypass, ClarifyRequired  # noqa: WPS433
+
+    if isinstance(gate_result, ClarifyRequired):
+        gen = gate_result.data.get("generation") or {}
+        timing = gen.get("gate_timing")
+        return dict(timing) if isinstance(timing, dict) else None
+    if isinstance(gate_result, ClarifyBypass) and gate_result.gate_timing:
+        return dict(gate_result.gate_timing)
+    return None
+
+
+def _gate_outcome_label(gate_result: Any) -> str | None:
+    from raganything.clarify_gate import ClarifyBypass, ClarifyRequired  # noqa: WPS433
+
+    if isinstance(gate_result, ClarifyRequired):
+        return str(gate_result.gate_outcome or "")
+    if isinstance(gate_result, ClarifyBypass):
+        return str(gate_result.reason or "")
+    return None
+
+
+def _begin_web_query_trace(body: QueryBody, *, mode: str, endpoint: str) -> None:
+    from raganything.query_timing_trace import (  # noqa: WPS433
+        begin_query_trace,
+        is_query_timing_enabled,
+    )
+
+    if not is_query_timing_enabled():
+        return
+    begin_query_trace(
+        endpoint=endpoint,
+        query=body.query.strip(),
+        mode=mode,
+        clarify_choice=body.clarify_choice,
+        clarification_id=body.clarification_id,
+        candidate_id=body.candidate_id,
+    )
+
+
+def _finalize_web_timing(
+    gate_result: Any,
+    *,
+    gate_wall_s: float,
+    answer_wall_s: float | None = None,
+    answer_skipped: str | None = None,
+) -> dict[str, Any] | None:
+    from raganything.query_timing_trace import (  # noqa: WPS433
+        finish_query_trace,
+        is_query_timing_enabled,
+    )
+
+    if not is_query_timing_enabled():
+        return None
+    extra: dict[str, Any] = {
+        "gate_wall_s": round(gate_wall_s, 1),
+        "gate_outcome": _gate_outcome_label(gate_result),
+        "gate_timing": _extract_gate_internal_timing(gate_result),
+    }
+    if answer_wall_s is not None:
+        extra["answer_wall_s"] = round(answer_wall_s, 1)
+    if answer_skipped:
+        extra["answer_skipped"] = answer_skipped
+    return finish_query_trace(**extra)
+
+
+async def _evaluate_clarify_gate_timed(
+    body: QueryBody, mode: str
+) -> tuple[Any, float]:
+    from raganything.query_timing_trace import is_query_timing_enabled, trace_event  # noqa: WPS433
+
+    if is_query_timing_enabled():
+        trace_event("gate_start")
+    t_gate = time.perf_counter()
+    result = await _evaluate_clarify_gate(body, mode)
+    gate_wall_s = time.perf_counter() - t_gate
+    if is_query_timing_enabled():
+        trace_event(
+            "gate_end",
+            gate_wall_s=round(gate_wall_s, 1),
+            outcome=_gate_outcome_label(result),
+        )
+    return result, gate_wall_s
 
 
 class AppState:
@@ -804,30 +939,26 @@ async def api_query(body: QueryBody):
 
     from raganything.clarify_gate import ClarifyBypass, ClarifyRequired  # noqa: WPS433
 
-    gate_result = await _evaluate_clarify_gate(body, mode)
-    clarify_gate_meta: dict[str, Any] | None = None
-    if isinstance(gate_result, ClarifyBypass) and gate_result.reason == "direct":
-        probe_stats = (
-            gate_result.probe.as_stats()
-            if gate_result.probe is not None
-            else None
-        )
-        clarify_gate_meta = {
-            "required": False,
-            "gate_skipped": "direct",
-            "gate_version": "v4",
-            "original_probe": probe_stats,
-        }
+    _begin_web_query_trace(body, mode=mode, endpoint="/api/query")
+    gate_result, gate_wall_s = await _evaluate_clarify_gate_timed(body, mode)
+    clarify_gate_meta = _clarify_bypass_meta(gate_result)
     if isinstance(gate_result, ClarifyRequired):
+        web_timing = _finalize_web_timing(
+            gate_result,
+            gate_wall_s=gate_wall_s,
+            answer_skipped="clarification_only",
+        )
         dump_path = _persist_query_debug_dump(
             query=q,
             mode=mode,
             parser_root=parser_root,
+            duration_ms=int(gate_wall_s * 1000),
             clarify_gate={
                 "required": True,
                 "gate_outcome": gate_result.gate_outcome,
                 **gate_result.data,
             },
+            web_timing=web_timing,
         )
         payload: dict[str, Any] = {
             "clarification_required": True,
@@ -882,15 +1013,22 @@ async def api_query(body: QueryBody):
     finally:
         _clear_clarify_injection_if_set()
     naive_rel = get_naive_relevance()
+    answer_wall_s = time.perf_counter() - started
+    web_timing = _finalize_web_timing(
+        gate_result,
+        gate_wall_s=gate_wall_s,
+        answer_wall_s=answer_wall_s,
+    )
     dump_path = _persist_query_debug_dump(
         query=q,
         mode=mode,
         parser_root=parser_root,
         thinking=thinking,
         answer=answer,
-        duration_ms=int((time.perf_counter() - started) * 1000),
+        duration_ms=int((gate_wall_s + answer_wall_s) * 1000),
         naive_relevance=naive_rel,
         clarify_gate=clarify_gate_meta,
+        web_timing=web_timing,
     )
     payload: dict[str, Any] = {
         "thinking": thinking,
@@ -905,6 +1043,31 @@ async def api_query(body: QueryBody):
     return payload
 
 
+async def _iter_hook_events_until_task_done(
+    progress_queue: asyncio.Queue,
+    task: asyncio.Task[Any],
+) -> AsyncIterator[dict[str, Any]]:
+    """Drain progress-hook events until ``task`` completes (plus any queued tail)."""
+    while not task.done() or not progress_queue.empty():
+        try:
+            ev = await asyncio.wait_for(progress_queue.get(), timeout=0.08)
+        except asyncio.TimeoutError:
+            continue
+        yield ev
+
+
+def _sse_progress_event(ev: dict[str, Any]) -> str | None:
+    if ev.get("type") in (
+        "status",
+        "retrieval_scope",
+        "related_images",
+        "inline_images",
+        "naive_relevance",
+    ):
+        return _sse(ev)
+    return None
+
+
 async def _query_stream_events(q: str, mode: str, body: QueryBody) -> AsyncIterator[str]:
     """SSE tied to real LightRAG stages (retrieve → rerank → generate), then token deltas."""
     from query_doc_steering import strip_manual_circled_step_markers  # noqa: WPS433
@@ -915,38 +1078,57 @@ async def _query_stream_events(q: str, mode: str, body: QueryBody) -> AsyncItera
     q = q.strip()
     parser_root = Path(state.parser_output_dir).resolve()
 
-    try:
-        gate_result = await _evaluate_clarify_gate(body, mode)
-    except HTTPException as exc:
-        detail = exc.detail if isinstance(exc.detail, str) else str(exc.detail)
+    _begin_web_query_trace(body, mode=mode, endpoint="/api/query/stream")
+
+    gate_result: Any = None
+    gate_wall_s = 0.0
+    gate_http_error: HTTPException | None = None
+
+    async with query_progress_hooks() as progress_queue:
+        gate_task = asyncio.create_task(_evaluate_clarify_gate_timed(body, mode))
+
+        async for ev in _iter_hook_events_until_task_done(progress_queue, gate_task):
+            sse = _sse_progress_event(ev)
+            if sse is not None:
+                yield sse
+
+        try:
+            gate_result, gate_wall_s = await gate_task
+        except HTTPException as exc:
+            gate_http_error = exc
+
+    if gate_http_error is None and gate_result is not None:
+        await _inject_clarify_bundle_for_bypass(gate_result, body)
+
+    if gate_http_error is not None:
+        detail = (
+            gate_http_error.detail
+            if isinstance(gate_http_error.detail, str)
+            else str(gate_http_error.detail)
+        )
         yield _sse({"type": "error", "message": detail})
         yield _sse({"type": "done", "mode": mode, "error": True})
         return
 
-    clarify_gate_meta: dict[str, Any] | None = None
-    if isinstance(gate_result, ClarifyBypass) and gate_result.reason == "direct":
-        probe_stats = (
-            gate_result.probe.as_stats()
-            if gate_result.probe is not None
-            else None
-        )
-        clarify_gate_meta = {
-            "required": False,
-            "gate_skipped": "direct",
-            "gate_version": "v4",
-            "original_probe": probe_stats,
-        }
+    clarify_gate_meta = _clarify_bypass_meta(gate_result)
 
     if isinstance(gate_result, ClarifyRequired):
+        web_timing = _finalize_web_timing(
+            gate_result,
+            gate_wall_s=gate_wall_s,
+            answer_skipped="clarification_only",
+        )
         dump_path = _persist_query_debug_dump(
             query=q,
             mode=mode,
             parser_root=parser_root,
+            duration_ms=int(gate_wall_s * 1000),
             clarify_gate={
                 "required": True,
                 "gate_outcome": gate_result.gate_outcome,
                 **gate_result.data,
             },
+            web_timing=web_timing,
         )
         yield _sse(
             {
@@ -1015,14 +1197,9 @@ async def _query_stream_events(q: str, mode: str, body: QueryBody) -> AsyncItera
                     if prog_task in done and not prog_task.cancelled():
                         try:
                             ev = prog_task.result()
-                            if ev.get("type") in (
-                                "status",
-                                "retrieval_scope",
-                                "related_images",
-                                "inline_images",
-                                "naive_relevance",
-                            ):
-                                yield _sse(ev)
+                            sse = _sse_progress_event(ev)
+                            if sse is not None:
+                                yield sse
                         except Exception:
                             pass
 
@@ -1115,15 +1292,22 @@ async def _query_stream_events(q: str, mode: str, body: QueryBody) -> AsyncItera
                         naive_rel = get_naive_relevance() or await _resolve_naive_relevance(
                             q, mode
                         )
+                        answer_wall_s = time.perf_counter() - started
+                        web_timing = _finalize_web_timing(
+                            gate_result,
+                            gate_wall_s=gate_wall_s,
+                            answer_wall_s=answer_wall_s,
+                        )
                         dump_path = _persist_query_debug_dump(
                             query=q,
                             mode=mode,
                             parser_root=parser_root,
                             thinking="".join(thinking_parts).strip(),
                             answer=final_answer,
-                            duration_ms=int((time.perf_counter() - started) * 1000),
+                            duration_ms=int((gate_wall_s + answer_wall_s) * 1000),
                             naive_relevance=naive_rel,
                             clarify_gate=clarify_gate_meta,
+                            web_timing=web_timing,
                         )
                         if naive_rel is not None and not get_naive_relevance():
                             yield _sse({"type": "naive_relevance", "data": naive_rel})

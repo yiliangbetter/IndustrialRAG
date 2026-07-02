@@ -11,6 +11,7 @@ import asyncio
 import gc
 import logging
 import os
+import time
 from functools import partial
 from pathlib import Path
 from typing import Any, Callable
@@ -27,6 +28,7 @@ logger = logging.getLogger(__name__)
 
 _cross_encoder_id: str | None = None
 _cross_encoder_device: str | None = None
+_cross_encoder_dtype_key: str | None = None
 _cross_encoder: Any = None
 
 
@@ -62,12 +64,38 @@ def rerank_release_after_gate() -> bool:
     return _env_flag("RERANK_RELEASE_AFTER_GATE")
 
 
+def _rerank_torch_dtype() -> Any | None:
+    """CrossEncoder ``model_kwargs['torch_dtype']``; ``None`` keeps library default (FP32)."""
+    raw = (os.getenv("RERANK_TORCH_DTYPE") or os.getenv("RERANK_DTYPE") or "").strip().lower()
+    if not raw:
+        return None
+    if raw in ("auto", "config"):
+        return "auto"
+    try:
+        import torch
+    except ImportError:
+        logger.warning("RERANK_TORCH_DTYPE=%r ignored (torch not installed)", raw)
+        return None
+    if raw in ("bf16", "bfloat16"):
+        return torch.bfloat16
+    if raw in ("fp16", "float16", "half"):
+        return torch.float16
+    if raw in ("fp32", "float32", "full"):
+        return torch.float32
+    logger.warning("Unknown RERANK_TORCH_DTYPE=%r, ignoring", raw)
+    return None
+
+
+def _rerank_torch_dtype_key() -> str:
+    dtype = _rerank_torch_dtype()
+    return "fp32-default" if dtype is None else str(dtype)
+
+
 def _rerank_batch_size() -> int:
     raw = (os.getenv("RERANK_BATCH_SIZE") or "").strip()
     if raw.isdigit():
         return max(1, int(raw))
-    device = _resolve_rerank_device()
-    return 8 if device == "cpu" else 32
+    return 8
 
 
 def _cross_encoder_predict(ce: Any, pairs: list[tuple[str, str]]) -> Any:
@@ -87,14 +115,21 @@ def _cross_encoder_predict(ce: Any, pairs: list[tuple[str, str]]) -> Any:
 
 def release_cross_encoder() -> None:
     """Drop the global CrossEncoder singleton and free GPU memory if applicable."""
-    global _cross_encoder_id, _cross_encoder_device, _cross_encoder
+    global _cross_encoder_id, _cross_encoder_device, _cross_encoder_dtype_key, _cross_encoder
     if _cross_encoder is None:
         return
     device = (_cross_encoder_device or _resolve_rerank_device() or "").lower()
+    try:
+        from raganything.query_timing_trace import trace_event
+
+        trace_event("rerank_release", device=device)
+    except ImportError:
+        pass
     ce = _cross_encoder
     _cross_encoder = None
     _cross_encoder_id = None
     _cross_encoder_device = None
+    _cross_encoder_dtype_key = None
     del ce
     gc.collect()
     if device.startswith("cuda"):
@@ -147,14 +182,28 @@ def _hub_snapshot_dir_cross_encoder(repo_id: str, hf_home: str) -> Path | None:
 
 
 def _get_cross_encoder(model_id: str) -> Any:
-    global _cross_encoder_id, _cross_encoder_device, _cross_encoder
+    global _cross_encoder_id, _cross_encoder_device, _cross_encoder_dtype_key, _cross_encoder
     device = _resolve_rerank_device()
+    dtype_key = _rerank_torch_dtype_key()
     if (
         _cross_encoder is not None
         and _cross_encoder_id == model_id
         and _cross_encoder_device == device
+        and _cross_encoder_dtype_key == dtype_key
     ):
+        try:
+            from raganything.query_timing_trace import trace_event
+
+            trace_event("rerank_reuse", model=model_id, device=device)
+        except ImportError:
+            pass
         return _cross_encoder
+    try:
+        from raganything.query_timing_trace import trace_event
+
+        trace_event("rerank_load_start", model=model_id, device=device)
+    except ImportError:
+        pass
     try:
         from sentence_transformers import CrossEncoder
     except ImportError as e:
@@ -185,6 +234,9 @@ def _get_cross_encoder(model_id: str) -> Any:
         else:
             logger.info("RERANK hf: loading CrossEncoder from hub/cache for %s", model_id)
     kwargs["device"] = device
+    torch_dtype = _rerank_torch_dtype()
+    if torch_dtype is not None:
+        kwargs["model_kwargs"] = {"torch_dtype": torch_dtype}
     try:
         _cross_encoder = CrossEncoder(load_id, **kwargs)
     except Exception as e:
@@ -199,7 +251,19 @@ def _get_cross_encoder(model_id: str) -> Any:
 
     _cross_encoder_id = model_id
     _cross_encoder_device = device
-    logger.info("RERANK hf: CrossEncoder loaded on device=%s", device)
+    _cross_encoder_dtype_key = dtype_key
+    logger.info(
+        "RERANK hf: CrossEncoder loaded on device=%s dtype=%s batch_size=%s",
+        device,
+        torch_dtype or "fp32-default",
+        _rerank_batch_size(),
+    )
+    try:
+        from raganything.query_timing_trace import trace_event
+
+        trace_event("rerank_load_done", model=model_id, device=device)
+    except ImportError:
+        pass
     return _cross_encoder
 
 
@@ -216,7 +280,21 @@ async def hf_cross_encoder_rerank(
     try:
         ce = _get_cross_encoder(model)
         pairs = [(query, d) for d in documents]
+        try:
+            from raganything.query_timing_trace import trace_event
+
+            trace_event("rerank_predict_start", model=model, pairs=len(pairs))
+        except ImportError:
+            pass
+        t_predict = time.perf_counter()
         scores = await asyncio.to_thread(_cross_encoder_predict, ce, pairs)
+        predict_s = round(time.perf_counter() - t_predict, 2)
+        try:
+            from raganything.query_timing_trace import trace_event
+
+            trace_event("rerank_predict_done", model=model, pairs=len(pairs), predict_s=predict_s)
+        except ImportError:
+            pass
         try:
             scores_list = scores.tolist()  # type: ignore[union-attr]
         except Exception:
