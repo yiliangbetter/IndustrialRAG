@@ -326,13 +326,35 @@ function normalizeSectionTitle(title) {
   return (title || "").replace(/\s+/g, "").trim();
 }
 
-function findSectionHeading(root, sectionTitle) {
+/** 0-based ### index in answer body (excludes References) at matchStart. */
+function machineSectionHeadingIndexAtOffset(rawText, matchStart) {
+  const body = answerBodyForPlacement(rawText);
+  if (matchStart == null || matchStart < 0) return -1;
+  const matches = [...body.slice(0, matchStart).matchAll(/^###\s+([^\n]+)/gm)];
+  if (!matches.length) return -1;
+  return matches.length - 1;
+}
+
+/** h3 nodes for answer body only (skip References heading in full render). */
+function answerBodyH3Elements(root) {
+  if (!root) return [];
+  return [...root.querySelectorAll("h3")].filter((h3) => {
+    const t = normalizeSectionTitle(h3.textContent || "");
+    return t && !/^references$/i.test(t);
+  });
+}
+
+function findSectionHeading(root, sectionTitle, rawText, matchStart) {
   if (!root || !sectionTitle) return null;
   const want = normalizeSectionTitle(sectionTitle);
-  for (const h3 of root.querySelectorAll("h3")) {
+  const h3s = answerBodyH3Elements(root);
+  for (const h3 of h3s) {
     const got = normalizeSectionTitle(h3.textContent || "");
-    if (!got) continue;
-    if (got === want || got.includes(want) || want.includes(got)) return h3;
+    if (got && got === want) return h3;
+  }
+  if (rawText != null && matchStart != null && matchStart >= 0) {
+    const idx = machineSectionHeadingIndexAtOffset(rawText, matchStart);
+    if (idx >= 0 && idx < h3s.length) return h3s[idx];
   }
   return null;
 }
@@ -409,7 +431,12 @@ function findInsertPointInSection(root, rawText, placement) {
     rawText,
     placement?.match_start ?? 0
   );
-  const sectionH3 = findSectionHeading(root, sectionTitle);
+  const sectionH3 = findSectionHeading(
+    root,
+    sectionTitle,
+    rawText,
+    placement?.match_start ?? -1
+  );
   if (!sectionH3) return null;
 
   const rawLine = lineAtPlacementOffset(rawText, placement);

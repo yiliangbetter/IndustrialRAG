@@ -282,6 +282,68 @@ def _listing_component_from_maint_chunk(content: str, topic: str) -> str:
     return head
 
 
+def _ref_inline_context_text(ref: dict[str, Any]) -> str:
+    return str(ref.get("context") or "").strip()
+
+
+def _bullet_head_in_inline_context(head: str, ref: dict[str, Any]) -> bool:
+    """True when ingest ``关联正文`` already ties the figure to an answer bullet head."""
+    head = (head or "").strip()
+    ctx = _ref_inline_context_text(ref)
+    if not head or not ctx:
+        return False
+    if head in ctx:
+        return True
+    compact_head = _listing_target_head(head)
+    if compact_head and compact_head in ctx:
+        return True
+    return text_term_alignment_symmetric(head, ctx) >= 0.18
+
+
+def _topic_in_inline_figure_context(topic: str, content: str) -> bool:
+    """Topic appears in any inline figure ``关联正文`` inside ``content``."""
+    topic = (topic or "").strip()
+    if not topic or not (content or "").strip():
+        return False
+    for ref in extract_image_refs_from_context(content):
+        if _bullet_head_in_inline_context(topic, ref):
+            return True
+    return False
+
+
+def _answer_bullets_for_inline_figure_match(answer: str) -> list[str]:
+    bullets = _component_spans_from_answer(answer)
+    if len(bullets) >= 2:
+        return bullets
+    return _answer_listing_spans(_answer_primary_listing_body(answer))
+
+
+def _ref_aligns_answer_bullets_via_inline_context(
+    ref: dict[str, Any], answer: str
+) -> bool:
+    for head in _answer_bullets_for_inline_figure_match(answer):
+        if _bullet_head_in_inline_context(head, ref):
+            return True
+    return False
+
+
+def _chunk_aligns_answer_bullet_via_inline_figure(
+    answer: str,
+    content: str,
+    *,
+    bullets: list[str] | None = None,
+) -> bool:
+    """Cited chunk carries inline figures whose ingest context matches an answer item."""
+    content = (content or "").strip()
+    if not content or not extract_image_refs_from_context(content):
+        return False
+    heads = bullets or _answer_bullets_for_inline_figure_match(answer)
+    for head in heads:
+        if _topic_in_inline_figure_context(head, content):
+            return True
+    return False
+
+
 def _pair_component_ref_align(component: str, ref: dict[str, Any]) -> float:
     """Score (machine, component) ↔ figure using parser ``保养内容`` / section fields."""
     head = _listing_target_head(component)
@@ -1671,6 +1733,13 @@ def _span_keep_listing_targets(
         if len(machines) >= 2:
             return machines
     if _is_listing_scope_query(q) and not _is_catalog_or_model_listing_query(q):
+        answer_bullets = [
+            span
+            for span in _answer_bullets_for_inline_figure_match(answer)
+            if span and "封边机" not in span and "加工中心" not in span
+        ]
+        if len(answer_bullets) >= 2:
+            return answer_bullets[:12]
         topics = _listing_topics_from_pool(q, pool)
         if kept_docs:
             anchored = [
@@ -1844,6 +1913,9 @@ def _ref_aligns_for_multi_figure_listing(
     blob = _ref_blob(ref)
     source = (listing_source_text or retrieved_text or "").strip()
     anchor = (retrieved_text or "").strip()
+    answer = _answer_text_for_listing()
+    if answer and _ref_aligns_answer_bullets_via_inline_context(ref, answer):
+        return True
     for target in _listing_targets_with_query_line_overlap(query, source, anchor):
         if label and _label_matches_listing_target(label, target):
             return True
@@ -2011,9 +2083,17 @@ def _ref_passes_image_align_gate(
             for am in anchor_maint
         ):
             return False
-    listing_label_ok = _listing_mode_active(query, listing_targets) and any(
-        _label_matches_listing_target(_ref_effective_label(ref), target)
-        for target in listing_targets
+    answer_for_images = _answer_text_for_listing()
+    inline_bullet_ok = bool(
+        answer_for_images
+        and _ref_aligns_answer_bullets_via_inline_context(ref, answer_for_images)
+    )
+    listing_label_ok = _listing_mode_active(query, listing_targets) and (
+        inline_bullet_ok
+        or any(
+            _label_matches_listing_target(_ref_effective_label(ref), target)
+            for target in listing_targets
+        )
     )
     if retrieved_text and not listing_label_ok and not _ref_anchored_in_retrieved_text(
         ref, retrieved_text, query
@@ -3119,6 +3199,8 @@ def _figure_context_from_answer_docs(
     seen_parts: set[str] = set()
 
     def _topic_matches_chunk(topic: str, content: str, doc: dict[str, Any]) -> bool:
+        if _topic_in_inline_figure_context(topic, content):
+            return True
         if _chunk_matches_answer_topic(content, topic):
             if shared_component and topic in machine_names:
                 return _chunk_matches_answer_topic(content, shared_component)
@@ -3890,6 +3972,21 @@ def filter_docs_cited_by_answer(
                 if doc_id not in seen_ids:
                     kept.append(doc)
                     seen_ids.add(doc_id)
+        if _is_listing_scope_query(query or ""):
+            bullets = _answer_bullets_for_inline_figure_match(answer)
+            inline_kept = 0
+            for score, doc in scored:
+                if id(doc) in seen_ids:
+                    continue
+                content = _doc_content(doc).strip()
+                if _chunk_aligns_answer_bullet_via_inline_figure(
+                    answer, content, bullets=bullets
+                ):
+                    kept.append(doc)
+                    seen_ids.add(id(doc))
+                    inline_kept += 1
+            if inline_kept:
+                meta["inline_figure_citation_keep"] = inline_kept
     else:
         max_score = 0.0
         min_keep = 0.12
@@ -3975,6 +4072,7 @@ def filter_docs_cited_by_answer(
                             _pair_component_ref_align(span, ref) >= 0.45
                             for ref in figure_refs
                         )
+                        or _topic_in_inline_figure_context(span, content)
                         or span in content
                         or span in manual
                         or _chunk_matches_answer_topic(content, span)
@@ -6539,7 +6637,8 @@ def _select_scored_refs_for_listing(
             label = _ref_effective_label(ref)
             align = _pair_component_ref_align(head, ref)
             if align < 0.38 and not _label_matches_listing_target(label, target):
-                continue
+                if not _bullet_head_in_inline_context(head, ref):
+                    continue
             effective = (
                 int(score * (0.45 + align * 0.55))
                 if align >= 0.38
