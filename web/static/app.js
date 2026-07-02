@@ -369,7 +369,7 @@ function machineHintFromSourceKey(sourceKey) {
 
 function sectionForImageIndex(imageIndex, placements, rawText, images) {
   const pl = (placements || []).find((p) => p.image_index === imageIndex);
-  if (pl) return machineSectionTitleAtOffset(rawText, pl.match_start ?? 0);
+  if (pl) return sectionKeyForPlacement(rawText, pl);
   const img = images?.[imageIndex];
   if (!img) return "";
   const hint = machineHintFromSourceKey(img.source_key);
@@ -377,16 +377,141 @@ function sectionForImageIndex(imageIndex, placements, rawText, images) {
   const body = answerBodyForPlacement(rawText);
   for (const m of body.matchAll(/^###\s+([^\n]+)/gm)) {
     const title = normalizeSectionTitle(m[1]);
-    if (title.includes(hint) || hint.includes(title)) return m[1].trim();
+    if (title === hint) return m[1].trim();
   }
   return "";
 }
 
-/** Dedup key from normalized caption; fall back to media URL when caption is empty. */
+/** Dedup within a section: manual (source_key) + caption; URL when caption is too short. */
 function imageDisplayDedupKey(img) {
+  const manual = normalizeSectionTitle(
+    machineHintFromSourceKey(img?.source_key || "")
+  );
   const cap = normalizePlacementLine(img?.caption || "");
-  if (cap.length >= 8) return cap;
-  return (img?.url || "").trim();
+  const url = (img?.url || "").trim();
+  if (cap.length >= 8) {
+    return manual ? `${manual}::${cap}` : cap;
+  }
+  return manual ? `${manual}::${url}` : url;
+}
+
+function isAnswerItemLine(text) {
+  const t = (text || "").trim();
+  if (!t) return false;
+  if (/^###\s/.test(t)) return false;
+  return true;
+}
+
+/** Start offsets of each non-empty answer line before References (excludes ### headings). */
+function answerItemLineStarts(rawText) {
+  const body = answerBodyForPlacement(rawText);
+  const starts = [];
+  let offset = 0;
+  for (const line of body.split("\n")) {
+    if (isAnswerItemLine(line)) {
+      const lead = line.search(/\S/);
+      starts.push(offset + (lead >= 0 ? lead : 0));
+    }
+    offset += line.length + 1;
+  }
+  return starts;
+}
+
+/** 0-based answer line index for a placement offset (backend match_start). */
+function itemIndexForMatchStart(rawText, matchStart) {
+  if (matchStart == null || matchStart < 0) return -1;
+  const starts = answerItemLineStarts(rawText);
+  if (!starts.length) return -1;
+  let idx = 0;
+  for (let i = 0; i < starts.length; i++) {
+    if (starts[i] <= matchStart) idx = i;
+    else break;
+  }
+  return idx;
+}
+
+function sectionKeyForPlacement(rawText, placement) {
+  const titled = machineSectionTitleAtOffset(rawText, placement?.match_start ?? 0);
+  if (titled) return normalizeSectionTitle(titled);
+  const idx = itemIndexForMatchStart(rawText, placement?.match_start ?? -1);
+  if (idx >= 0) return `line:${idx}`;
+  return "_";
+}
+
+function elementBeforeReferences(el, refsH3) {
+  if (!el || !refsH3) return true;
+  return !!(
+    el.compareDocumentPosition(refsH3) & Node.DOCUMENT_POSITION_FOLLOWING
+  );
+}
+
+/** Ordered DOM anchors (insert after) for each answer line before References. */
+function collectAnswerLineAnchors(root) {
+  if (!root) return [];
+  const refs = findReferencesHeading(root);
+  const anchors = [];
+
+  function addParagraphLineAnchors(p) {
+    const nodes = [...p.childNodes];
+    const hasBr = nodes.some((n) => n.nodeName === "BR");
+    if (!hasBr) {
+      if ((p.textContent || "").trim()) anchors.push(p);
+      return;
+    }
+    let segment = "";
+    for (const node of nodes) {
+      if (node.nodeName === "BR") {
+        if (segment.trim()) anchors.push(node);
+        segment = "";
+        continue;
+      }
+      segment += node.textContent || "";
+    }
+    if (segment.trim()) anchors.push(p);
+  }
+
+  function walk(parent) {
+    for (const child of parent.children) {
+      if (refs && !elementBeforeReferences(child, refs)) break;
+      if (child.matches?.("h3")) {
+        const t = normalizeSectionTitle(child.textContent || "");
+        if (/^references$/i.test(t)) break;
+        continue;
+      }
+      if (child.matches?.("ul, ol")) {
+        for (const li of child.children) {
+          if (!li.matches?.("li")) continue;
+          if (refs && !elementBeforeReferences(li, refs)) break;
+          if ((li.textContent || "").trim()) anchors.push(li);
+        }
+        continue;
+      }
+      if (child.matches?.("p")) {
+        addParagraphLineAnchors(child);
+        continue;
+      }
+      if (child.children?.length) walk(child);
+    }
+  }
+
+  walk(root);
+  return anchors;
+}
+
+function findReferencesHeading(root) {
+  if (!root) return null;
+  for (const h3 of root.querySelectorAll("h3")) {
+    const t = normalizeSectionTitle(h3.textContent || "");
+    if (/^references$/i.test(t)) return h3;
+  }
+  return null;
+}
+
+function findInsertPointByItemIndex(root, rawText, placement) {
+  const idx = itemIndexForMatchStart(rawText, placement?.match_start ?? -1);
+  if (idx < 0) return null;
+  const anchors = collectAnswerLineAnchors(root);
+  return idx < anchors.length ? anchors[idx] : null;
 }
 
 function filterPlacementsBySectionDedup(placements, images, rawText) {
@@ -398,8 +523,7 @@ function filterPlacementsBySectionDedup(placements, images, rawText) {
   for (const pl of sorted) {
     const img = images[pl.image_index];
     if (!img) continue;
-    const section =
-      machineSectionTitleAtOffset(rawText, pl.match_start ?? 0) || "_";
+    const section = sectionKeyForPlacement(rawText, pl);
     const key = imageDisplayDedupKey(img);
     if (!seenBySection.has(section)) seenBySection.set(section, new Set());
     const sectionSeen = seenBySection.get(section);
@@ -483,13 +607,18 @@ function normalizePlacementLine(text) {
     .trim();
 }
 
+function lineHeadForMatch(text) {
+  return normalizePlacementLine(text).split(/[：:（(]/)[0].trim();
+}
+
 function placementLinesMatch(domText, rawLine) {
   const a = normalizePlacementLine(domText);
   const b = normalizePlacementLine(rawLine);
   if (!a || !b) return false;
-  if (a === b || a.includes(b) || b.includes(a)) return true;
-  const head = b.split(/[：:（(]/)[0].trim();
-  return head.length >= 4 && a.includes(head);
+  if (a === b) return true;
+  const headA = lineHeadForMatch(domText);
+  const headB = lineHeadForMatch(rawLine);
+  return headB.length >= 4 && headA === headB;
 }
 
 /** Resolve the answer line at placement.match_start (offset-primary). */
@@ -536,6 +665,8 @@ function findInsertPointByOffset(root, rawText, placement) {
 function findInsertPointForPlacement(root, rawText, placement) {
   const inSection = findInsertPointInSection(root, rawText, placement);
   if (inSection) return inSection;
+  const byItem = findInsertPointByItemIndex(root, rawText, placement);
+  if (byItem) return byItem;
   const byOffset = findInsertPointByOffset(root, rawText, placement);
   if (byOffset) return byOffset;
   const rawLine = lineAtPlacementOffset(rawText, placement);
@@ -586,12 +717,13 @@ function findBlockForAnchor(root, anchor, matchStart, rawText) {
 }
 
 function lineSegmentMatches(segment, lineAnchor) {
-  const seg = (segment || "").replace(/\*\*/g, "").trim();
-  const line = (lineAnchor || "").replace(/\*\*/g, "").trim();
+  const seg = normalizePlacementLine(segment);
+  const line = normalizePlacementLine(lineAnchor);
   if (!seg || !line) return false;
-  if (seg.includes(line) || line.includes(seg)) return true;
-  const head = line.split(/[：:（(]/)[0].trim();
-  return head.length >= 4 && seg.includes(head);
+  if (seg === line) return true;
+  const headSeg = lineHeadForMatch(segment);
+  const headLine = lineHeadForMatch(lineAnchor);
+  return headLine.length >= 4 && headSeg === headLine;
 }
 
 /** Insert after a logical line inside a single <p> (marked breaks:true), else after block. */
@@ -616,15 +748,16 @@ function findInsertAfterForPlacement(block, matchStart, rawText) {
   return block;
 }
 
-/** Insert block figure after a paragraph/list item, not inside inline text nodes. */
+/** Insert block figure after a paragraph/list item or a line break within a paragraph. */
 function insertFigureAfterAnchor(anchor, fig) {
   if (!anchor || !fig) return false;
   let el = anchor;
   if (el.nodeType === Node.TEXT_NODE) {
     el = el.parentElement;
   }
-  if (el?.nodeName === "BR" && el.parentElement) {
-    el = el.parentElement;
+  if (el?.nodeName === "BR") {
+    el.insertAdjacentElement("afterend", fig);
+    return true;
   }
   if (el?.matches?.("p, li")) {
     el.insertAdjacentElement("afterend", fig);
@@ -639,14 +772,22 @@ function insertFigureAfterAnchor(anchor, fig) {
 
 function appendFiguresToAnswerEnd(answerMd, images) {
   if (!answerMd || !images?.length) return 0;
+  const frag = document.createDocumentFragment();
   let count = 0;
   for (const img of images) {
     const wrapper = document.createElement("div");
     wrapper.innerHTML = figureHtml(img);
     const fig = wrapper.firstElementChild;
     if (!fig) continue;
-    answerMd.appendChild(fig);
+    frag.appendChild(fig);
     count += 1;
+  }
+  if (!count) return 0;
+  const refsH3 = findReferencesHeading(answerMd);
+  if (refsH3) {
+    refsH3.insertAdjacentElement("beforebegin", frag);
+  } else {
+    answerMd.appendChild(frag);
   }
   return count;
 }
@@ -667,7 +808,7 @@ function applyInlineImages(ui, ev) {
     ev.images,
     rawText
   );
-  let inserted = 0;
+  const pending = [];
   for (const pl of ordered) {
     const img = ev.images[pl.image_index];
     if (!img || !pl.anchor_text) continue;
@@ -677,7 +818,13 @@ function applyInlineImages(ui, ev) {
     wrapper.innerHTML = figureHtml(img);
     const fig = wrapper.firstElementChild;
     if (!fig) continue;
-    if (insertFigureAfterAnchor(insertAfter, fig)) inserted += 1;
+    pending.push({ insertAfter, fig });
+  }
+  let inserted = 0;
+  for (let i = pending.length - 1; i >= 0; i--) {
+    if (insertFigureAfterAnchor(pending[i].insertAfter, pending[i].fig)) {
+      inserted += 1;
+    }
   }
   ui.inlineFiguresApplied = inserted > 0;
   const displayImages = dedupImagesForDisplay(
