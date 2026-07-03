@@ -405,6 +405,57 @@ def _get_clarification_record(clarification_id: str | None) -> dict[str, Any] | 
     return rec
 
 
+def consume_clarification_record(clarification_id: str | None) -> bool:
+    """Remove an entire clarification session (TTL purge helper; not used on point-select)."""
+    cid = (clarification_id or "").strip()
+    if not cid:
+        return False
+    return _CLARIFICATION_STORE.pop(cid, None) is not None
+
+
+def _consume_keep_original_bundle(clarification_id: str | None) -> None:
+    """Drop only the cached original-query bundle; keep candidates for further picks."""
+    rec = _get_clarification_record(clarification_id)
+    if rec is not None:
+        rec["original_bundle"] = None
+        rec["keep_original_consumed"] = True
+
+
+def _consume_candidate_bundle(
+    clarification_id: str | None, candidate_id: str | None
+) -> None:
+    """Drop one candidate's cached bundle; other options and keep_original slot stay."""
+    rec = _get_clarification_record(clarification_id)
+    if rec is None:
+        return
+    options = rec.get("options")
+    if not isinstance(options, dict):
+        return
+    entry = options.get((candidate_id or "").strip())
+    if isinstance(entry, dict):
+        if isinstance(entry.get("bundle"), CachedQueryBundle):
+            entry["bundle_consumed"] = True
+        entry["bundle"] = None
+
+
+def keep_original_consumed(clarification_id: str | None) -> bool:
+    rec = _get_clarification_record(clarification_id)
+    return bool(rec and rec.get("keep_original_consumed"))
+
+
+def candidate_bundle_consumed(
+    clarification_id: str | None, candidate_id: str | None
+) -> bool:
+    rec = _get_clarification_record(clarification_id)
+    if not rec:
+        return False
+    options = rec.get("options")
+    if not isinstance(options, dict):
+        return False
+    entry = options.get((candidate_id or "").strip())
+    return isinstance(entry, dict) and bool(entry.get("bundle_consumed"))
+
+
 def validate_keep_original(
     clarification_id: str | None,
     query_text: str,
@@ -453,7 +504,10 @@ def resolve_clarify_bundle(
         if not rec:
             return None
         bundle = rec.get("original_bundle")
-        return bundle if isinstance(bundle, CachedQueryBundle) else None
+        if not isinstance(bundle, CachedQueryBundle):
+            return None
+        _consume_keep_original_bundle(cid)
+        return bundle
     if choice != "use_candidate":
         return None
     if not validate_use_candidate(cid, candidate_id, query_text):
@@ -468,7 +522,10 @@ def resolve_clarify_bundle(
     if not isinstance(entry, dict):
         return None
     bundle = entry.get("bundle")
-    return bundle if isinstance(bundle, CachedQueryBundle) else None
+    if isinstance(bundle, CachedQueryBundle):
+        _consume_candidate_bundle(cid, candidate_id)
+        return bundle
+    return None
 
 
 def _normalize_candidate_line(line: str) -> str:
@@ -802,6 +859,10 @@ async def evaluate_clarify_gate(
 
     choice = (clarify_choice or "").strip().lower()
     if choice == "use_candidate":
+        if candidate_bundle_consumed(clarification_id, candidate_id):
+            raise ClarifyValidationError(
+                "该推荐问已回答，请选择其他选项或重新提问"
+            )
         if not validate_use_candidate(clarification_id, candidate_id, q):
             raise ClarifyValidationError(
                 "invalid clarification_id / candidate_id / query for use_candidate"
@@ -811,6 +872,10 @@ async def evaluate_clarify_gate(
         if not validate_keep_original(clarification_id, q):
             raise ClarifyValidationError(
                 "invalid clarification_id / query for keep_original"
+            )
+        if keep_original_consumed(clarification_id):
+            raise ClarifyValidationError(
+                "原问已回答，请选择推荐问或重新提问"
             )
         return ClarifyBypass("keep_original")
 

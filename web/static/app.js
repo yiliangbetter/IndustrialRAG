@@ -1166,6 +1166,7 @@ function renderClarificationPanel(loadingEl, data) {
       const chunkTxt =
         cand.chunk_count != null ? ` · ${cand.chunk_count} chunks` : "";
       btn.textContent = `${cand.text}${chunkTxt}${scoreTxt}`;
+      btn.dataset.candidateId = cand.id;
       btn.addEventListener("click", () => {
         void submitClarifiedQuery({
           query: cand.text,
@@ -1192,6 +1193,7 @@ async function submitClarifiedQuery(opts) {
   scrollPinnedToBottom = true;
   btnSend.disabled = true;
   const loading = createLoadingMessage();
+  markClarifyOptionUsed(opts);
 
   try {
     await streamQuery(opts, loading);
@@ -1201,6 +1203,32 @@ async function submitClarifiedQuery(opts) {
   } finally {
     btnSend.disabled = false;
     queryInput.focus();
+  }
+}
+
+function markClarifyOptionUsed(opts) {
+  const cid = String(opts?.clarification_id || "").trim();
+  if (!cid) return;
+  const panels = document.querySelectorAll(".clarification-panel");
+  for (const panel of panels) {
+    if (String(panel.dataset.clarificationId || "").trim() !== cid) continue;
+    if (opts.clarify_choice === "keep_original") {
+      const btn = panel.querySelector(".clarify-keep-original");
+      if (btn) {
+        btn.disabled = true;
+        btn.classList.add("clarify-option-used");
+        btn.textContent = "原问已回答";
+      }
+      continue;
+    }
+    if (opts.clarify_choice === "use_candidate" && opts.candidate_id) {
+      for (const btn of panel.querySelectorAll(".clarify-option")) {
+        if (btn.dataset.candidateId === opts.candidate_id) {
+          btn.disabled = true;
+          btn.classList.add("clarify-option-used");
+        }
+      }
+    }
   }
 }
 

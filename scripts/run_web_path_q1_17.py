@@ -9,7 +9,8 @@ Then the full web ``aquery`` answer path runs (no clarify pick UI). Query dumps 
 ``logs/query_dumps/`` (prefix ``Qxx_``) unless ``--no-dump``.
 
 Use ``--rounds N`` to run the full batch N times; each round writes its own report
-(``…_r01.md``, ``…_r02.md``, … when N > 1).
+(``…_r01.md``, ``…_r02.md``, … when N > 1). Multiple rounds reuse one ``_build_rag``
+instance for the whole run (avoids stacking embedding models on GPU/RAM).
 """
 
 from __future__ import annotations
@@ -562,6 +563,7 @@ async def run_cases(
     pod: Path,
     write_dumps: bool = True,
     skip_gate: bool = False,
+    rag: Any | None = None,
 ) -> list[dict]:
     from query_debug_dump import persist_query_debug_dump
     from query_doc_steering import strip_manual_circled_step_markers
@@ -574,7 +576,11 @@ async def run_cases(
     from stream_cot_parser import parse_complete_cot
 
     rpc = _load_rpc()
-    rag, _, _ = await rpc._build_rag(wd, pod)
+    own_rag = rag is None
+    if own_rag:
+        rag, _, _ = await rpc._build_rag(wd, pod)
+    if rag is None:
+        raise RuntimeError("run_cases: rag engine not available")
     parser_root = pod.resolve()
     out: list[dict] = []
 
@@ -666,7 +672,8 @@ async def run_cases(
                     safe = str(c).encode("utf-8", errors="replace").decode("utf-8")
                     print(f"  caption: {safe}", flush=True)
     finally:
-        await rag.finalize_storages()
+        if own_rag:
+            await rag.finalize_storages()
     return out
 
 
@@ -932,48 +939,54 @@ async def run_all_rounds(
     round_summaries: list[dict[str, Any]] = []
     any_fail = False
 
-    for rnd in range(1, rounds + 1):
-        if rounds > 1:
-            print(f"\n{'=' * 60}\n=== Round {rnd}/{rounds} ===\n{'=' * 60}", flush=True)
-        rows = await run_cases(
-            ids,
-            mode=mode,
-            wd=wd,
-            pod=pod,
-            write_dumps=write_dumps,
-            skip_gate=skip_gate,
-        )
-        round_tag = f"_r{rnd:02d}" if rounds > 1 else ""
-        json_path = report_dir / f"{session_stamp}_{suffix}{round_tag}.json"
-        md_path = report_dir / f"{session_stamp}_{suffix}{round_tag}.md"
-        json_path.write_text(json.dumps(rows, ensure_ascii=False, indent=2), encoding="utf-8")
-        write_report(
-            md_path,
-            rows,
-            mode=mode,
-            wd=wd,
-            media_root=pod,
-            round_no=rnd if rounds > 1 else None,
-            rounds_total=rounds if rounds > 1 else None,
-        )
-        passed = sum(1 for r in rows if r["grade"]["ok"])
-        gate_fail_count = _print_gate_failure_summary(rows)
-        print(f"\nReport: {md_path}", flush=True)
-        print(f"Answer grade: {passed}/{len(rows)} passed", flush=True)
-        round_fail = bool(gate_fail_count) or passed < len(rows)
-        if round_fail:
-            any_fail = True
-        round_summaries.append(
-            {
-                "round": rnd,
-                "md_path": str(md_path),
-                "json_path": str(json_path),
-                "passed": passed,
-                "total": len(rows),
-                "gate_fail_count": gate_fail_count,
-                "ok": not round_fail,
-            }
-        )
+    rpc = _load_rpc()
+    rag, _, _ = await rpc._build_rag(wd, pod)
+    try:
+        for rnd in range(1, rounds + 1):
+            if rounds > 1:
+                print(f"\n{'=' * 60}\n=== Round {rnd}/{rounds} ===\n{'=' * 60}", flush=True)
+            rows = await run_cases(
+                ids,
+                mode=mode,
+                wd=wd,
+                pod=pod,
+                write_dumps=write_dumps,
+                skip_gate=skip_gate,
+                rag=rag,
+            )
+            round_tag = f"_r{rnd:02d}" if rounds > 1 else ""
+            json_path = report_dir / f"{session_stamp}_{suffix}{round_tag}.json"
+            md_path = report_dir / f"{session_stamp}_{suffix}{round_tag}.md"
+            json_path.write_text(json.dumps(rows, ensure_ascii=False, indent=2), encoding="utf-8")
+            write_report(
+                md_path,
+                rows,
+                mode=mode,
+                wd=wd,
+                media_root=pod,
+                round_no=rnd if rounds > 1 else None,
+                rounds_total=rounds if rounds > 1 else None,
+            )
+            passed = sum(1 for r in rows if r["grade"]["ok"])
+            gate_fail_count = _print_gate_failure_summary(rows)
+            print(f"\nReport: {md_path}", flush=True)
+            print(f"Answer grade: {passed}/{len(rows)} passed", flush=True)
+            round_fail = bool(gate_fail_count) or passed < len(rows)
+            if round_fail:
+                any_fail = True
+            round_summaries.append(
+                {
+                    "round": rnd,
+                    "md_path": str(md_path),
+                    "json_path": str(json_path),
+                    "passed": passed,
+                    "total": len(rows),
+                    "gate_fail_count": gate_fail_count,
+                    "ok": not round_fail,
+                }
+            )
+    finally:
+        await rag.finalize_storages()
 
     return round_summaries, any_fail
 

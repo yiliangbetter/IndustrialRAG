@@ -353,6 +353,12 @@ def _clear_clarify_injection_if_set() -> None:
     clear_clarify_context_injection()
 
 
+def _release_rerank_after_web_query() -> None:
+    from raganything.pipeline_rerank import release_rerank_after_query_if_enabled  # noqa: WPS433
+
+    release_rerank_after_query_if_enabled()
+
+
 def _persist_query_debug_dump(
     *,
     query: str,
@@ -939,108 +945,110 @@ async def api_query(body: QueryBody):
 
     from raganything.clarify_gate import ClarifyBypass, ClarifyRequired  # noqa: WPS433
 
-    _begin_web_query_trace(body, mode=mode, endpoint="/api/query")
-    gate_result, gate_wall_s = await _evaluate_clarify_gate_timed(body, mode)
-    clarify_gate_meta = _clarify_bypass_meta(gate_result)
-    if isinstance(gate_result, ClarifyRequired):
+    try:
+        _begin_web_query_trace(body, mode=mode, endpoint="/api/query")
+        gate_result, gate_wall_s = await _evaluate_clarify_gate_timed(body, mode)
+        clarify_gate_meta = _clarify_bypass_meta(gate_result)
+        if isinstance(gate_result, ClarifyRequired):
+            web_timing = _finalize_web_timing(
+                gate_result,
+                gate_wall_s=gate_wall_s,
+                answer_skipped="clarification_only",
+            )
+            dump_path = _persist_query_debug_dump(
+                query=q,
+                mode=mode,
+                parser_root=parser_root,
+                duration_ms=int(gate_wall_s * 1000),
+                clarify_gate={
+                    "required": True,
+                    "gate_outcome": gate_result.gate_outcome,
+                    **gate_result.data,
+                },
+                web_timing=web_timing,
+            )
+            payload: dict[str, Any] = {
+                "clarification_required": True,
+                "gate_outcome": gate_result.gate_outcome,
+                "clarification": gate_result.data,
+                "query": q,
+                "mode": mode,
+            }
+            if dump_path is not None:
+                payload["debug_dump"] = {"path": str(dump_path), "name": dump_path.name}
+            return payload
+
+        from query_progress_hooks import (  # noqa: WPS433
+            get_naive_relevance,
+            query_progress_hooks,
+            set_query_lightrag,
+            set_query_media_roots,
+            set_query_text_for_images,
+        )
+        from stream_cot_parser import parse_complete_cot  # noqa: WPS433
+
+        started = time.perf_counter()
+        thinking = ""
+        answer = ""
+        error: str | None = None
+        set_query_media_roots([parser_root])
+        set_query_text_for_images(q)
+        set_query_lightrag(state.rag.lightrag, mode=mode)
+        try:
+            async with query_progress_hooks():
+                raw = await _run_aquery(q, mode, stream=False)
+            if not isinstance(raw, str):
+                parts: list[str] = []
+                async for chunk in _iter_llm_chunks(raw):
+                    parts.append(chunk)
+                raw = "".join(parts)
+            thinking, answer = parse_complete_cot(raw or "")
+            from query_doc_steering import strip_manual_circled_step_markers  # noqa: WPS433
+
+            answer = strip_manual_circled_step_markers(answer)
+        except Exception as exc:
+            error = _friendly_query_error(exc)
+            _persist_query_debug_dump(
+                query=q,
+                mode=mode,
+                parser_root=parser_root,
+                error=error,
+                duration_ms=int((time.perf_counter() - started) * 1000),
+                naive_relevance=get_naive_relevance(),
+            )
+            raise HTTPException(500, f"Query failed: {exc}") from exc
+        naive_rel = get_naive_relevance()
+        answer_wall_s = time.perf_counter() - started
         web_timing = _finalize_web_timing(
             gate_result,
             gate_wall_s=gate_wall_s,
-            answer_skipped="clarification_only",
+            answer_wall_s=answer_wall_s,
         )
         dump_path = _persist_query_debug_dump(
             query=q,
             mode=mode,
             parser_root=parser_root,
-            duration_ms=int(gate_wall_s * 1000),
-            clarify_gate={
-                "required": True,
-                "gate_outcome": gate_result.gate_outcome,
-                **gate_result.data,
-            },
+            thinking=thinking,
+            answer=answer,
+            duration_ms=int((gate_wall_s + answer_wall_s) * 1000),
+            naive_relevance=naive_rel,
+            clarify_gate=clarify_gate_meta,
             web_timing=web_timing,
         )
-        payload: dict[str, Any] = {
-            "clarification_required": True,
-            "gate_outcome": gate_result.gate_outcome,
-            "clarification": gate_result.data,
-            "query": q,
+        payload = {
+            "thinking": thinking,
+            "answer": answer,
             "mode": mode,
+            "query": q,
         }
+        if naive_rel is not None:
+            payload["naive_relevance"] = naive_rel
         if dump_path is not None:
             payload["debug_dump"] = {"path": str(dump_path), "name": dump_path.name}
         return payload
-
-    from query_progress_hooks import (  # noqa: WPS433
-        get_naive_relevance,
-        query_progress_hooks,
-        set_query_lightrag,
-        set_query_media_roots,
-        set_query_text_for_images,
-    )
-    from stream_cot_parser import parse_complete_cot  # noqa: WPS433
-
-    started = time.perf_counter()
-    thinking = ""
-    answer = ""
-    error: str | None = None
-    set_query_media_roots([parser_root])
-    set_query_text_for_images(q)
-    set_query_lightrag(state.rag.lightrag, mode=mode)
-    try:
-        async with query_progress_hooks():
-            raw = await _run_aquery(q, mode, stream=False)
-        if not isinstance(raw, str):
-            parts: list[str] = []
-            async for chunk in _iter_llm_chunks(raw):
-                parts.append(chunk)
-            raw = "".join(parts)
-        thinking, answer = parse_complete_cot(raw or "")
-        from query_doc_steering import strip_manual_circled_step_markers  # noqa: WPS433
-
-        answer = strip_manual_circled_step_markers(answer)
-    except Exception as exc:
-        error = _friendly_query_error(exc)
-        _persist_query_debug_dump(
-            query=q,
-            mode=mode,
-            parser_root=parser_root,
-            error=error,
-            duration_ms=int((time.perf_counter() - started) * 1000),
-            naive_relevance=get_naive_relevance(),
-        )
-        raise HTTPException(500, f"Query failed: {exc}") from exc
     finally:
         _clear_clarify_injection_if_set()
-    naive_rel = get_naive_relevance()
-    answer_wall_s = time.perf_counter() - started
-    web_timing = _finalize_web_timing(
-        gate_result,
-        gate_wall_s=gate_wall_s,
-        answer_wall_s=answer_wall_s,
-    )
-    dump_path = _persist_query_debug_dump(
-        query=q,
-        mode=mode,
-        parser_root=parser_root,
-        thinking=thinking,
-        answer=answer,
-        duration_ms=int((gate_wall_s + answer_wall_s) * 1000),
-        naive_relevance=naive_rel,
-        clarify_gate=clarify_gate_meta,
-        web_timing=web_timing,
-    )
-    payload: dict[str, Any] = {
-        "thinking": thinking,
-        "answer": answer,
-        "mode": mode,
-        "query": q,
-    }
-    if naive_rel is not None:
-        payload["naive_relevance"] = naive_rel
-    if dump_path is not None:
-        payload["debug_dump"] = {"path": str(dump_path), "name": dump_path.name}
-    return payload
+        _release_rerank_after_web_query()
 
 
 async def _iter_hook_events_until_task_done(
@@ -1078,100 +1086,100 @@ async def _query_stream_events(q: str, mode: str, body: QueryBody) -> AsyncItera
     q = q.strip()
     parser_root = Path(state.parser_output_dir).resolve()
 
-    _begin_web_query_trace(body, mode=mode, endpoint="/api/query/stream")
+    try:
+        _begin_web_query_trace(body, mode=mode, endpoint="/api/query/stream")
 
-    gate_result: Any = None
-    gate_wall_s = 0.0
-    gate_http_error: HTTPException | None = None
+        gate_result: Any = None
+        gate_wall_s = 0.0
+        gate_http_error: HTTPException | None = None
 
-    async with query_progress_hooks() as progress_queue:
-        gate_task = asyncio.create_task(_evaluate_clarify_gate_timed(body, mode))
+        async with query_progress_hooks() as progress_queue:
+            gate_task = asyncio.create_task(_evaluate_clarify_gate_timed(body, mode))
 
-        async for ev in _iter_hook_events_until_task_done(progress_queue, gate_task):
-            sse = _sse_progress_event(ev)
-            if sse is not None:
-                yield sse
+            async for ev in _iter_hook_events_until_task_done(progress_queue, gate_task):
+                sse = _sse_progress_event(ev)
+                if sse is not None:
+                    yield sse
 
-        try:
-            gate_result, gate_wall_s = await gate_task
-        except HTTPException as exc:
-            gate_http_error = exc
+            try:
+                gate_result, gate_wall_s = await gate_task
+            except HTTPException as exc:
+                gate_http_error = exc
 
-    if gate_http_error is None and gate_result is not None:
-        await _inject_clarify_bundle_for_bypass(gate_result, body)
+        if gate_http_error is None and gate_result is not None:
+            await _inject_clarify_bundle_for_bypass(gate_result, body)
 
-    if gate_http_error is not None:
-        detail = (
-            gate_http_error.detail
-            if isinstance(gate_http_error.detail, str)
-            else str(gate_http_error.detail)
-        )
-        yield _sse({"type": "error", "message": detail})
-        yield _sse({"type": "done", "mode": mode, "error": True})
-        return
+        if gate_http_error is not None:
+            detail = (
+                gate_http_error.detail
+                if isinstance(gate_http_error.detail, str)
+                else str(gate_http_error.detail)
+            )
+            yield _sse({"type": "error", "message": detail})
+            yield _sse({"type": "done", "mode": mode, "error": True})
+            return
 
-    clarify_gate_meta = _clarify_bypass_meta(gate_result)
+        clarify_gate_meta = _clarify_bypass_meta(gate_result)
 
-    if isinstance(gate_result, ClarifyRequired):
-        web_timing = _finalize_web_timing(
-            gate_result,
-            gate_wall_s=gate_wall_s,
-            answer_skipped="clarification_only",
-        )
-        dump_path = _persist_query_debug_dump(
-            query=q,
-            mode=mode,
-            parser_root=parser_root,
-            duration_ms=int(gate_wall_s * 1000),
-            clarify_gate={
-                "required": True,
-                "gate_outcome": gate_result.gate_outcome,
-                **gate_result.data,
-            },
-            web_timing=web_timing,
-        )
-        yield _sse(
-            {
-                "type": "status",
-                "text": (
-                    gate_result.data.get("message")
-                    if gate_result.gate_outcome == "reject"
-                    else "需要澄清：请从下列推荐问法中选择一条。"
-                ),
-            }
-        )
-        yield _sse(
-            {
-                "type": "clarification_required",
-                "data": {
+        if isinstance(gate_result, ClarifyRequired):
+            web_timing = _finalize_web_timing(
+                gate_result,
+                gate_wall_s=gate_wall_s,
+                answer_skipped="clarification_only",
+            )
+            dump_path = _persist_query_debug_dump(
+                query=q,
+                mode=mode,
+                parser_root=parser_root,
+                duration_ms=int(gate_wall_s * 1000),
+                clarify_gate={
+                    "required": True,
                     "gate_outcome": gate_result.gate_outcome,
                     **gate_result.data,
                 },
-            }
-        )
-        if dump_path is not None:
+                web_timing=web_timing,
+            )
             yield _sse(
                 {
-                    "type": "query_debug_saved",
-                    "path": str(dump_path),
-                    "name": dump_path.name,
+                    "type": "status",
+                    "text": (
+                        gate_result.data.get("message")
+                        if gate_result.gate_outcome == "reject"
+                        else "需要澄清：请从下列推荐问法中选择一条。"
+                    ),
                 }
             )
-        yield _sse({"type": "done", "mode": mode, "clarification_only": True})
-        return
+            yield _sse(
+                {
+                    "type": "clarification_required",
+                    "data": {
+                        "gate_outcome": gate_result.gate_outcome,
+                        **gate_result.data,
+                    },
+                }
+            )
+            if dump_path is not None:
+                yield _sse(
+                    {
+                        "type": "query_debug_saved",
+                        "path": str(dump_path),
+                        "name": dump_path.name,
+                    }
+                )
+            yield _sse({"type": "done", "mode": mode, "clarification_only": True})
+            return
 
-    set_query_media_roots([parser_root])
-    set_query_text_for_images(q)
-    set_query_lightrag(state.rag.lightrag, mode=mode)
-    started = time.perf_counter()
+        set_query_media_roots([parser_root])
+        set_query_text_for_images(q)
+        set_query_lightrag(state.rag.lightrag, mode=mode)
+        started = time.perf_counter()
 
-    thinking_parts: list[str] = []
-    answer_parts: list[str] = []
-    stream_error: str | None = None
+        thinking_parts: list[str] = []
+        answer_parts: list[str] = []
+        stream_error: str | None = None
 
-    result_queue: asyncio.Queue[tuple[str, Any]] = asyncio.Queue(maxsize=1)
+        result_queue: asyncio.Queue[tuple[str, Any]] = asyncio.Queue(maxsize=1)
 
-    try:
         async with query_progress_hooks() as progress_queue:
             async def _worker() -> None:
                 try:
@@ -1330,6 +1338,7 @@ async def _query_stream_events(q: str, mode: str, body: QueryBody) -> AsyncItera
                         pass
     finally:
         _clear_clarify_injection_if_set()
+        _release_rerank_after_web_query()
 
 
 @app.post("/api/query/stream")

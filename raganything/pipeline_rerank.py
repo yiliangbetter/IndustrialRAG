@@ -20,8 +20,10 @@ __all__ = [
     "build_rerank_model_func_from_env",
     "hf_cross_encoder_rerank",
     "release_cross_encoder",
+    "release_rerank_after_query_if_enabled",
     "rerank_release_after_gate",
     "rerank_release_after_predict",
+    "rerank_release_after_query",
 ]
 
 logger = logging.getLogger(__name__)
@@ -62,6 +64,21 @@ def rerank_release_after_predict() -> bool:
 def rerank_release_after_gate() -> bool:
     """When true, drop CrossEncoder singleton when ``evaluate_clarify_gate`` finishes."""
     return _env_flag("RERANK_RELEASE_AFTER_GATE")
+
+
+def rerank_release_after_query() -> bool:
+    """When true, Web server releases CrossEncoder once per HTTP query (see ``rag_web_server``)."""
+    return _env_flag("RERANK_RELEASE_AFTER_QUERY")
+
+
+def release_rerank_after_query_if_enabled() -> None:
+    """Release HF CrossEncoder after a full Web query when ``RERANK_RELEASE_AFTER_QUERY=1``."""
+    if not rerank_release_after_query():
+        return
+    binding = (os.getenv("RERANK_BINDING") or "").strip().lower()
+    if binding not in ("hf", "local", "cross_encoder", "sentence_transformers"):
+        return
+    release_cross_encoder()
 
 
 def _rerank_torch_dtype() -> Any | None:
