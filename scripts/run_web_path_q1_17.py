@@ -57,7 +57,7 @@ REF: dict[int, dict] = {
         "text_all": ["每天"],
         "text_any": [],
         "want_images": True,
-        "caption_any": ["机床外部清洁"],
+        "caption_any": ["清洁机器床身"],
     },
     4: {
         "query": "高速智能封边机机床内部进行清洁，请问步骤是什么？",
@@ -169,11 +169,16 @@ REF: dict[int, dict] = {
         "query": "这四种封边机的电控板的保养周期分别是多久",
         "text_all": [],
         "text_any": [],
-        "text_need2": [
-            ["高速智能", "季度", "每季"],
-            ["自动封边", "半年", "每半年"],
-            ["双端", "半年", "每半年"],
-            ["高速自动", "半年", "每半年"],
+        "text_need2": [],
+        "text_machine_cycles": [
+            {
+                "machine": ["高速智能", "智能封边"],
+                "cycle_any": ["季度", "每季"],
+                "cycle_forbidden": ["半年", "每半年"],
+            },
+            {"machine": ["自动封边"], "cycle_any": ["半年", "每半年"]},
+            {"machine": ["双端"], "cycle_any": ["半年", "每半年"]},
+            {"machine": ["高速自动"], "cycle_any": ["半年", "每半年"]},
         ],
         "want_images": True,
         "caption_min": 4,
@@ -239,6 +244,49 @@ def _contains(term: str, text: str) -> bool:
     return term in text or _norm(term) in _norm(text)
 
 
+def _answer_bullets(answer: str) -> list[str]:
+    bullets: list[str] = []
+    for line in (answer or "").splitlines():
+        line = line.strip()
+        if not line or line.startswith("#"):
+            continue
+        if line.startswith("* "):
+            bullets.append(line[2:].strip())
+        elif line.startswith("- "):
+            bullets.append(line[2:].strip())
+    return bullets or [answer or ""]
+
+
+def _grade_machine_cycle_pairs(answer: str, pairs: list[dict]) -> list[str]:
+    """Require each machine mention to co-occur with the right cycle in the same bullet."""
+    misses: list[str] = []
+    bullets = _answer_bullets(answer)
+    full = answer or ""
+    for pair in pairs:
+        machine_terms = pair.get("machine") or []
+        cycle_any = pair.get("cycle_any") or []
+        cycle_forbidden = pair.get("cycle_forbidden") or []
+        matched = [b for b in bullets if any(_contains(m, b) for m in machine_terms)]
+        if not matched:
+            if any(_contains(m, full) for m in machine_terms):
+                matched = [full]
+            else:
+                misses.append(f"machine_missing:{machine_terms}")
+                continue
+        has_cycle = any(
+            any(_contains(c, line) for c in cycle_any) for line in matched
+        )
+        has_bad = any(
+            any(_contains(c, line) for c in cycle_forbidden) for line in matched
+        )
+        if not has_cycle or has_bad:
+            misses.append(
+                f"machine_cycle:{machine_terms} need {cycle_any}"
+                + (f" forbid {cycle_forbidden}" if cycle_forbidden else "")
+            )
+    return misses
+
+
 def grade_text(answer: str, spec: dict) -> tuple[bool, list[str]]:
     misses: list[str] = []
     a = answer or ""
@@ -251,6 +299,7 @@ def grade_text(answer: str, spec: dict) -> tuple[bool, list[str]]:
     for group in spec.get("text_need2") or []:
         if not any(_contains(g, a) for g in group):
             misses.append(f"need_one_of:{group}")
+    misses.extend(_grade_machine_cycle_pairs(a, spec.get("text_machine_cycles") or []))
     if spec.get("text_count_any") and not any(
         _contains(t, a) for t in spec["text_count_any"]
     ):

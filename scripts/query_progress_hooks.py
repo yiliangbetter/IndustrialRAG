@@ -851,8 +851,57 @@ async def query_progress_hooks() -> AsyncIterator[asyncio.Queue[dict[str, str]]]
         query = args[0] if args else kwargs.get("query", "")
         if isinstance(query, str) and query.strip():
             _query_text.set(query)
-        chunks = await orig_process_chunks(*args, **kwargs)
+        proc_args = args
+        proc_kwargs = kwargs
+        try:
+            from image_query_refs import (  # noqa: WPS433
+                llm_chunk_locality_enabled,
+                supplement_unique_chunks_with_order_neighbors,
+            )
+
+            if llm_chunk_locality_enabled():
+                unique_chunks = (
+                    args[1] if len(args) > 1 else kwargs.get("unique_chunks")
+                )
+                if isinstance(unique_chunks, list) and unique_chunks:
+                    expanded, _loc_meta = (
+                        supplement_unique_chunks_with_order_neighbors(
+                            query, unique_chunks
+                        )
+                    )
+                    if len(expanded) > len(unique_chunks):
+                        if len(args) > 1:
+                            proc_args = (args[0], expanded) + args[2:]
+                        else:
+                            proc_kwargs = dict(kwargs)
+                            proc_kwargs["unique_chunks"] = expanded
+        except Exception:
+            pass
+        chunks = await orig_process_chunks(*proc_args, **proc_kwargs)
         if isinstance(chunks, list) and chunks:
+            try:
+                from image_query_refs import (  # noqa: WPS433
+                    merge_order_neighbors_into_llm_chunks,
+                )
+
+                gconf = (
+                    proc_args[3]
+                    if len(proc_args) > 3
+                    else proc_kwargs.get("global_config")
+                )
+                qparam = (
+                    proc_args[2]
+                    if len(proc_args) > 2
+                    else proc_kwargs.get("query_param")
+                )
+                chunks = merge_order_neighbors_into_llm_chunks(
+                    query,
+                    chunks,
+                    global_config=gconf if isinstance(gconf, dict) else {},
+                    query_param=qparam,
+                )
+            except Exception:
+                pass
             # Plan B: passthrough chunks to the answer LLM (demo granularity).
             # Snapshot the same batch for Plan A inline images; do not narrow/sanitize return.
             _sync_llm_chunks_for_images(query, chunks)

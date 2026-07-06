@@ -16,8 +16,9 @@ from raganything.parser import MineruParser, MineruExecutionError, get_parser
 from raganything.utils import (
     separate_content,
     build_image_ref_block,
-    coalesce_text_image_segments,
-    context_text_for_image,
+    coalesce_parts_for_embedding_ingest,
+    anchor_context_for_image,
+    plan_text_image_assignments,
     flatten_image_refs_for_skip_multimodal,
     insert_text_content,
     insert_text_content_with_multimodal_content,
@@ -152,14 +153,16 @@ class ProcessorMixin:
                 normalized.append(item)
         return normalized
 
-    def _mineru_span_text(self, node: Any) -> str:
+    def _mineru_span_text(self, node: Any, _depth: int = 0) -> str:
         """Extract plain text from nested MinerU span trees (title_content, paragraph_content, etc.)."""
+        if _depth > 64:
+            return ""
         if node is None:
             return ""
         if isinstance(node, str):
             return node.strip()
         if isinstance(node, list):
-            parts = [self._mineru_span_text(x) for x in node]
+            parts = [self._mineru_span_text(x, _depth + 1) for x in node]
             return " ".join(p for p in parts if p).strip()
         if isinstance(node, dict):
             if node.get("type") == "text" and isinstance(node.get("content"), str):
@@ -167,7 +170,7 @@ class ProcessorMixin:
             if isinstance(node.get("text"), str):
                 return str(node["text"]).strip()
             if "content" in node:
-                return self._mineru_span_text(node["content"])
+                return self._mineru_span_text(node["content"], _depth + 1)
         return ""
 
     def _mineru_list_items_text(self, list_items: Any) -> str:
@@ -272,6 +275,8 @@ class ProcessorMixin:
 
     def _build_document_parts_for_ingest(self, items: List[Dict[str, Any]]) -> List[str]:
         """Document-order blocks for ingest; each ``[Table]`` block is one part."""
+        text_image_assignments = plan_text_image_assignments(items)
+        claimed_image_indices = set(text_image_assignments.values())
         parts: List[str] = []
         for idx, item in enumerate(items):
             if not isinstance(item, dict):
@@ -279,12 +284,14 @@ class ProcessorMixin:
             block_type = item.get("type")
 
             if block_type == "image":
+                if idx in claimed_image_indices:
+                    continue
                 img_path = (item.get("img_path") or "").strip()
                 if img_path:
                     caption = resolve_image_caption(items, idx)
                     footnote = resolve_image_footnote(items, idx)
                     page_idx = item.get("page_idx")
-                    context = context_text_for_image(items, idx)
+                    context = anchor_context_for_image(items, idx)
                     parts.append(
                         build_image_ref_block(
                             img_path=img_path,
@@ -321,8 +328,32 @@ class ProcessorMixin:
                 text = item.get("text")
                 if isinstance(text, str):
                     chunk = text.strip()
-            if chunk.strip():
-                parts.append(chunk.strip())
+            if not chunk.strip():
+                continue
+
+            block = chunk.strip()
+            if idx in text_image_assignments:
+                image_idx = text_image_assignments[idx]
+                image_item = items[image_idx]
+                img_path = (image_item.get("img_path") or "").strip()
+                if img_path:
+                    caption = resolve_image_caption(items, image_idx)
+                    footnote = resolve_image_footnote(items, image_idx)
+                    page_idx = image_item.get("page_idx")
+                    context = anchor_context_for_image(
+                        items, image_idx, anchor_text_index=idx
+                    )
+                    block = (
+                        f"{block}\n\n"
+                        + build_image_ref_block(
+                            img_path=img_path,
+                            page_idx=page_idx if isinstance(page_idx, int) else None,
+                            caption=caption,
+                            footnote=footnote,
+                            context=context,
+                        )
+                    )
+            parts.append(block)
 
         return parts
 
@@ -331,19 +362,23 @@ class ProcessorMixin:
         return "\n\n".join(self._build_document_parts_for_ingest(items))
 
     async def _insert_text_content_embedding_only(
-        self, text_content: str, file_ref: str, doc_id: str
+        self,
+        text_content: str,
+        file_ref: str,
+        doc_id: str,
+        *,
+        document_parts: List[str] | None = None,
     ) -> None:
         """Insert text chunks directly into vector/text storages without LLM extraction."""
-        if not text_content.strip():
+        if not text_content.strip() and not document_parts:
             await self._mark_multimodal_processing_complete(doc_id)
             return
 
-        segments = [
-            chunk.strip() for chunk in text_content.split("\n\n") if chunk.strip()
-        ]
-        raw_chunks = coalesce_text_image_segments(segments) if segments else []
+        raw_chunks = coalesce_parts_for_embedding_ingest(
+            document_parts, text_content=text_content
+        )
         if not raw_chunks:
-            raw_chunks = [text_content.strip()]
+            raw_chunks = [(text_content or "").strip()]
 
         chunk_data = {}
         for idx, chunk_text in enumerate(raw_chunks):
@@ -2377,7 +2412,10 @@ class ProcessorMixin:
         # Step 2: Insert pure text content with all parameters
         if self.config.allow_embedding_only_ingestion:
             await self._insert_text_content_embedding_only(
-                text_content=text_content, file_ref=file_ref, doc_id=doc_id
+                text_content=text_content,
+                file_ref=file_ref,
+                doc_id=doc_id,
+                document_parts=document_parts,
             )
             self.logger.info(
                 "Embedding-only ingestion enabled: inserted text-only chunks from content list."

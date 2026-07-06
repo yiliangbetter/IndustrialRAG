@@ -407,6 +407,14 @@ _IMAGE_REF_MARKER = "[图片]"
 _INGEST_IMAGE_PATH_RE = re.compile(
     r"图片路径[：:]\s*(.+?)(?:\n|$)", re.MULTILINE
 )
+_TABLE_INGEST_MARKER = "[Table]"
+_INGEST_SEGMENT_DELIMITER = "\n<<<RAG_SEG_BOUNDARY>>>\n"
+_SECTION_HEADING_LINE_RE = re.compile(r"^(?:\d+\.){1,3}\d+\s+\S")
+_MAINTENANCE_FIELD_PREFIXES = ("保养周期：", "保养内容：", "保养步骤：")
+_COALESCE_HEADING_MAX_CHARS = 120
+_COALESCE_HEADING_LOOKAHEAD = 8
+_COALESCE_IMAGE_LOOKAHEAD = 8
+_COALESCE_METADATA_LOOKAHEAD = 8
 
 
 def _is_image_ref_segment(segment: str) -> bool:
@@ -420,12 +428,675 @@ def _dedupe_key_for_image_segment(segment: str) -> str:
     return (segment or "").strip()
 
 
-def coalesce_text_image_segments(segments: List[str]) -> List[str]:
-    """Merge each text segment with immediately following ``[图片]`` blocks for indexing.
+def _segment_first_line(segment: str) -> str:
+    return (segment or "").strip().split("\n", 1)[0].strip()
 
-    Keeps figure metadata in the same vector chunk as the anchor body so rerank +
-    steering filter text and inline figures together (Route A ingest).
-    """
+
+def _is_section_heading_line(line: str) -> bool:
+    line = (line or "").strip()
+    if not line or len(line) > _COALESCE_HEADING_MAX_CHARS:
+        return False
+    return bool(_SECTION_HEADING_LINE_RE.match(line))
+
+
+def _is_orphan_heading_segment(segment: str) -> bool:
+    seg = (segment or "").strip()
+    if not seg or _is_image_ref_segment(seg) or _TABLE_INGEST_MARKER in seg:
+        return False
+    lines = [line.strip() for line in seg.splitlines() if line.strip()]
+    if len(lines) != 1:
+        return False
+    return _is_section_heading_line(lines[0])
+
+
+def _maintenance_field_prefix(line: str) -> str | None:
+    line = (line or "").strip()
+    for prefix in _MAINTENANCE_FIELD_PREFIXES:
+        if line.startswith(prefix):
+            return prefix
+    return None
+
+
+def _is_orphan_maintenance_field_segment(segment: str) -> bool:
+    """Single parser field line(s) such as ``保养周期：…`` not yet merged into a section block."""
+    seg = (segment or "").strip()
+    if not seg or _is_image_ref_segment(seg) or _TABLE_INGEST_MARKER in seg:
+        return False
+    lines = [line.strip() for line in seg.splitlines() if line.strip()]
+    if not lines:
+        return False
+    if len(lines) == 1:
+        return _maintenance_field_prefix(lines[0]) is not None
+    return all(_maintenance_field_prefix(line) is not None for line in lines)
+
+
+def _is_orphan_maintenance_metadata_only_segment(segment: str) -> bool:
+    """Short 保养内容/周期 field line(s), not a standalone 保养步骤 block."""
+    if not _is_orphan_maintenance_field_segment(segment):
+        return False
+    lines = [line.strip() for line in (segment or "").splitlines() if line.strip()]
+    if not lines:
+        return False
+    if len(lines) == 1:
+        prefix = _maintenance_field_prefix(lines[0])
+        return prefix in ("保养周期：", "保养内容：")
+    return all(
+        _maintenance_field_prefix(line) in ("保养周期：", "保养内容：") for line in lines
+    )
+
+
+def _segment_starts_new_section(segment: str) -> bool:
+    return _is_section_heading_line(_segment_first_line(segment))
+
+
+def _maintenance_section_step_closed(text: str) -> bool:
+    """True once a subsection already has a procedure line or inline figure."""
+    seg = (text or "").strip()
+    return bool(seg) and ("保养步骤：" in seg or _IMAGE_REF_MARKER in seg)
+
+
+def _section_heading_needs_field_merge(segment: str) -> bool:
+    """Heading (+ optional image) block still missing 保养步骤 body."""
+    seg = (segment or "").strip()
+    if not seg or not _segment_starts_new_section(seg):
+        return False
+    if _is_orphan_heading_segment(seg):
+        return False
+    if "保养步骤：" in seg:
+        return False
+    if seg.count("保养内容：") >= 1 and seg.count("保养周期：") >= 1:
+        return False
+    return True
+
+
+def _segment_has_maintenance_cycle(text: str) -> bool:
+    return "保养周期：" in (text or "")
+
+
+def _split_block_at_trailing_orphan_heading(block: str) -> List[str]:
+    """Peel a trailing ``X.Y.Z …`` line off a text block (Q3 trailing 2.1.2)."""
+    block = (block or "").strip()
+    if not block:
+        return []
+    lines = block.splitlines()
+    if len(lines) >= 2 and _is_section_heading_line(lines[-1].strip()):
+        body = "\n".join(lines[:-1]).strip()
+        heading = lines[-1].strip()
+        if body:
+            return [body, heading]
+        return [heading]
+    return [block]
+
+
+def _split_overmerged_maintenance_segment(segment: str) -> List[str]:
+    """Split one ingest segment that bundled multiple implicit subsections (Q7 page-9)."""
+    seg = (segment or "").strip()
+    if not seg or _is_image_ref_segment(seg) or _TABLE_INGEST_MARKER in seg:
+        return [seg] if seg else []
+    raw_blocks = [part.strip() for part in seg.split("\n\n") if part.strip()]
+    blocks: List[str] = []
+    for block in raw_blocks:
+        if _is_image_ref_segment(block) or _is_orphan_heading_segment(block):
+            blocks.append(block)
+        else:
+            blocks.extend(_split_block_at_trailing_orphan_heading(block))
+    if len(blocks) <= 1:
+        return [seg]
+    sections: List[List[str]] = []
+    current: List[str] = []
+    for block in blocks:
+        if _is_image_ref_segment(block):
+            if current:
+                current.append(block)
+                sections.append(current)
+                current = []
+            else:
+                sections.append([block])
+            continue
+        first_line = block.split("\n", 1)[0].strip()
+        if _is_orphan_heading_segment(block):
+            if current:
+                sections.append(current)
+            current = [block]
+            continue
+        prefix = _maintenance_field_prefix(first_line)
+        joined = "\n\n".join(current)
+        if prefix == "保养周期：" and current and _segment_has_maintenance_cycle(joined):
+            sections.append(current)
+            current = [block]
+            continue
+        if prefix == "保养内容：" and current and _maintenance_section_step_closed(joined):
+            sections.append(current)
+            current = [block]
+            continue
+        current.append(block)
+    if current:
+        sections.append(current)
+    if len(sections) <= 1:
+        return [seg]
+    return ["\n\n".join(part for part in section if part) for section in sections if section]
+
+
+def _explode_overmerged_segments(segments: List[str]) -> List[str]:
+    out: List[str] = []
+    for segment in segments:
+        out.extend(_split_overmerged_maintenance_segment(segment))
+    return out
+
+
+def _segment_has_maintenance_body(segment: str) -> bool:
+    seg = (segment or "").strip()
+    if not seg:
+        return False
+    if _segment_starts_new_section(seg):
+        return True
+    if "保养内容：" in seg or "保养步骤：" in seg or "保养周期：" in seg:
+        return True
+    return False
+
+
+def _follows_maintenance_subsection(segments: List[str], index: int) -> bool:
+    """True when the next part is a 保养周期/内容 metadata line (not 保养步骤 body)."""
+    if index + 1 >= len(segments):
+        return False
+    nxt = (segments[index + 1] or "").strip()
+    if not nxt or _is_image_ref_segment(nxt):
+        return False
+    prefix = _maintenance_field_prefix(_segment_first_line(nxt))
+    return prefix in ("保养周期：", "保养内容：")
+
+
+def _has_backward_procedure_for_heading(segments: List[str], index: int) -> bool:
+    """Orphan 保养步骤 before a heading may still belong to that section (Q7)."""
+    for j in range(max(0, index - _COALESCE_METADATA_LOOKAHEAD), index):
+        cand = (segments[j] or "").strip()
+        if not cand or _is_image_ref_segment(cand):
+            continue
+        if _is_orphan_maintenance_field_segment(cand):
+            if _maintenance_field_prefix(_segment_first_line(cand)) == "保养步骤：":
+                return True
+        elif "保养步骤：" in cand and not _segment_starts_new_section(cand):
+            return True
+    return False
+
+
+def _should_collect_maintenance_subsection(segments: List[str], index: int) -> bool:
+    return _follows_maintenance_subsection(segments, index) and not _has_backward_procedure_for_heading(
+        segments, index
+    )
+
+
+def _collect_maintenance_section_parts(
+    segments: List[str],
+    start: int,
+) -> tuple[List[str], int]:
+    """Collect heading/field lines and optional immediate ``[图片]`` for one subsection."""
+    parts = [segments[start]]
+    j = start + 1
+    while j < len(segments):
+        nxt = (segments[j] or "").strip()
+        if not nxt:
+            j += 1
+            continue
+        if _is_orphan_heading_segment(nxt):
+            break
+        if _segment_starts_new_section(nxt) and not _is_orphan_maintenance_field_segment(nxt):
+            break
+        if _is_orphan_maintenance_field_segment(nxt):
+            joined = "\n\n".join(parts)
+            nxt_prefix = _maintenance_field_prefix(_segment_first_line(nxt))
+            if nxt_prefix == "保养周期：" and _segment_has_maintenance_cycle(joined):
+                break
+            if nxt_prefix == "保养内容：" and _maintenance_section_step_closed(joined):
+                break
+            parts.append(nxt)
+            j += 1
+            continue
+        if _is_image_ref_segment(nxt):
+            parts.append(nxt)
+            j += 1
+            break
+        if _TABLE_INGEST_MARKER in nxt:
+            break
+        if len(_segment_first_line(nxt)) <= _COALESCE_HEADING_MAX_CHARS:
+            parts.append(nxt)
+            j += 1
+            continue
+        break
+    return parts, j
+
+
+def _assemble_maintenance_section_segments(segments: List[str]) -> List[str]:
+    """Group numbered headings with following 保养内容/周期/步骤 fields before the figure."""
+    working = [(segment or "").strip() for segment in segments if (segment or "").strip()]
+    out: List[str] = []
+    i = 0
+    while i < len(working):
+        seg = working[i]
+        if _is_image_ref_segment(seg) or _TABLE_INGEST_MARKER in seg:
+            out.append(seg)
+            i += 1
+            continue
+        if _is_orphan_heading_segment(seg):
+            if _should_collect_maintenance_subsection(working, i):
+                parts, i = _collect_maintenance_section_parts(working, i)
+                out.append("\n\n".join(parts))
+                continue
+            out.append(seg)
+            i += 1
+            continue
+        if _segment_starts_new_section(seg):
+            parts, i = _collect_maintenance_section_parts(working, i)
+            out.append("\n\n".join(parts))
+            continue
+        if _is_orphan_maintenance_metadata_only_segment(seg):
+            parts, i = _collect_maintenance_section_parts(working, i)
+            out.append("\n\n".join(parts))
+            continue
+        out.append(seg)
+        i += 1
+    return out
+
+
+def _merge_trailing_procedure_into_preceding(segments: List[str]) -> List[str]:
+    """Attach orphan ``保养步骤：…`` lines to the preceding section block (Q7/Q13)."""
+    working = [(segment or "").strip() for segment in segments if (segment or "").strip()]
+    max_passes = max(len(working) * 2, 8)
+    for _ in range(max_passes):
+        changed = False
+        i = 1
+        while i < len(working):
+            seg = working[i]
+            if not _is_orphan_maintenance_field_segment(seg):
+                i += 1
+                continue
+            if _maintenance_field_prefix(_segment_first_line(seg)) != "保养步骤：":
+                i += 1
+                continue
+            prev = working[i - 1]
+            if _is_image_ref_segment(prev) or _TABLE_INGEST_MARKER in prev:
+                i += 1
+                continue
+            if not _segment_has_maintenance_body(prev):
+                i += 1
+                continue
+            working[i - 1] = f"{prev}\n\n{seg}"
+            del working[i]
+            changed = True
+        if not changed:
+            break
+    return working
+
+
+def _merge_unheaded_fields_with_heading_sections(segments: List[str]) -> List[str]:
+    """Merge anonymous 保养内容/步骤 blocks into a later thin heading section (Q7)."""
+    working = [(segment or "").strip() for segment in segments if (segment or "").strip()]
+    skip: set[int] = set()
+    for i in range(len(working)):
+        if i in skip:
+            continue
+        seg = working[i]
+        if not _section_heading_needs_field_merge(seg):
+            continue
+        heading = _segment_first_line(seg)
+        best_j = -1
+        best_score = 0.12
+        for j in range(max(0, i - _COALESCE_METADATA_LOOKAHEAD), i):
+            if j in skip:
+                continue
+            cand = working[j]
+            if _is_image_ref_segment(cand) or _TABLE_INGEST_MARKER in cand:
+                continue
+            if _is_orphan_heading_segment(cand):
+                continue
+            if _segment_starts_new_section(cand) and "保养步骤：" in cand:
+                continue
+            score = text_term_alignment_symmetric(heading, cand)
+            if score > best_score:
+                best_score = score
+                best_j = j
+        if best_j < 0:
+            continue
+        working[i] = f"{working[best_j]}\n\n{seg}"
+        skip.add(best_j)
+    return [seg for idx, seg in enumerate(working) if idx not in skip]
+
+
+def _merge_orphan_maintenance_metadata_segments(segments: List[str]) -> List[str]:
+    """Forward-merge orphan field lines into the next body block within a short window."""
+    working = [(segment or "").strip() for segment in segments if (segment or "").strip()]
+    max_passes = max(len(working) * 2, 8)
+    for _ in range(max_passes):
+        changed = False
+        i = 0
+        while i < len(working):
+            if not _is_orphan_maintenance_field_segment(working[i]):
+                i += 1
+                continue
+            meta_parts: List[str] = []
+            j = i
+            while j < len(working) and _is_orphan_maintenance_field_segment(working[j]):
+                meta_parts.append(working[j])
+                j += 1
+            if meta_parts and _maintenance_section_step_closed("\n\n".join(meta_parts)):
+                i += len(meta_parts)
+                continue
+            if j >= len(working):
+                break
+            best_k = -1
+            best_score = 0.0
+            for k in range(j, min(j + _COALESCE_METADATA_LOOKAHEAD + 1, len(working))):
+                cand = working[k]
+                if _is_orphan_heading_segment(cand) or _is_image_ref_segment(cand):
+                    continue
+                if _segment_starts_new_section(cand) and not _is_orphan_maintenance_field_segment(
+                    cand
+                ):
+                    continue
+                anchor = " ".join(meta_parts)
+                score = text_term_alignment_symmetric(anchor, cand)
+                if score >= 0.08 and score >= best_score:
+                    best_score = score
+                    best_k = k
+            if best_k < 0 and j < len(working):
+                cand = working[j]
+                if (
+                    not _is_orphan_heading_segment(cand)
+                    and not _is_image_ref_segment(cand)
+                    and not (
+                        _segment_starts_new_section(cand)
+                        and not _is_orphan_maintenance_field_segment(cand)
+                    )
+                ):
+                    best_k = j
+            if best_k < 0:
+                i += 1
+                continue
+            merged_parts = meta_parts + [working[best_k]]
+            remove_at = [best_k]
+            if (
+                best_k + 1 < len(working)
+                and _is_image_ref_segment(working[best_k + 1])
+                and best_k == j
+            ):
+                merged_parts.append(working[best_k + 1])
+                remove_at.append(best_k + 1)
+            working[i] = "\n\n".join(merged_parts)
+            for idx in sorted(set(remove_at), reverse=True):
+                if idx != i:
+                    del working[idx]
+            changed = True
+            i += 1
+        if not changed:
+            break
+    return working
+
+
+def _segment_has_inline_image(segment: str) -> bool:
+    seg = (segment or "").strip()
+    return bool(seg) and (_is_image_ref_segment(seg) or _IMAGE_REF_MARKER in seg)
+
+
+def _context_from_ref_segment(segment: str) -> str:
+    for line in (segment or "").splitlines():
+        if line.startswith("关联正文："):
+            return line[5:].strip()
+    return ""
+
+
+def _image_label_from_ref_segment(segment: str) -> str:
+    caption = ""
+    footnote = ""
+    for line in (segment or "").splitlines():
+        if line.startswith("图注："):
+            caption = line[3:].strip()
+        elif line.startswith("脚注："):
+            footnote = line[3:].strip()
+    return " ".join(part for part in (caption, footnote) if part).strip()
+
+
+def _image_match_text_from_ref_segment(segment: str) -> str:
+    """Caption, footnote, or ingest ``关联正文`` for term-overlap pairing."""
+    label = _image_label_from_ref_segment(segment)
+    context = _context_from_ref_segment(segment)
+    return " ".join(part for part in (label, context) if part).strip()
+
+
+_BULLET_PREFIX_RE = re.compile(r"^[\s\u2022\u25cf\u25aa\u25e6\uF0D8\u2023\-–—*]+")
+
+
+def _anchor_pairing_priority(anchor: str) -> float:
+    """Prefer short procedure lines over section headings (structural, not domain)."""
+    text = (anchor or "").strip()
+    if not text:
+        return 0.0
+    lines = [line.strip() for line in text.splitlines() if line.strip()]
+    if len(lines) != 1:
+        return 0.0
+    line = lines[0]
+    if _is_section_heading_line(line):
+        return -0.06
+    bonus = 0.0
+    if len(line) <= 72:
+        bonus += 0.06
+    if _BULLET_PREFIX_RE.match(line):
+        bonus += 0.08
+    return bonus
+
+
+def _split_image_blocks_in_segment(segment: str) -> List[str]:
+    """Split one segment that contains multiple ``[图片]`` blocks into smaller parts."""
+    seg = (segment or "").strip()
+    if not seg or _TABLE_INGEST_MARKER in seg:
+        return [seg] if seg else []
+    parts = [part.strip() for part in seg.split("\n\n") if part.strip()]
+    image_parts = [part for part in parts if _is_image_ref_segment(part)]
+    if len(image_parts) <= 1:
+        return [seg]
+    text_parts = [part for part in parts if not _is_image_ref_segment(part)]
+    leading_text = "\n\n".join(text_parts).strip()
+    out: List[str] = []
+    emitted_leading = False
+    for img_part in image_parts:
+        match_text = _image_match_text_from_ref_segment(img_part)
+        if leading_text and text_term_alignment_symmetric(leading_text, match_text) >= 0.28:
+            out.append(f"{leading_text}\n\n{img_part}")
+            emitted_leading = True
+        else:
+            if leading_text and not emitted_leading:
+                out.append(leading_text)
+                emitted_leading = True
+            out.append(img_part)
+    if leading_text and not emitted_leading:
+        out.insert(0, leading_text)
+    return out
+
+
+def _split_multi_image_segments(segments: List[str]) -> List[str]:
+    out: List[str] = []
+    for segment in segments:
+        out.extend(_split_image_blocks_in_segment(segment))
+    return out
+
+
+def _heading_body_merge_score(
+    heading: str,
+    candidate: str,
+    segments: List[str],
+    candidate_index: int,
+) -> float:
+    score = text_term_alignment_symmetric(heading, candidate)
+    inline_labels: List[str] = []
+    if _IMAGE_REF_MARKER in candidate:
+        for part in candidate.split("\n\n"):
+            if not _is_image_ref_segment(part):
+                continue
+            label = _image_label_from_ref_segment(part)
+            if label:
+                inline_labels.append(label)
+    for label in inline_labels:
+        img_score = text_term_alignment_symmetric(heading, label)
+        score = max(score, img_score * 0.92 + score * 0.08)
+
+    nearest_img = 0.0
+    if candidate_index + 1 < len(segments):
+        nxt = (segments[candidate_index + 1] or "").strip()
+        if _is_image_ref_segment(nxt):
+            label = _image_label_from_ref_segment(nxt)
+            if label:
+                nearest_img = text_term_alignment_symmetric(heading, label)
+                score = max(score, nearest_img * 0.92 + score * 0.08)
+
+    if not inline_labels and not nearest_img:
+        for k in range(
+            candidate_index + 1,
+            min(candidate_index + _COALESCE_HEADING_LOOKAHEAD + 1, len(segments)),
+        ):
+            img_seg = (segments[k] or "").strip()
+            if _is_orphan_heading_segment(img_seg):
+                continue
+            if _is_image_ref_segment(img_seg):
+                label = _image_label_from_ref_segment(img_seg)
+                if label:
+                    align = text_term_alignment_symmetric(heading, label)
+                    nearest_img = max(nearest_img, align)
+                    score = max(score, align * 0.88 + score * 0.12)
+                break
+            if _segment_has_maintenance_body(img_seg):
+                break
+
+    if inline_labels:
+        best_inline = max(
+            text_term_alignment_symmetric(heading, label) for label in inline_labels
+        )
+        if best_inline >= 0.28:
+            score = max(score, best_inline * 0.88 + score * 0.12)
+        elif score >= 0.18 and best_inline < 0.18:
+            score *= 0.25
+    elif nearest_img >= 0.28:
+        score = max(score, nearest_img * 0.88 + score * 0.12)
+    elif nearest_img >= 0.12 and score >= 0.18 and nearest_img < 0.18:
+        score *= 0.55
+    return score
+
+
+def _best_heading_body_score_before(
+    heading: str,
+    working: List[str],
+    heading_index: int,
+) -> float:
+    best = 0.0
+    for j in range(max(0, heading_index - _COALESCE_HEADING_LOOKAHEAD), heading_index):
+        cand = working[j]
+        if _is_orphan_heading_segment(cand) or _is_image_ref_segment(cand):
+            continue
+        if _TABLE_INGEST_MARKER in cand:
+            continue
+        if not _segment_has_maintenance_body(cand):
+            continue
+        best = max(best, _heading_body_merge_score(heading, cand, working, j))
+    return best
+
+
+def _maintenance_step_alignment(heading: str, candidate: str) -> float:
+    best = 0.0
+    for line in (candidate or "").splitlines():
+        if line.startswith("保养步骤："):
+            best = max(best, text_term_alignment_symmetric(heading, line))
+    return best
+
+
+def _merge_trailing_orphan_headings_backward(working: List[str]) -> List[str]:
+    """Exclusive backward pairing when headings trail their body blocks (Q3)."""
+    heading_indices = [
+        idx for idx, seg in enumerate(working) if _is_orphan_heading_segment(seg)
+    ]
+    if not heading_indices:
+        return working
+    body_indices = [
+        idx
+        for idx, seg in enumerate(working)
+        if not _is_orphan_heading_segment(seg)
+        and not _is_image_ref_segment(seg)
+        and _TABLE_INGEST_MARKER not in seg
+        and _segment_has_maintenance_body(seg)
+    ]
+    if not body_indices:
+        return working
+    pairs: List[tuple[float, float, int, int, int]] = []
+    for hi in heading_indices:
+        heading = working[hi]
+        for bi in body_indices:
+            score = _heading_body_merge_score(heading, working[bi], working, bi)
+            if score >= 0.12:
+                step_align = _maintenance_step_alignment(heading, working[bi])
+                pairs.append((score, step_align, -abs(hi - bi), hi, bi))
+    pairs.sort(key=lambda item: (item[0], item[1], item[2]), reverse=True)
+    used_headings: set[int] = set()
+    used_bodies: set[int] = set()
+    for _score, _step, _dist, hi, bi in pairs:
+        if hi in used_headings or bi in used_bodies:
+            continue
+        working[bi] = f"{working[hi]}\n\n{working[bi]}"
+        used_headings.add(hi)
+        used_bodies.add(bi)
+    return [seg for idx, seg in enumerate(working) if idx not in used_headings]
+
+
+def _merge_orphan_heading_segments(segments: List[str]) -> List[str]:
+    """Attach orphan section headings (e.g. ``2.1.1 …``) to the best-aligned body block."""
+    working = [(segment or "").strip() for segment in segments if (segment or "").strip()]
+    max_passes = max(len(working) * 2, 8)
+    for _pass in range(max_passes):
+        changed = False
+        i = 0
+        while i < len(working):
+            if not _is_orphan_heading_segment(working[i]):
+                i += 1
+                continue
+            heading = working[i]
+            best_j = -1
+            best_score = 0.12
+            for j in range(i + 1, min(i + _COALESCE_HEADING_LOOKAHEAD + 1, len(working))):
+                cand = working[j]
+                if _is_orphan_heading_segment(cand):
+                    break
+                if _TABLE_INGEST_MARKER in cand or _is_image_ref_segment(cand):
+                    continue
+                score = _heading_body_merge_score(heading, cand, working, j)
+                if score > best_score:
+                    best_score = score
+                    best_j = j
+            backward_best = _best_heading_body_score_before(heading, working, i)
+            if best_j >= 0 and backward_best >= 0.12 and backward_best >= best_score * 0.38:
+                i += 1
+                continue
+            if best_j < 0:
+                i += 1
+                continue
+            absorb_image = (
+                best_j + 1 < len(working)
+                and _is_image_ref_segment(working[best_j + 1])
+            )
+            merged = f"{heading}\n\n{working[best_j]}"
+            if absorb_image:
+                merged = f"{merged}\n\n{working[best_j + 1]}"
+            working[i] = merged
+            remove_at = [best_j]
+            if absorb_image:
+                remove_at.append(best_j + 1)
+            for idx in sorted(remove_at, reverse=True):
+                if idx != i:
+                    del working[idx]
+            changed = True
+            i += 1
+        if not changed:
+            break
+    return _merge_trailing_orphan_headings_backward(working)
+
+
+def _coalesce_immediate_text_image_segments(segments: List[str]) -> List[str]:
+    """Merge each text segment with immediately following ``[图片]`` blocks."""
     out: List[str] = []
     i = 0
     n = len(segments)
@@ -445,6 +1116,11 @@ def coalesce_text_image_segments(segments: List[str]) -> List[str]:
             nxt = (segments[j] or "").strip()
             if not nxt or not _is_image_ref_segment(nxt):
                 break
+            if j > i + 1:
+                break
+            match_text = _image_match_text_from_ref_segment(nxt)
+            if match_text and text_term_alignment_symmetric(seg, match_text) < 0.2:
+                break
             key = _dedupe_key_for_image_segment(nxt)
             if key not in seen_images:
                 seen_images.add(key)
@@ -455,8 +1131,166 @@ def coalesce_text_image_segments(segments: List[str]) -> List[str]:
     return out
 
 
-_TABLE_INGEST_MARKER = "[Table]"
-_INGEST_SEGMENT_DELIMITER = "\n<<<RAG_SEG_BOUNDARY>>>\n"
+def _lookahead_pair_text_image_segments(
+    segments: List[str],
+    *,
+    max_lookahead: int = _COALESCE_IMAGE_LOOKAHEAD,
+) -> List[str]:
+    """Pair text-only segments with label-aligned ``[图片]`` blocks within a short window."""
+    skip: set[int] = set()
+    out: List[str] = []
+    min_score = max(0.22, _LABEL_ALIGN_MIN * 0.8)
+    n = len(segments)
+    for i in range(n):
+        if i in skip:
+            continue
+        seg = (segments[i] or "").strip()
+        if not seg:
+            continue
+        if _segment_has_inline_image(seg) or _TABLE_INGEST_MARKER in seg:
+            out.append(seg)
+            continue
+        best_k = -1
+        best_score = 0.0
+        for k in range(i + 1, min(i + max_lookahead + 1, n)):
+            if k in skip:
+                continue
+            img_seg = (segments[k] or "").strip()
+            if not _is_image_ref_segment(img_seg):
+                continue
+            match_text = _image_match_text_from_ref_segment(img_seg)
+            score = (
+                text_term_alignment_symmetric(seg, match_text) if match_text else 0.0
+            )
+            if k == i + 1 and score < min_score:
+                score = max(score, 0.28)
+            score += _anchor_pairing_priority(seg)
+            if score >= min_score and score >= best_score:
+                best_score = score
+                best_k = k
+        if best_k >= 0:
+            out.append(f"{seg}\n\n{segments[best_k].strip()}")
+            skip.add(best_k)
+        else:
+            out.append(seg)
+    return out
+
+
+def coalesce_text_image_segments(segments: List[str]) -> List[str]:
+    """Merge anchor text with inline figures for indexing (P2: headings + lookahead).
+
+    Keeps figure metadata in the same vector chunk as the anchor body so rerank +
+    steering filter text and inline figures together (Route A ingest).
+    """
+    if not segments:
+        return []
+    exploded = _explode_overmerged_segments(segments)
+    assembled = _assemble_maintenance_section_segments(exploded)
+    metadata = _merge_orphan_maintenance_metadata_segments(assembled)
+    bridged = _merge_unheaded_fields_with_heading_sections(metadata)
+    merged = _merge_orphan_heading_segments(bridged)
+    split = _split_multi_image_segments(merged)
+    paired = _lookahead_pair_text_image_segments(split)
+    trailing = _merge_trailing_procedure_into_preceding(paired)
+    return _coalesce_immediate_text_image_segments(trailing)
+
+
+def plan_text_image_assignments(
+    items: List[Dict[str, Any]],
+    *,
+    label_align_min: float | None = None,
+) -> Dict[int, int]:
+    """Exclusive text-index -> image-index pairing for ingest (parser fields + term overlap)."""
+    align_min = label_align_min if label_align_min is not None else _LABEL_ALIGN_MIN
+    image_index_by_id: Dict[int, int] = {
+        id(item): idx
+        for idx, item in enumerate(items)
+        if isinstance(item, dict) and item.get("type") == "image"
+    }
+    candidates: List[tuple[float, int, int]] = []
+    for ti, item in enumerate(items):
+        if not isinstance(item, dict) or item.get("type") != "text":
+            continue
+        anchor = str(item.get("text") or "").strip()
+        if not anchor:
+            continue
+        page_idx = item.get("page_idx")
+        hi = min(len(items), ti + _READING_ORDER_IMAGE_WINDOW + 1)
+        for ii in range(ti + 1, hi):
+            img = items[ii]
+            if not isinstance(img, dict) or img.get("type") != "image":
+                continue
+            if page_idx is not None and img.get("page_idx") != page_idx:
+                break
+            label = image_label_for_item(items, img)
+            label_score = (
+                text_term_alignment_symmetric(anchor, label) if label else 0.0
+            )
+            context = context_text_for_image(items, ii, max_chars=400)
+            context_score = (
+                text_term_alignment_symmetric(anchor, context) if context else 0.0
+            )
+            pair_score = max(label_score, context_score * 0.92)
+            dist = max(1, ii - ti)
+            priority = _anchor_pairing_priority(anchor)
+            if pair_score >= align_min:
+                candidates.append((pair_score + 0.06 / dist + priority, ti, ii))
+            elif dist == 1:
+                candidates.append((0.32 + 0.05 / dist + priority, ti, ii))
+            elif dist <= 3 and context_score >= 0.45:
+                candidates.append((context_score + 0.04 / dist + priority, ti, ii))
+        best = best_image_for_text_item(items, ti)
+        if best is not None:
+            ii = image_index_by_id.get(id(best))
+            if ii is None or ii <= ti:
+                continue
+            label = image_label_for_item(items, best)
+            label_score = (
+                text_term_alignment_symmetric(anchor, label) if label else 0.22
+            )
+            context = context_text_for_image(items, ii, max_chars=400)
+            context_score = (
+                text_term_alignment_symmetric(anchor, context) if context else 0.0
+            )
+            pair_score = max(label_score, context_score * 0.92)
+            dist = max(1, ii - ti)
+            candidates.append(
+                (pair_score + 0.08 / dist + _anchor_pairing_priority(anchor), ti, ii)
+            )
+
+    candidates.sort(key=lambda row: (-row[0], row[2], row[1]))
+    assignments: Dict[int, int] = {}
+    used_images: set[int] = set()
+    used_texts: set[int] = set()
+    for score, ti, ii in candidates:
+        if ti in used_texts or ii in used_images:
+            continue
+        if score < 0.18 and ii - ti > 3:
+            continue
+        assignments[ti] = ii
+        used_texts.add(ti)
+        used_images.add(ii)
+    return assignments
+
+
+def anchor_context_for_image(
+    items: List[Dict[str, Any]],
+    image_index: int,
+    *,
+    anchor_text_index: int | None = None,
+    max_chars: int = 800,
+) -> str:
+    """Context for an image ref: prefer the assigned anchor text body."""
+    if anchor_text_index is not None:
+        if 0 <= anchor_text_index < len(items):
+            anchor_item = items[anchor_text_index]
+            if isinstance(anchor_item, dict) and anchor_item.get("type") == "text":
+                text = str(anchor_item.get("text") or "").strip()
+                if text:
+                    return text[:max_chars]
+    return context_text_for_image(items, image_index, max_chars=max_chars)
+
+
 _TABLE_ROW_RE = re.compile(r"<tr>.*?</tr>", re.IGNORECASE | re.DOTALL)
 
 
@@ -569,6 +1403,51 @@ def _split_table_html_segment(
     return out or [piece]
 
 
+def _part_starts_section_heading(part: str) -> bool:
+    return _is_section_heading_line(_segment_first_line(part))
+
+
+def _split_sub_parts_at_section_heading_boundaries(sub_parts: List[str]) -> List[List[str]]:
+    """Split ingest sub-parts so coalesce never crosses numbered section headings."""
+    groups: List[List[str]] = []
+    current: List[str] = []
+    for part in sub_parts:
+        piece = (part or "").strip()
+        if not piece:
+            continue
+        if current and _part_starts_section_heading(piece):
+            groups.append(current)
+            current = [piece]
+        else:
+            current.append(piece)
+    if current:
+        groups.append(current)
+    return groups
+
+
+def _coalesce_sub_parts_by_section(sub_parts: List[str]) -> List[str]:
+    """Run P2 coalesce within each numbered-section batch (avoids mega-doc cross-merge)."""
+    out: List[str] = []
+    for group in _split_sub_parts_at_section_heading_boundaries(sub_parts):
+        out.extend(coalesce_text_image_segments(group))
+    return out
+
+
+def coalesce_parts_for_embedding_ingest(
+    document_parts: List[str] | None,
+    *,
+    text_content: str = "",
+) -> List[str]:
+    """Coalesce ingest parts/chunks without token splitting (embedding-only path)."""
+    if document_parts:
+        if table_aware_ingest_enabled():
+            return build_table_aware_ingest_segments(document_parts)
+        parts = [p.strip() for p in document_parts if p.strip()]
+        return _coalesce_sub_parts_by_section(parts) if parts else []
+    segments = [s.strip() for s in (text_content or "").split("\n\n") if s.strip()]
+    return _coalesce_sub_parts_by_section(segments) if segments else []
+
+
 def build_table_aware_ingest_segments(document_parts: List[str]) -> List[str]:
     """Keep each ``[Table]`` block intact; coalesce adjacent non-table parts."""
     segments: List[str] = []
@@ -578,8 +1457,8 @@ def build_table_aware_ingest_segments(document_parts: List[str]) -> List[str]:
         nonlocal buf
         if not buf:
             return
-        sub_parts = [p.strip() for p in "\n\n".join(buf).split("\n\n") if p.strip()]
-        segments.extend(coalesce_text_image_segments(sub_parts))
+        sub_parts = [p.strip() for p in buf if (p or "").strip()]
+        segments.extend(_coalesce_sub_parts_by_section(sub_parts))
         buf = []
 
     for part in document_parts:
@@ -590,6 +1469,8 @@ def build_table_aware_ingest_segments(document_parts: List[str]) -> List[str]:
             flush_buf()
             segments.append(piece)
             continue
+        if buf and _part_starts_section_heading(piece):
+            flush_buf()
         buf.append(piece)
     flush_buf()
     return segments
@@ -821,8 +1702,10 @@ def context_text_for_image(
 
     if label and page_idx is not None:
         ranked_labels: List[tuple[float, str]] = []
-        for j, other in enumerate(items):
-            if j >= index or not isinstance(other, dict):
+        lo = max(0, index - 8)
+        for j in range(lo, index):
+            other = items[j]
+            if not isinstance(other, dict):
                 continue
             if other.get("page_idx") != page_idx or other.get("type") != "text":
                 continue
@@ -832,8 +1715,8 @@ def context_text_for_image(
             align = text_term_alignment_symmetric(label, text.strip())
             if align <= 0:
                 continue
-            order_bonus = (index - j) * 0.01
-            ranked_labels.append((-(align - order_bonus), text.strip()))
+            proximity = 1.0 + (index - j) * 0.12
+            ranked_labels.append((-(align * proximity), text.strip()))
         ranked_labels.sort()
         for _, text in ranked_labels[:1]:
             add_text(text)

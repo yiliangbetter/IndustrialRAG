@@ -1371,7 +1371,7 @@ async def api_ingest(files: list[UploadFile] = File(...)):
     tmp_root = Path(tempfile.mkdtemp(prefix="rag_web_ingest_"))
     try:
         saved = await _save_uploaded_files(files, tmp_root)
-        ok, fail, errors, cancelled = await _run_ingest_on_folder(tmp_root)
+        ok, fail, errors, cancelled, _rollback_removed = await _run_ingest_on_folder(tmp_root)
         return {
             "ok": ok,
             "fail": fail,
@@ -1403,12 +1403,18 @@ async def _save_uploaded_files(files: list[UploadFile], tmp_root: Path) -> list[
 async def _run_ingest_on_folder(
     input_folder: Path,
     on_event=None,
-) -> tuple[int, int, list[dict[str, str]], bool]:
+    *,
+    session_started: list[str] | None = None,
+    session_completed: list[str] | None = None,
+) -> tuple[int, int, list[dict[str, str]], bool, int]:
     rpc = _load_rpc()
     pod = Path(state.parser_output_dir)
     parse_method = (os.getenv("PARSE_METHOD") or "auto").strip()
     parse_extra = rpc._mineru_parse_kwargs(state.config.parser)
     logger = __import__("lightrag.utils", fromlist=["logger"]).logger
+    started = session_started if session_started is not None else []
+    completed = session_completed if session_completed is not None else []
+    rollback_removed = 0
 
     async with state.lock:
         ok, fail, errors, cancelled = await rpc._ingest_folder(
@@ -1424,14 +1430,18 @@ async def _run_ingest_on_folder(
             skip_multimodal=state.skip_multimodal,
             on_event=on_event,
             should_cancel=lambda: state.ingest_cancel_requested,
+            session_started=started,
+            session_completed=completed,
         )
-        if not cancelled and state.rag is not None:
+        if cancelled and state.rag is not None:
+            rollback_removed = await rpc.rollback_cancelled_ingest_files(
+                state.rag, started, completed
+            )
+            await state.rag.finalize_storages()
+        elif not cancelled and state.rag is not None:
             await state.rag.finalize_storages()
 
-    if cancelled:
-        await _clear_knowledge_base()
-
-    return ok, fail, errors, cancelled
+    return ok, fail, errors, cancelled, rollback_removed
 
 
 async def _ingest_stream_events(files: list[UploadFile]) -> AsyncIterator[str]:
@@ -1439,11 +1449,22 @@ async def _ingest_stream_events(files: list[UploadFile]) -> AsyncIterator[str]:
     queue: asyncio.Queue[dict[str, Any]] = asyncio.Queue()
     state.ingest_active = True
     state.ingest_cancel_requested = False
+    session_started: list[str] = []
+    session_completed: list[str] = []
 
     async def on_event(ev: dict[str, Any]) -> None:
         await queue.put(ev)
 
+    def _cancel_message(rollback_removed: int) -> str:
+        if rollback_removed > 0:
+            return (
+                f"已停止灌库，已清理 {rollback_removed} 个未完成文档的索引"
+                "（已有文档已保留）"
+            )
+        return "已停止灌库（已有文档已保留）"
+
     async def worker() -> None:
+        rollback_removed = 0
         try:
             saved = await _save_uploaded_files(files, tmp_root)
             await queue.put(
@@ -1453,8 +1474,11 @@ async def _ingest_stream_events(files: list[UploadFile]) -> AsyncIterator[str]:
                     "message": f"已接收 {len(saved)} 个文件，开始灌库…",
                 }
             )
-            ok, fail, errors, cancelled = await _run_ingest_on_folder(
-                tmp_root, on_event=on_event
+            ok, fail, errors, cancelled, rollback_removed = await _run_ingest_on_folder(
+                tmp_root,
+                on_event=on_event,
+                session_started=session_started,
+                session_completed=session_completed,
             )
             if cancelled:
                 await queue.put(
@@ -1463,8 +1487,9 @@ async def _ingest_stream_events(files: list[UploadFile]) -> AsyncIterator[str]:
                         "ok": ok,
                         "fail": fail,
                         "errors": errors,
-                        "message": "已停止灌库并清空知识库",
-                        "storage_cleared": True,
+                        "message": _cancel_message(rollback_removed),
+                        "rollback_removed": rollback_removed,
+                        "storage_cleared": False,
                     }
                 )
             else:
@@ -1479,17 +1504,23 @@ async def _ingest_stream_events(files: list[UploadFile]) -> AsyncIterator[str]:
         except Exception as exc:
             if state.ingest_cancel_requested:
                 try:
-                    await _clear_knowledge_base()
+                    if state.rag is not None:
+                        rpc = _load_rpc()
+                        rollback_removed = await rpc.rollback_cancelled_ingest_files(
+                            state.rag, session_started, session_completed
+                        )
+                        await state.rag.finalize_storages()
                 except Exception:
-                    pass
+                    rollback_removed = 0
                 await queue.put(
                     {
                         "type": "cancelled",
                         "ok": 0,
                         "fail": 0,
                         "errors": [{"file": "", "error": str(exc)}],
-                        "message": "灌库已中断并清空知识库",
-                        "storage_cleared": True,
+                        "message": _cancel_message(rollback_removed),
+                        "rollback_removed": rollback_removed,
+                        "storage_cleared": False,
                     }
                 )
             else:
@@ -1529,7 +1560,7 @@ async def api_ingest_cancel():
     return {
         "ok": True,
         "active": True,
-        "message": "已请求停止；当前文件处理完成后将终止并清空知识库",
+        "message": "已请求停止；当前文件处理完成后将终止，并仅清理本次未完成的灌库残余",
     }
 
 

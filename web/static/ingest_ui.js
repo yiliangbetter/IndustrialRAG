@@ -92,7 +92,7 @@ function ensureIngestTerminalModal() {
           <h2 id="ingest-terminal-title">灌库终端</h2>
         </div>
         <div class="ingest-terminal-header-actions">
-          <button type="button" class="btn danger ingest-terminal-stop hidden" title="停止灌库并清空知识库">
+          <button type="button" class="btn danger ingest-terminal-stop hidden" title="停止灌库">
             停止灌库
           </button>
           <button type="button" class="btn ghost ingest-terminal-close" title="关闭窗口（灌库在后台继续）">
@@ -107,7 +107,7 @@ function ensureIngestTerminalModal() {
         </div>
       </div>
       <pre class="ingest-log ingest-terminal-log" aria-live="polite"></pre>
-      <p class="hint ingest-terminal-hint">解析、建图谱与向量索引的实时日志。可点「停止灌库」终止并清空知识库；仅关闭窗口不会中断灌库。</p>
+      <p class="hint ingest-terminal-hint">解析、建图谱与向量索引的实时日志。可点「停止灌库」终止本次任务并清理未完成残余；仅关闭窗口不会中断灌库。</p>
     </div>
   `;
 
@@ -329,6 +329,8 @@ async function streamIngest(opts) {
           fail: ev.fail ?? 0,
           errors: ev.errors || [],
           cancelled: true,
+          message: ev.message || "",
+          rollback_removed: ev.rollback_removed ?? 0,
         };
         setIngestProgress(
           progressEl,
@@ -339,8 +341,8 @@ async function streamIngest(opts) {
           "已停止"
         );
         if (progressBarEl) setIngestProgressBarError(progressBarEl, true);
-        appendIngestLog(logEl, ev.message || "—— 已停止灌库并清空知识库 ——");
-        if (statusEl) statusEl.textContent = ev.message || "已停止灌库并清空知识库";
+        appendIngestLog(logEl, ev.message || "—— 已停止灌库 ——");
+        if (statusEl) statusEl.textContent = ev.message || "已停止灌库";
         return;
       }
       if (ev.type === "done") {

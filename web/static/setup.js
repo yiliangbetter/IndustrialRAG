@@ -488,7 +488,7 @@ function updateIngestControls() {
 
   if (ingestBusy) {
     ingestGateHint.textContent = ingestStopping
-      ? "已请求停止；当前文件处理完成后将终止并清空知识库（解析阶段完成后才会写入，请稍候）…"
+      ? "已请求停止；当前文件处理完成后将终止，并仅清理本次未完成的灌库残余（请稍候）…"
       : "灌库进行中，请勿关闭窗口…";
     ingestGateHint.className = "hint ingest-gate-hint";
     return;
@@ -788,7 +788,7 @@ async function startIngest({ clearFirst = false } = {}) {
       },
     });
     if (data.cancelled) {
-      ingestStatus.textContent = "已停止灌库并清空知识库";
+      ingestStatus.textContent = data.message || "已停止灌库（已有文档已保留）";
       ingestStatus.className = "hint error";
       pendingFiles = [];
     } else if (data.fail > 0) {

@@ -1546,9 +1546,9 @@ btnIngest.addEventListener("click", async () => {
       },
     });
     if (data.cancelled) {
-      ingestStatus.textContent = "已停止灌库并清空知识库";
+      ingestStatus.textContent = data.message || "已停止灌库（已有文档已保留）";
       ingestStatus.className = "hint error";
-      appendMessage("system", "灌库已停止，知识库已清空。");
+      appendMessage("system", data.message || "灌库已停止，已有文档已保留。");
       pendingFiles = [];
     } else if (data.fail > 0) {
       ingestStatus.className = "hint error";

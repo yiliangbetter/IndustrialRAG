@@ -227,6 +227,21 @@ async def _remove_existing_docs_for_file(rag, rel: str) -> int:
     return removed
 
 
+async def rollback_cancelled_ingest_files(
+    rag,
+    session_started: list[str],
+    session_completed: list[str],
+) -> int:
+    """Remove index rows for files started but not fully ingested in the current batch."""
+    completed = set(session_completed)
+    removed = 0
+    for rel in session_started:
+        if rel in completed:
+            continue
+        removed += await _remove_existing_docs_for_file(rag, rel)
+    return removed
+
+
 def _download_mineru_pipeline_models() -> None:
     src = os.getenv("MINERU_MODEL_SOURCE", "huggingface").strip().lower()
     if src not in ("huggingface", "modelscope"):
@@ -446,6 +461,8 @@ async def _ingest_folder(
     skip_multimodal: bool,
     on_event=None,
     should_cancel=None,
+    session_started: list[str] | None = None,
+    session_completed: list[str] | None = None,
 ) -> tuple[int, int, list[dict[str, str]], bool]:
     files = _collect_files(
         input_folder, config.supported_file_extensions, recursive
@@ -484,6 +501,8 @@ async def _ingest_folder(
                 "message": f"正在处理 ({idx}/{total})：{rel}",
             }
         )
+        if session_started is not None:
+            session_started.append(rel)
         try:
             sub_out = parser_output_dir
             if fp.parent != input_folder:
@@ -522,6 +541,8 @@ async def _ingest_folder(
             if not ingest_ok:
                 raise RuntimeError(ingest_err or "灌库未完成")
             ok += 1
+            if session_completed is not None:
+                session_completed.append(rel)
             logger.info(f"INGEST_FILE_OK::{rel}")
             await _emit({"type": "file_ok", "file": rel, "current": idx, "total": total})
         except Exception as e:

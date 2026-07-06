@@ -143,7 +143,6 @@ CLIENT_TUNING_KEYS: frozenset[str] = frozenset(
         "MAX_ENTITY_TOKENS",
         "MAX_RELATION_TOKENS",
         "LLM_TIMEOUT",
-        "RAG_QUERY_AUTO_STEERING",
         "RAG_QUERY_KG_STEERING",
         "RAG_QUERY_STEERING_PROFILES",
         "RAG_IMAGE_MIN_REF_ALIGN",
