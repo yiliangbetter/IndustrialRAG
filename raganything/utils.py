@@ -655,7 +655,7 @@ def _collect_maintenance_section_parts(
         if _is_image_ref_segment(nxt):
             parts.append(nxt)
             j += 1
-            break
+            continue
         if _TABLE_INGEST_MARKER in nxt:
             break
         if len(_segment_first_line(nxt)) <= _COALESCE_HEADING_MAX_CHARS:
@@ -699,7 +699,7 @@ def _assemble_maintenance_section_segments(segments: List[str]) -> List[str]:
 
 
 def _merge_trailing_procedure_into_preceding(segments: List[str]) -> List[str]:
-    """Attach orphan ``保养步骤：…`` lines to the preceding section block (Q7/Q13)."""
+    """Attach trailing ``保养内容/步骤：…`` blocks to the preceding section (Q7/Q13)."""
     working = [(segment or "").strip() for segment in segments if (segment or "").strip()]
     max_passes = max(len(working) * 2, 8)
     for _ in range(max_passes):
@@ -710,14 +710,22 @@ def _merge_trailing_procedure_into_preceding(segments: List[str]) -> List[str]:
             if not _is_orphan_maintenance_field_segment(seg):
                 i += 1
                 continue
-            if _maintenance_field_prefix(_segment_first_line(seg)) != "保养步骤：":
+            first_prefix = _maintenance_field_prefix(_segment_first_line(seg))
+            if first_prefix not in ("保养内容：", "保养步骤："):
                 i += 1
                 continue
             prev = working[i - 1]
             if _is_image_ref_segment(prev) or _TABLE_INGEST_MARKER in prev:
                 i += 1
                 continue
-            if not _segment_has_maintenance_body(prev):
+            if _maintenance_section_step_closed(prev):
+                i += 1
+                continue
+            if not (
+                _segment_starts_new_section(prev)
+                or _segment_has_maintenance_body(prev)
+                or _segment_has_inline_image(prev)
+            ):
                 i += 1
                 continue
             working[i - 1] = f"{prev}\n\n{seg}"
