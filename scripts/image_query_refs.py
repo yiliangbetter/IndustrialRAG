@@ -762,7 +762,11 @@ _ANSWER_STRUCTURAL_LABEL_KEYS = frozenset(
         "润滑部位",
         "润滑方式",
         "润滑周期",
+        "保养周期",
         "操作要求",
+        "操作方法",
+        "加注工具",
+        "加注标准",
         "使用的测量工具",
         "表针读数标准",
     )
@@ -776,6 +780,17 @@ _COMPONENT_FIELD_KEYS = frozenset(
 def _is_answer_structural_label(span: str) -> bool:
     """Answer-template field names (cross-manual listing prompts), not figure subjects."""
     return _normalize_label_key(span) in _ANSWER_STRUCTURAL_LABEL_KEYS
+
+
+def _is_ordinal_enumeration_bullet_head(head: str) -> bool:
+    """LLM ordinal splits (第一把刀 / 第二把预铣刀) — one figure subject, not N targets."""
+    return bool(re.match(r"^第[一二三四五六七八九十0-9]+把", (head or "").strip()))
+
+
+def _is_answer_footnote_line(line: str) -> bool:
+    """Skip ``*(注：...)`` digressions when parsing machine/component pairs."""
+    s = (line or "").strip()
+    return bool(s and re.match(r"^\*?\(注[：:]", s))
 
 
 def _is_maintenance_cycle_value(span: str) -> bool:
@@ -926,6 +941,8 @@ def _machine_component_targets_from_answer(
     for line in body.splitlines():
         line = line.strip()
         if not line:
+            continue
+        if _is_answer_footnote_line(line):
             continue
         if line.startswith("#"):
             machine = _machine_from_section_title(line.lstrip("#").strip())
@@ -1495,7 +1512,7 @@ def _answer_bullet_lines_for_figure_targets(answer: str) -> list[str]:
         if machine_bullet and _machine_from_section_title(machine_bullet.group(1).strip()):
             continue
         head = _answer_bullet_component_head(line)
-        if _is_answer_structural_label(head):
+        if _is_answer_structural_label(head) or _is_ordinal_enumeration_bullet_head(head):
             continue
         key = _normalize_label_key(head)
         if not key or key in seen:
@@ -1661,6 +1678,31 @@ def _chunk_heading_blob(content: str, *, limit: int = 200) -> str:
     """First lines of a chunk (section heading), not full mega-chunk body."""
     lines = [ln.strip() for ln in (content or "").splitlines() if ln.strip()]
     return "\n".join(lines[:5])[:limit]
+
+
+def _chunk_section_title_line(content: str) -> str:
+    """First numbered section heading in a chunk (e.g. ``3.2.1 预铣刀检查``)."""
+    for line in (content or "").splitlines():
+        line = line.strip()
+        if not line or _is_image_metadata_line(line):
+            continue
+        if _SECTION_NUM_RE.match(line):
+            return line[:120]
+    lines = [ln.strip() for ln in (content or "").splitlines() if ln.strip()]
+    return lines[0][:120] if lines else ""
+
+
+def _chunk_discriminative_heading_bonus(query: str, content: str) -> float:
+    """Boost anchor when section title overlaps query ``discriminative_terms``."""
+    title = _chunk_section_title_line(content)
+    if not title or not (query or "").strip():
+        return 0.0
+    bonus = 0.0
+    for term in discriminative_terms(query, min_len=3):
+        if len(term) < 3 or term not in title:
+            continue
+        bonus += min(len(term), 12) * 0.07
+    return bonus
 
 
 def _anchor_section_carries_subject(
@@ -1842,6 +1884,7 @@ def _best_anchor_chunk(
         if query:
             score += query_align * 0.25
             score += _chunk_subject_score(query, content) * 0.15
+            score += _chunk_discriminative_heading_bonus(query, content)
         score += _chunk_anchor_structural_adjustment(content)
         doc_id = _doc_storage_chunk_id(doc)
         if doc_id and doc_id in cite_ids:
@@ -2358,16 +2401,20 @@ def _figure_for_target(
         row["path"] = Path(str(ref.get("path") or "")).name
         return ref, row
 
+    anchor_search_text = target.anchor_text
+    if target.kind == "single" and (query or "").strip():
+        anchor_search_text = (query or "").strip()
+
     anchor = _best_anchor_chunk(
         manual_chunks,
-        target.anchor_text,
+        anchor_search_text,
         cite_pool=scoped_cite,
         query=query,
         manual_hint=machine,
     )
     manual_anchor = _best_anchor_chunk(
         manual_chunks,
-        target.anchor_text,
+        anchor_search_text,
         cite_pool=[],
         query=query,
         manual_hint=machine,
@@ -2419,14 +2466,26 @@ def _figure_for_target(
             and _anchor_inline_same_chunk(anchor_doc, fig_doc)
             and not _is_cover_page_ref(ref)
         ):
-            _finalize_figure_target_row(
-                row,
+            topic_ok = target.kind != "single" or _figure_ref_matches_target_topic(
+                anchor_text,
+                query,
                 ref,
-                source=source,
-                anchor=anchor_doc,
-                fig_doc=fig_doc,
+                kind=target.kind,
+                doc_content=_doc_content(fig_doc) if fig_doc else "",
+                anchor_content=_doc_content(anchor_doc) if anchor_doc else "",
             )
-            return ref, row
+            if topic_ok:
+                _finalize_figure_target_row(
+                    row,
+                    ref,
+                    source=source,
+                    anchor=anchor_doc,
+                    fig_doc=fig_doc,
+                )
+                return ref, row
+            row["status"] = "topic_gate"
+            row["figure_source"] = source
+            return None, row
         align_anchor_text = (align_anchor or topic_text or anchor_text).strip()
         align_content = "\n".join(
             p
@@ -5065,7 +5124,11 @@ def _single_figure_supplement_topics(anchor_text: str, query: str) -> list[str]:
         raw = (raw or "").strip()
         if len(raw) < 2:
             return
-        if _is_answer_structural_label(raw) or _is_maintenance_cycle_value(raw):
+        if (
+            _is_answer_structural_label(raw)
+            or _is_maintenance_cycle_value(raw)
+            or _is_ordinal_enumeration_bullet_head(raw)
+        ):
             return
         key = _normalize_label_key(raw)
         if not key or key in seen:
