@@ -218,6 +218,8 @@ REF: dict[int, dict] = {
         "text_min_len": 120,
         "want_images": True,
         "image_answer_pairs": True,
+        # 自动封边机手册「熔胶盒」条目无专用配图 chunk；批测不计入 pair_missing
+        "image_pair_waive": [("自动封边机", "熔胶盒")],
     },
 }
 
@@ -352,7 +354,12 @@ def _image_matches_component(img: dict, component: str) -> bool:
     return head in blob or component in blob
 
 
-def _grade_images_answer_pairs(answer: str, imgs: list[dict]) -> tuple[bool, list[str]]:
+def _grade_images_answer_pairs(
+    answer: str,
+    imgs: list[dict],
+    *,
+    pair_waive: list[tuple[str, str]] | None = None,
+) -> tuple[bool, list[str]]:
     from image_query_refs import (  # noqa: WPS433
         _listing_target_head,
         _machine_component_targets_from_answer,
@@ -363,6 +370,14 @@ def _grade_images_answer_pairs(answer: str, imgs: list[dict]) -> tuple[bool, lis
     if not imgs:
         notes.append("no_images")
         return False, notes
+    waived_keys: set[tuple[str, str]] = set()
+    for machine, component in pair_waive or []:
+        machine = (machine or "").strip()
+        component = _listing_target_head((component or "").strip())
+        if machine and component:
+            waived_keys.add(
+                (_normalize_label_key(machine), _normalize_label_key(component))
+            )
     raw_pairs = _machine_component_targets_from_answer(answer)
     pairs: list[tuple[str, str]] = []
     seen: set[tuple[str, str]] = set()
@@ -379,20 +394,32 @@ def _grade_images_answer_pairs(answer: str, imgs: list[dict]) -> tuple[bool, lis
     if len(pairs) < 2:
         notes.append(f"answer_pairs:{len(pairs)}<2")
         return False, notes
+    required_pairs = [
+        (m, c)
+        for m, c in pairs
+        if (_normalize_label_key(m), _normalize_label_key(c)) not in waived_keys
+    ]
+    waived_hit = [
+        f"{m}/{c}"
+        for m, c in pairs
+        if (_normalize_label_key(m), _normalize_label_key(c)) in waived_keys
+    ]
+    if waived_hit:
+        notes.append(f"pair_waived:{waived_hit}")
     uncovered: list[str] = []
-    for machine, component in pairs:
+    for machine, component in required_pairs:
         if not any(
             _image_matches_machine(img, machine)
             and _image_matches_component(img, component)
             for img in imgs
         ):
             uncovered.append(f"{machine}/{component}")
-    machines = {_normalize_label_key(m) for m, _ in pairs}
+    machines = {_normalize_label_key(m) for m, _ in required_pairs}
     if uncovered:
         notes.append(f"pair_missing:{uncovered}")
-    if len(imgs) < len(machines):
+    if machines and len(imgs) < len(machines):
         notes.append(f"image_count:{len(imgs)}<{len(machines)}")
-    ok = not uncovered and len(imgs) >= len(machines)
+    ok = not uncovered and (not machines or len(imgs) >= len(machines))
     return ok, notes
 
 
@@ -412,7 +439,17 @@ def grade_images(result: dict, spec: dict) -> tuple[bool, list[str]]:
         return True, notes
 
     if spec.get("image_answer_pairs"):
-        return _grade_images_answer_pairs(str(result.get("answer") or ""), imgs)
+        waive_raw = spec.get("image_pair_waive") or []
+        pair_waive = [
+            (str(m), str(c))
+            for m, c in waive_raw
+            if m and c
+        ]
+        return _grade_images_answer_pairs(
+            str(result.get("answer") or ""),
+            imgs,
+            pair_waive=pair_waive,
+        )
 
     if not pls:
         notes.append("no_placements")

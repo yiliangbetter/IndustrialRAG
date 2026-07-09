@@ -2101,10 +2101,7 @@ def _should_use_unified_figure_targets(query: str, answer: str) -> bool:
     if kind == "answer_bullet":
         return True
     if kind == "machine_bullet":
-        return bool(
-            _is_multi_machine_comparison_query(query)
-            or len(_cited_manual_pdf_stems(answer)) >= 2
-        )
+        return True
     return False
 
 
@@ -3611,20 +3608,6 @@ def _ref_inline_in_retrieved_context(
     return False
 
 
-def _ref_inline_matches_query_subject(query: str, ref: dict[str, Any]) -> bool:
-    """Inline chunk figures must match query subject bigrams, not a shared verb alone."""
-    label = _ref_effective_label(ref)
-    if not label:
-        return False
-    blob = _ref_blob(ref)
-    if _strict_object_image_gate(query):
-        return _figure_matches_query_object(query, blob)
-    for term in _query_terms(query):
-        if len(term) >= 3 and term in label:
-            return True
-    return False
-
-
 def _ref_anchored_in_retrieved_text(
     ref: dict[str, Any],
     retrieved_text: str | None,
@@ -3719,9 +3702,7 @@ def _ref_passes_image_align_gate(
         if ranked and ranked[0][0] >= _image_retrieval_focus_min_overlap():
             if _listing_mode_active(query, listing_targets):
                 pass
-            elif _ref_inline_in_retrieved_context(ref, text) and _ref_inline_matches_query_subject(
-                query, ref
-            ):
+            elif _ref_inline_in_retrieved_context(ref, text):
                 pass
             elif not _ref_aligns_with_retrieval_focus(query, ref, text):
                 ctx = str(ref.get("context") or "").strip()
@@ -4972,22 +4953,9 @@ def _llm_chunks_with_inline_figures(
 def _llm_chunks_with_subject_figures(
     query: str, retrieved_docs: list[dict[str, Any]] | None
 ) -> str:
-    """LLM-input chunks with inline figures; optional legacy query-subject filter."""
-    if _trust_llm_chunk_images():
-        return _llm_chunks_with_inline_figures(retrieved_docs)
-    q = (query or "").strip()
-    min_score = _llm_subject_chunk_min_score()
-    parts: list[str] = []
-    for doc in retrieved_docs or []:
-        content = _doc_content(doc).strip()
-        if not content or not extract_image_refs_from_context(content):
-            continue
-        if not _chunk_figure_context_aligns_query(q, content):
-            continue
-        if _chunk_subject_score(q, content) < min_score:
-            continue
-        parts.append(content)
-    return "\n\n".join(parts)
+    """LLM-input chunks with inline figures (legacy query-subject filter retired)."""
+    del query
+    return _llm_chunks_with_inline_figures(retrieved_docs)
 
 
 def _chunk_overlaps_ranked_lines(
@@ -8985,21 +8953,6 @@ def explain_query_images(
         query or "", primary_text, retrieved_docs, answer=answer
     )
     figure_context = scan_text if anchor_scan.get("mode") != "off" else primary_text
-    span_pool = list(figure_pool or retrieved_docs or [])
-    kept_docs = list(retrieved_docs or [])
-    component_spans = (
-        _component_listing_span_targets(
-            query or "", answer or "", span_pool, kept=kept_docs
-        )
-        if _is_component_listing_across_machines(query or "") and (answer or "").strip()
-        else _component_spans_from_answer(answer or "")
-    )
-    machine_spans = _machine_spans_from_answer(answer or "")
-    ref_scan_text = (
-        primary_text
-        if len(component_spans) >= 2 or len(machine_spans) >= 2
-        else figure_context
-    )
     gate = explain_retrieval_supports_images(
         query,
         retrieved_docs=retrieved_docs,
@@ -9036,146 +8989,11 @@ def explain_query_images(
         _apply_unified_figure_debug(debug, refs, uni_meta, answer=answer or "")
         return debug
 
-    anchor_phrases = _extract_context_anchors(query, primary_text)
-    debug["anchor_phrases"] = anchor_phrases[:12]
-    debug["top_retrieval_lines"] = [
-        {"overlap": overlap, "line": line[:200]}
-        for overlap, line in _ranked_retrieval_lines(query or "", primary_text, limit=6)
-    ]
-
-    source_hints = _source_hints_for_images(
-        query or "", answer, primary_text, retrieved_docs
-    )
-    debug["source_hints"] = sorted(source_hints)[:8]
-    debug["query_subject_needles"] = _query_subject_needles(query or "")
-
-    from_context = _refs_from_retrieved_docs_text(
-        ref_scan_text,
-        media_roots,
-        query=query,
-        retrieved_docs=retrieved_docs,
-        full_context=primary_text,
-    )
-    debug["refs_from_context"] = len(from_context)
-    debug["listing_targets"] = (
-        component_spans
-        if len(component_spans) >= 2
-        else machine_spans
-        if len(machine_spans) >= 2
-        else _listing_target_phrases(query or "", primary_text)
-    )
-
-    refs = from_context
-    if _should_expand_cited_manual_kv_pool(query or "", answer or ""):
-        span_pool = _expand_pool_with_cited_manual_figure_chunks(
-            list(span_pool),
-            _cited_manual_hints_from_answer(answer or ""),
-            query or "",
-        )
-    if (
-        _is_component_listing_across_machines(query or "")
-        and (answer or "").strip()
-    ):
-        pair_targets = _machine_component_listing_pair_targets(
-            query or "", answer or "", span_pool, kept=kept_docs
-        )
-        if len(pair_targets) >= 2:
-            extra = _supplement_cited_listing_refs_from_content_lists(
-                media_roots,
-                query=query or "",
-                answer=answer or "",
-                targets=[],
-                pair_targets=pair_targets,
-                source_hints=source_hints,
-                existing_refs=refs,
-            )
-            debug["refs_from_listing"] = len(extra)
-            refs = refs + extra
-            pair_extra = _supplement_pair_driven_refs_from_docs(
-                pair_targets,
-                refs,
-                span_pool,
-                query=query or "",
-                answer=answer or "",
-            )
-            debug["refs_from_pair_pool"] = len(pair_extra)
-            refs = refs + pair_extra
-    debug["refs_merged"] = len(refs)
-    debug["refs_cover_filtered"] = sum(
-        1 for ref in refs if _is_cover_page_ref(ref)
-    )
-
-    aligned_refs: list[dict[str, Any]] = []
-    dropped: list[dict[str, Any]] = []
-    for ref in refs:
-        summary = _summarize_ref(ref)
-        if _is_cover_page_ref(ref):
-            dropped.append({**summary, "drop_reason": "cover_page"})
-            continue
-        if _ref_passes_image_align_gate(
-            query or "",
-            ref,
-            retrieved_text=figure_context,
-            source_hints=source_hints,
-            listing_source_text=primary_text,
-            retrieved_docs=retrieved_docs,
-        ) or _ref_passes_pair_listing_gate(query or "", answer or "", ref):
-            aligned_refs.append(ref)
-        else:
-            dropped.append({**summary, "drop_reason": "query_label_mismatch"})
-    debug["refs_after_align"] = [_summarize_ref(ref) for ref in aligned_refs]
-    debug["refs_dropped_align"] = dropped
-
-    if not aligned_refs:
-        if (
-            _is_component_listing_across_machines(query or "")
-            and (answer or "").strip()
-            and refs
-            and any(
-                _ref_passes_pair_listing_gate(query or "", answer or "", ref)
-                for ref in refs
-            )
-        ):
-            aligned_refs = [
-                ref
-                for ref in refs
-                if _ref_passes_pair_listing_gate(query or "", answer or "", ref)
-            ]
-        else:
-            debug["gate"] = {"ok": False, "reason": "no_query_label_match"}
-            return debug
-
-    if source_hints:
-        aligned_refs = [
-            ref
-            for ref in aligned_refs
-            if _ref_matches_source_hints(ref, source_hints)
-        ]
-    scored_pairs = [
-        (
-            _score_ref_for_query(
-                ref,
-                query,
-                anchor_phrases=anchor_phrases,
-                source_hints=source_hints,
-                retrieved_text=ref_scan_text,
-                retrieved_docs=retrieved_docs,
-            ),
-            ref,
-        )
-        for ref in aligned_refs
-    ]
-    debug["scored"] = [
-        {"score": score, **_summarize_ref(ref)} for score, ref in scored_pairs
-    ]
-    selected = _select_scored_refs(
-        scored_pairs,
-        limit=limit,
-        query=query,
-        retrieved_text=ref_scan_text,
-        answer=answer,
-    )
-    debug["selected_paths"] = [str(ref.get("path") or "") for ref in selected]
+    debug["image_selection"] = "legacy_retired"
+    debug["unified_skip"] = {
+        "chunk_locality": _chunk_locality_image_enabled(),
+        "target_count": len(extract_figure_targets(query or "", answer or "")),
+    }
     return debug
 
 
@@ -9216,164 +9034,10 @@ def images_for_api(
             media_roots,
         )
 
-    scan_text, anchor_scan = _context_for_image_scan(
-        query or "", primary_text, retrieved_docs, answer=answer
+    logger.info(
+        "Skip related images: unified figure targets not applicable (legacy path retired)"
     )
-    figure_context = scan_text if anchor_scan.get("mode") != "off" else primary_text
-    if anchor_scan.get("mode") == "answer_topics" and not figure_context.strip():
-        logger.info("Skip related images: no answer-topic inline figures")
-        return []
-
-    span_pool = list(figure_pool or retrieved_docs or [])
-    component_spans = (
-        _component_listing_span_targets(
-            query or "",
-            answer or "",
-            list(figure_pool or retrieved_docs or []),
-            kept=list(retrieved_docs or []),
-        )
-        if _is_component_listing_across_machines(query or "") and (answer or "").strip()
-        else _component_spans_from_answer(answer or "")
-    )
-    machine_spans = _machine_spans_from_answer(answer or "")
-    ref_scan_text = (
-        primary_text
-        if len(component_spans) >= 2 or len(machine_spans) >= 2
-        else figure_context
-    )
-
-    anchor_phrases = _extract_context_anchors(query, primary_text)
-    source_hints = _source_hints_for_images(
-        query or "", answer, primary_text, retrieved_docs
-    )
-
-    refs = _refs_from_retrieved_docs_text(
-        ref_scan_text,
-        media_roots,
-        query=query,
-        retrieved_docs=retrieved_docs,
-        full_context=primary_text,
-    )
-    if _should_expand_cited_manual_kv_pool(query or "", answer or ""):
-        span_pool = _expand_pool_with_cited_manual_figure_chunks(
-            list(figure_pool or retrieved_docs or []),
-            _cited_manual_hints_from_answer(answer or ""),
-            query or "",
-        )
-    if (
-        _is_component_listing_across_machines(query or "")
-        and (answer or "").strip()
-    ):
-        pair_targets = _machine_component_listing_pair_targets(
-            query or "",
-            answer or "",
-            span_pool,
-            kept=list(retrieved_docs or []),
-        )
-        if len(pair_targets) >= 2:
-            refs = refs + _supplement_cited_listing_refs_from_content_lists(
-                media_roots,
-                query=query or "",
-                answer=answer or "",
-                targets=[],
-                pair_targets=pair_targets,
-                source_hints=source_hints,
-                existing_refs=refs,
-            )
-            refs = refs + _supplement_pair_driven_refs_from_docs(
-                pair_targets,
-                refs,
-                span_pool,
-                query=query or "",
-                answer=answer or "",
-            )
-    refs = [
-        ref
-        for ref in refs
-        if not _is_cover_page_ref(ref)
-        and (
-            _ref_passes_image_align_gate(
-                query or "",
-                ref,
-                retrieved_text=figure_context,
-                source_hints=source_hints,
-                listing_source_text=primary_text,
-                retrieved_docs=retrieved_docs,
-            )
-            or _ref_passes_pair_listing_gate(query or "", answer or "", ref)
-        )
-    ]
-    if not refs:
-        logger.info("Skip related images: no figure aligns with primary context")
-        return []
-
-    scored = [
-        (
-            _score_ref_for_query(
-                ref,
-                query,
-                anchor_phrases=anchor_phrases,
-                source_hints=source_hints,
-                retrieved_text=figure_context,
-                retrieved_docs=retrieved_docs,
-            ),
-            ref,
-        )
-        for ref in refs
-    ]
-    selected = _select_scored_refs(
-        scored,
-        limit=limit,
-        query=query,
-        retrieved_text=ref_scan_text,
-        answer=answer,
-    )
-
-    out: list[dict[str, Any]] = []
-    seen: set[str] = set()
-
-    for ref in selected:
-        path_str = ref.get("path") or ""
-        path_key = Path(path_str).name
-        if not path_str or path_key in seen:
-            continue
-        resolved = resolve_media_path(path_str, media_roots)
-        if resolved is None:
-            continue
-        root_for_token: Path | None = None
-        for root in media_roots:
-            try:
-                if resolved.is_relative_to(root.resolve()):
-                    root_for_token = root.resolve()
-                    break
-            except OSError:
-                continue
-        if root_for_token is None:
-            continue
-        seen.add(path_key)
-        token = encode_media_token(resolved, root_for_token)
-        caption = _ref_effective_label(ref) or str(ref.get("caption") or "").strip()
-        context_snippet = ref.get("context") or ""
-        if not caption and context_snippet:
-            caption = context_snippet[:60]
-        item: dict[str, Any] = {
-            "url": f"/api/media/image?token={token}",
-            "caption": caption,
-            "source_key": _source_key_from_path(path_str),
-        }
-        if ref.get("page") is not None:
-            item["page"] = ref["page"]
-        if context_snippet:
-            item["context"] = context_snippet
-        out.append(item)
-
-    if out:
-        logger.info(
-            "Resolved %d related image(s) for query (%d candidate path(s))",
-            len(out),
-            len(refs),
-        )
-    return out
+    return []
 
 
 def _api_images_from_figure_refs(
