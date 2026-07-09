@@ -1013,10 +1013,31 @@ async function applyKnowledgeBasePath() {
   }
 }
 
+function syncIngestStateFromServer(health, setup) {
+  const active = Boolean(health?.ingest_active || setup?.ingest_active);
+  const cancelPending = Boolean(
+    health?.ingest_cancel_requested || setup?.ingest_cancel_requested
+  );
+  if (active && !ingestBusy) {
+    ingestBusy = true;
+    setIngestTerminalReopenVisible(true);
+    if (ingestStatus) {
+      ingestStatus.textContent = cancelPending
+        ? "正在停止灌库…"
+        : "灌库进行中（后台任务；可打开灌库日志或点停止）";
+    }
+  }
+  if (active && cancelPending) {
+    ingestStopping = true;
+  }
+  updateIngestControls();
+}
+
 async function refreshStatus() {
   try {
     const [h, setup] = await Promise.all([fetchHealth(), fetchSetupStatus().catch(() => null)]);
     latestSetupStatus = setup;
+    syncIngestStateFromServer(h, setup);
     $("#meta-ready").textContent = h.ready ? "是" : "否";
     $("#meta-ready").className = h.ready ? "status-ok" : "status-bad";
     syncKnowledgeBasePathFields(h);
@@ -1582,16 +1603,20 @@ btnIngest.addEventListener("click", async () => {
 });
 
 async function handleStopIngest() {
-  if (!ingestBusy || ingestStopping) return;
+  if (ingestStopping) return;
   ingestStopping = true;
   updateIngestControls();
   try {
-    await requestStopIngest({ logEl: ingestLog, statusEl: ingestStatus });
+    const data = await requestStopIngest({ logEl: ingestLog, statusEl: ingestStatus });
+    if (!ingestBusy && data?.active) {
+      ingestBusy = true;
+      updateIngestControls();
+    }
   } catch (err) {
     ingestStopping = false;
     updateIngestControls();
     appendIngestLog(ingestLog, `停止失败：${err.message || err}`);
-    ingestStatus.textContent = `停止失败：${err.message || err}`;
+    if (ingestStatus) ingestStatus.textContent = `停止失败：${err.message || err}`;
   }
 }
 
@@ -1661,4 +1686,4 @@ initMessagesScroll();
 pinMessagesEnd();
 refreshStatus();
 refreshQueryDebugPanel();
-setInterval(refreshStatus, 15000);
+setInterval(refreshStatus, 5000);

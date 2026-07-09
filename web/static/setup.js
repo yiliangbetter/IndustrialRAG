@@ -370,6 +370,19 @@ function formatKbPartialText(status) {
 
 function syncIngestUiWithServer() {
   const serverActive = Boolean(latestStatus?.ingest_active);
+  const cancelPending = Boolean(latestStatus?.ingest_cancel_requested);
+  if (serverActive && !ingestBusy) {
+    ingestBusy = true;
+    setIngestTerminalReopenVisible(true);
+    if (ingestStatus) {
+      ingestStatus.textContent = cancelPending
+        ? "正在停止灌库…"
+        : "灌库进行中（后台任务；可打开灌库日志或点停止）";
+    }
+  }
+  if (serverActive && cancelPending) {
+    ingestStopping = true;
+  }
   if (ingestBusy && !serverActive) {
     ingestBusy = false;
     ingestStopping = false;
@@ -378,7 +391,7 @@ function syncIngestUiWithServer() {
       ingestStatus.className = "hint status-ok";
     }
   }
-  if (ingestBusy) {
+  if (ingestBusy || serverActive) {
     if (!statusPollTimer) {
       statusPollTimer = setInterval(() => {
         refreshStatus().catch(() => {});
@@ -473,8 +486,9 @@ function updateIngestControls() {
       : "当前知识库为空，无需清空";
   }
   if (btnStopIngest) {
-    btnStopIngest.classList.toggle("hidden", !ingestBusy);
-    btnStopIngest.disabled = !ingestBusy || ingestStopping;
+    const showStop = ingestBusy || Boolean(latestStatus?.ingest_active);
+    btnStopIngest.classList.toggle("hidden", !showStop);
+    btnStopIngest.disabled = !showStop || ingestStopping;
   }
   if (typeof updateIngestTerminalStopState === "function") {
     updateIngestTerminalStopState(ingestBusy, ingestStopping);
@@ -823,11 +837,15 @@ btnIngestAppend?.addEventListener("click", async () => {
 });
 
 async function handleStopIngest() {
-  if (!ingestBusy || ingestStopping) return;
+  if (ingestStopping) return;
   ingestStopping = true;
   updateIngestControls();
   try {
-    await requestStopIngest({ logEl: ingestLog, statusEl: ingestStatus });
+    const data = await requestStopIngest({ logEl: ingestLog, statusEl: ingestStatus });
+    if (!ingestBusy && data?.active) {
+      ingestBusy = true;
+      updateIngestControls();
+    }
   } catch (err) {
     ingestStopping = false;
     updateIngestControls();

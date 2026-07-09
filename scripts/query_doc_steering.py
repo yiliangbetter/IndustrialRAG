@@ -282,16 +282,6 @@ def is_catalog_product_model_query(query: str) -> bool:
 
 
 def _default_min_rerank_score() -> float:
-    if (os.getenv("RAG_USE_CLARIFY_UPPER_AS_MIN_RERANK") or "").strip().lower() in (
-        "1",
-        "true",
-        "yes",
-    ):
-        raw = os.getenv("QUERY_SCORE_THRESHOLD_UPPER") or "0.45"
-        try:
-            return float(raw)
-        except ValueError:
-            return 0.45
     raw = os.getenv("MIN_RERANK_SCORE") or "0.28"
     try:
         return float(raw)

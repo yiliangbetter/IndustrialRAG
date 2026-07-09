@@ -837,6 +837,45 @@ def _segment_has_inline_image(segment: str) -> bool:
     return bool(seg) and (_is_image_ref_segment(seg) or _IMAGE_REF_MARKER in seg)
 
 
+def _is_thin_section_lead_segment(segment: str) -> bool:
+    """Numbered section heading + optional short tail, no inline figure (Template B manuals)."""
+    seg = (segment or "").strip()
+    if not seg or _segment_has_inline_image(seg) or _TABLE_INGEST_MARKER in seg:
+        return False
+    if not _segment_starts_new_section(seg):
+        return False
+    lines = [line.strip() for line in seg.splitlines() if line.strip()]
+    if not lines or len(lines) > 4:
+        return False
+    if "保养步骤：" in seg:
+        return False
+    if seg.count("保养内容：") >= 1 and seg.count("保养周期：") >= 1:
+        return False
+    return True
+
+
+def _merge_thin_section_with_following_figure(segments: List[str]) -> List[str]:
+    """Merge thin ``N.N 标题`` blocks with the immediate next figure-bearing segment."""
+    working = [(segment or "").strip() for segment in segments if (segment or "").strip()]
+    out: List[str] = []
+    i = 0
+    n = len(working)
+    while i < n:
+        seg = working[i]
+        if (
+            _is_thin_section_lead_segment(seg)
+            and i + 1 < n
+            and _segment_has_inline_image(working[i + 1])
+            and not _segment_starts_new_section(working[i + 1])
+        ):
+            out.append(f"{seg}\n\n{working[i + 1]}")
+            i += 2
+            continue
+        out.append(seg)
+        i += 1
+    return out
+
+
 def _context_from_ref_segment(segment: str) -> str:
     for line in (segment or "").splitlines():
         if line.startswith("关联正文："):
@@ -1190,7 +1229,8 @@ def coalesce_text_image_segments(segments: List[str]) -> List[str]:
     bridged = _merge_unheaded_fields_with_heading_sections(metadata)
     merged = _merge_orphan_heading_segments(bridged)
     split = _split_multi_image_segments(merged)
-    paired = _lookahead_pair_text_image_segments(split)
+    thin_fig = _merge_thin_section_with_following_figure(split)
+    paired = _lookahead_pair_text_image_segments(thin_fig)
     trailing = _merge_trailing_procedure_into_preceding(paired)
     return _coalesce_immediate_text_image_segments(trailing)
 

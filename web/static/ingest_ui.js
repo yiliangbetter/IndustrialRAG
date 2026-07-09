@@ -261,8 +261,16 @@ async function streamIngest(opts) {
     let buf = "";
     let result = { ok: 0, fail: 0, errors: [], cancelled: false };
     let streamError = null;
+    let sessionLogPath = "";
+
+    const noteIngestLogPath = (path) => {
+      if (!path || path === sessionLogPath) return;
+      sessionLogPath = path;
+      appendIngestLog(logEl, `会话日志：${path}`);
+    };
 
     const handleEvent = (ev) => {
+      if (ev.ingest_log) noteIngestLogPath(ev.ingest_log);
       if (ev.type === "ingest_saved") {
         appendIngestLog(logEl, ev.message || "文件已上传");
         if (statusEl) statusEl.textContent = ev.message || "";
@@ -402,8 +410,23 @@ async function streamIngest(opts) {
 async function requestStopIngest(opts = {}) {
   const { logEl, statusEl } = opts;
   appendIngestLog(logEl, "正在请求停止灌库…");
-  if (statusEl) statusEl.textContent = "正在停止灌库（当前文件处理完成后终止）…";
-  const res = await fetch("/api/ingest/cancel", { method: "POST" });
+  if (statusEl) statusEl.textContent = "正在停止灌库（解析/写入阶段完成后终止）…";
+  const controller = new AbortController();
+  const timeoutId = setTimeout(() => controller.abort(), 15000);
+  let res;
+  try {
+    res = await fetch("/api/ingest/cancel", {
+      method: "POST",
+      signal: controller.signal,
+    });
+  } catch (err) {
+    if (err?.name === "AbortError") {
+      throw new Error("停止请求超时（服务可能正忙）；请稍候再试或查看终端日志");
+    }
+    throw err;
+  } finally {
+    clearTimeout(timeoutId);
+  }
   const data = await res.json().catch(() => ({}));
   if (!res.ok) throw new Error(data.detail || data.message || `HTTP ${res.status}`);
   appendIngestLog(logEl, data.message || "停止请求已发送");

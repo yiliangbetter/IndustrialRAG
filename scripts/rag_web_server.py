@@ -257,10 +257,10 @@ async def _inject_clarify_bundle_for_bypass(gate_result: Any, body: QueryBody) -
 
     if not isinstance(gate_result, ClarifyBypass):
         return False
-    bundle = None
-    if gate_result.reason == "direct" and gate_result.probe is not None:
+    bundle = gate_result.cached_bundle
+    if bundle is None and gate_result.reason == "direct" and gate_result.probe is not None:
         bundle = gate_result.probe.bundle
-    elif gate_result.reason in ("use_candidate", "keep_original"):
+    if bundle is None and gate_result.reason in ("use_candidate", "keep_original"):
         bundle = resolve_clarify_bundle(
             body.clarification_id,
             body.clarify_choice or gate_result.reason,
@@ -278,7 +278,29 @@ async def _inject_clarify_bundle_for_bypass(gate_result: Any, body: QueryBody) -
             body.query.strip()[:80],
             len(bundle.document_chunks),
         )
+    elif gate_result.reason == "keep_original":
+        import logging
+
+        logging.getLogger(__name__).info(
+            "keep_original injects cached probe bundle query=%r chunks=%d",
+            body.query.strip()[:80],
+            len(bundle.document_chunks),
+        )
     return True
+
+
+def _finalize_clarify_bypass(body: QueryBody, gate_result: Any) -> None:
+    from raganything.clarify_gate import ClarifyBypass, finalize_clarify_bypass_consumption  # noqa: WPS433
+
+    if not isinstance(gate_result, ClarifyBypass):
+        return
+    if not body.clarify_choice:
+        return
+    finalize_clarify_bypass_consumption(
+        body.clarification_id,
+        body.clarify_choice,
+        candidate_id=body.candidate_id,
+    )
 
 
 async def _evaluate_clarify_gate(body: QueryBody, mode: str) -> Any:
@@ -313,8 +335,6 @@ async def _evaluate_clarify_gate(body: QueryBody, mode: str) -> Any:
             body.clarification_id,
             body.candidate_id,
         )
-
-    await _inject_clarify_bundle_for_bypass(result, body)
 
     return result
 
@@ -899,6 +919,8 @@ async def health():
         "setup_complete": is_setup_complete(),
         "query_debug_enabled": is_query_debug_enabled(),
         "query_dump_dir": str(get_query_dump_dir()),
+        "ingest_active": state.ingest_active,
+        "ingest_cancel_requested": state.ingest_cancel_requested,
     }
 
 
@@ -945,10 +967,10 @@ async def api_query(body: QueryBody):
 
     from raganything.clarify_gate import ClarifyBypass, ClarifyRequired  # noqa: WPS433
 
+    gate_result: Any = None
     try:
         _begin_web_query_trace(body, mode=mode, endpoint="/api/query")
         gate_result, gate_wall_s = await _evaluate_clarify_gate_timed(body, mode)
-        clarify_gate_meta = _clarify_bypass_meta(gate_result)
         if isinstance(gate_result, ClarifyRequired):
             web_timing = _finalize_web_timing(
                 gate_result,
@@ -977,6 +999,9 @@ async def api_query(body: QueryBody):
             if dump_path is not None:
                 payload["debug_dump"] = {"path": str(dump_path), "name": dump_path.name}
             return payload
+
+        await _inject_clarify_bundle_for_bypass(gate_result, body)
+        clarify_gate_meta = _clarify_bypass_meta(gate_result)
 
         from query_progress_hooks import (  # noqa: WPS433
             get_naive_relevance,
@@ -1047,6 +1072,7 @@ async def api_query(body: QueryBody):
             payload["debug_dump"] = {"path": str(dump_path), "name": dump_path.name}
         return payload
     finally:
+        _finalize_clarify_bypass(body, gate_result)
         _clear_clarify_injection_if_set()
         _release_rerank_after_web_query()
 
@@ -1337,6 +1363,7 @@ async def _query_stream_events(q: str, mode: str, body: QueryBody) -> AsyncItera
                     except asyncio.CancelledError:
                         pass
     finally:
+        _finalize_clarify_bypass(body, gate_result)
         _clear_clarify_injection_if_set()
         _release_rerank_after_web_query()
 
@@ -1371,13 +1398,14 @@ async def api_ingest(files: list[UploadFile] = File(...)):
     tmp_root = Path(tempfile.mkdtemp(prefix="rag_web_ingest_"))
     try:
         saved = await _save_uploaded_files(files, tmp_root)
-        ok, fail, errors, cancelled, _rollback_removed = await _run_ingest_on_folder(tmp_root)
+        ok, fail, errors, cancelled, _rollback_removed, log_path = await _run_ingest_on_folder(tmp_root)
         return {
             "ok": ok,
             "fail": fail,
             "files": [p.name for p in saved],
             "errors": errors,
             "cancelled": cancelled,
+            "ingest_log": log_path,
         }
     except HTTPException:
         raise
@@ -1406,51 +1434,95 @@ async def _run_ingest_on_folder(
     *,
     session_started: list[str] | None = None,
     session_completed: list[str] | None = None,
-) -> tuple[int, int, list[dict[str, str]], bool, int]:
+    ingest_log=None,
+) -> tuple[int, int, list[dict[str, str]], bool, int, str]:
+    from raganything.ingest_session_log import IngestSessionLog  # noqa: WPS433
+
     rpc = _load_rpc()
     pod = Path(state.parser_output_dir)
+    wd = Path(state.working_dir) if state.working_dir else _resolve_path(
+        "RAG_WEB_WORKING_DIR", "rag_storage_run"
+    )
     parse_method = (os.getenv("PARSE_METHOD") or "auto").strip()
     parse_extra = rpc._mineru_parse_kwargs(state.config.parser)
     logger = __import__("lightrag.utils", fromlist=["logger"]).logger
     started = session_started if session_started is not None else []
     completed = session_completed if session_completed is not None else []
     rollback_removed = 0
+    log_path = ""
 
-    async with state.lock:
-        ok, fail, errors, cancelled = await rpc._ingest_folder(
-            state.rag,
-            state.config,
-            logger,
-            input_folder=input_folder,
-            parser_output_dir=pod,
-            parse_method=parse_method,
-            parse_extra=parse_extra,
-            recursive=False,
-            limit=0,
-            skip_multimodal=state.skip_multimodal,
-            on_event=on_event,
-            should_cancel=lambda: state.ingest_cancel_requested,
-            session_started=started,
-            session_completed=completed,
+    if ingest_log is None:
+        file_names = sorted(p.name for p in input_folder.iterdir() if p.is_file())
+        ingest_log = IngestSessionLog.start(
+            files=file_names,
+            working_dir=str(wd),
+            parser_dir=str(pod),
         )
-        if cancelled and state.rag is not None:
-            rollback_removed = await rpc.rollback_cancelled_ingest_files(
-                state.rag, started, completed
-            )
-            await state.rag.finalize_storages()
-        elif not cancelled and state.rag is not None:
-            await state.rag.finalize_storages()
+    if ingest_log is not None:
+        log_path = str(ingest_log.path)
 
-    return ok, fail, errors, cancelled, rollback_removed
+    async def _combined_on_event(ev: dict[str, Any]) -> None:
+        if ingest_log is not None:
+            ingest_log.event(ev)
+        if on_event is not None:
+            await on_event(ev)
+
+    ok = fail = 0
+    errors: list[dict[str, str]] = []
+    cancelled = False
+    try:
+        async with state.lock:
+            ok, fail, errors, cancelled = await rpc._ingest_folder(
+                state.rag,
+                state.config,
+                logger,
+                input_folder=input_folder,
+                parser_output_dir=pod,
+                parse_method=parse_method,
+                parse_extra=parse_extra,
+                recursive=False,
+                limit=0,
+                skip_multimodal=state.skip_multimodal,
+                on_event=_combined_on_event,
+                should_cancel=lambda: state.ingest_cancel_requested,
+                session_started=started,
+                session_completed=completed,
+            )
+            if cancelled and state.rag is not None:
+                rollback_removed = await rpc.rollback_cancelled_ingest_files(
+                    state.rag, started, completed
+                )
+                await state.rag.finalize_storages()
+            elif not cancelled and state.rag is not None:
+                await state.rag.finalize_storages()
+    finally:
+        if ingest_log is not None:
+            ingest_log.finalize(
+                ok=ok,
+                fail=fail,
+                errors=errors,
+                cancelled=cancelled,
+                rollback_removed=rollback_removed,
+            )
+            ingest_log.close()
+
+    return ok, fail, errors, cancelled, rollback_removed, log_path
 
 
 async def _ingest_stream_events(files: list[UploadFile]) -> AsyncIterator[str]:
+    from raganything.ingest_runtime import (  # noqa: WPS433
+        clear_ingest_subprocess,
+        set_ingest_cancel_check,
+    )
+
     tmp_root = Path(tempfile.mkdtemp(prefix="rag_web_ingest_"))
     queue: asyncio.Queue[dict[str, Any]] = asyncio.Queue()
     state.ingest_active = True
     state.ingest_cancel_requested = False
+    set_ingest_cancel_check(lambda: state.ingest_cancel_requested)
     session_started: list[str] = []
     session_completed: list[str] = []
+    ingest_log = None
 
     async def on_event(ev: dict[str, Any]) -> None:
         await queue.put(ev)
@@ -1464,21 +1536,38 @@ async def _ingest_stream_events(files: list[UploadFile]) -> AsyncIterator[str]:
         return "已停止灌库（已有文档已保留）"
 
     async def worker() -> None:
+        nonlocal ingest_log
         rollback_removed = 0
+        log_path = ""
         try:
             saved = await _save_uploaded_files(files, tmp_root)
+            from raganything.ingest_session_log import IngestSessionLog  # noqa: WPS433
+
+            wd = Path(state.working_dir) if state.working_dir else _resolve_path(
+                "RAG_WEB_WORKING_DIR", "rag_storage_run"
+            )
+            pod = Path(state.parser_output_dir)
+            ingest_log = IngestSessionLog.start(
+                files=[p.name for p in saved],
+                working_dir=str(wd),
+                parser_dir=str(pod),
+            )
+            if ingest_log is not None:
+                log_path = str(ingest_log.path)
             await queue.put(
                 {
                     "type": "ingest_saved",
                     "files": [p.name for p in saved],
                     "message": f"已接收 {len(saved)} 个文件，开始灌库…",
+                    "ingest_log": log_path,
                 }
             )
-            ok, fail, errors, cancelled, rollback_removed = await _run_ingest_on_folder(
+            ok, fail, errors, cancelled, rollback_removed, log_path = await _run_ingest_on_folder(
                 tmp_root,
                 on_event=on_event,
                 session_started=session_started,
                 session_completed=session_completed,
+                ingest_log=ingest_log,
             )
             if cancelled:
                 await queue.put(
@@ -1490,6 +1579,7 @@ async def _ingest_stream_events(files: list[UploadFile]) -> AsyncIterator[str]:
                         "message": _cancel_message(rollback_removed),
                         "rollback_removed": rollback_removed,
                         "storage_cleared": False,
+                        "ingest_log": log_path,
                     }
                 )
             else:
@@ -1499,9 +1589,12 @@ async def _ingest_stream_events(files: list[UploadFile]) -> AsyncIterator[str]:
                         "ok": ok,
                         "fail": fail,
                         "errors": errors,
+                        "ingest_log": log_path,
                     }
                 )
         except Exception as exc:
+            if ingest_log is not None:
+                ingest_log.exception("ingest_worker", exc)
             if state.ingest_cancel_requested:
                 try:
                     if state.rag is not None:
@@ -1521,14 +1614,19 @@ async def _ingest_stream_events(files: list[UploadFile]) -> AsyncIterator[str]:
                         "message": _cancel_message(rollback_removed),
                         "rollback_removed": rollback_removed,
                         "storage_cleared": False,
+                        "ingest_log": log_path,
                     }
                 )
             else:
-                await queue.put({"type": "error", "message": str(exc)})
+                await queue.put(
+                    {"type": "error", "message": str(exc), "ingest_log": log_path}
+                )
         finally:
             shutil.rmtree(tmp_root, ignore_errors=True)
             state.ingest_active = False
             state.ingest_cancel_requested = False
+            set_ingest_cancel_check(None)
+            clear_ingest_subprocess()
 
     task = asyncio.create_task(worker())
     try:
@@ -1554,13 +1652,21 @@ async def _ingest_stream_events(files: list[UploadFile]) -> AsyncIterator[str]:
 
 @app.post("/api/ingest/cancel")
 async def api_ingest_cancel():
+    from raganything.ingest_runtime import abort_active_ingest_subprocess  # noqa: WPS433
+
     if not state.ingest_active:
         return {"ok": True, "active": False, "message": "当前没有进行中的灌库任务"}
     state.ingest_cancel_requested = True
+    killed = abort_active_ingest_subprocess()
+    msg = (
+        "已请求停止；正在终止 MinerU 解析…"
+        if killed
+        else "已请求停止；当前步骤完成后将终止，并仅清理本次未完成的灌库残余"
+    )
     return {
         "ok": True,
         "active": True,
-        "message": "已请求停止；当前文件处理完成后将终止，并仅清理本次未完成的灌库残余",
+        "message": msg,
     }
 
 

@@ -2,11 +2,12 @@
 """Benchmark clarify gate v4 on green8 (or other presets).
 
 Times each phase separately (report/jsonl in seconds: ``gate_s``, ``answer_s``, ``total_s``):
-  - ``gate_s``: original query → gate outcome (probe + candidate LLM + rerank probes)
+  - ``gate_s``: original query → gate outcome (原问 probe + 推荐问 LLM 生成)
   - ``answer_s``: picked recommendation → full ``aquery`` answer (offer/direct only)
   - ``total_s``: gate_s + answer_s (reject: gate only)
 
-Also reports candidate ``final_score`` (rerank) and post-answer ``effective_answer`` heuristic.
+Route 2: 推荐问不做 rerank probe（``final_score`` 为 null）；点选推荐走全量 aquery。
+LLM 结果分类（不看标准答案对错）：门控拒答(final=None) / 有效作答(有实质内容) / 无法回答(拒答套话)。
 
 Examples::
 
@@ -28,7 +29,7 @@ import sys
 import time
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Any
+from typing import Any, Literal
 
 from dotenv import load_dotenv
 
@@ -50,13 +51,11 @@ from raganything.clarify_gate import (  # noqa: E402
     ClarifyBypass,
     ClarifyRequired,
     clarify_candidate_k,
-    clarify_candidate_max_probes,
     clarify_candidate_max_rounds,
     clarify_candidate_min_rerank_score,
-    clarify_candidate_skip_probe,
+    clarify_candidate_strategy,
     clarify_direct_rerank_min,
     evaluate_clarify_gate,
-    resolve_clarify_bundle,
 )
 from replay_clarify_gate_green8 import (  # noqa: E402
     _load_all_cases,
@@ -66,21 +65,73 @@ from replay_clarify_gate_green8 import (  # noqa: E402
 
 _REFUSAL_RE = re.compile(
     r"(无法基于知识库|暂无法基于|知识库.*并未|文档中并未|并未提及|没有.*相关(信息|内容)|"
-    r"无法找到.*依据|不足以回答|无法直接回答|未在.*记载|提供的知识库内容.*并未)",
+    r"无法找到.*依据|不足以回答|无法直接回答|未在.*记载|提供的知识库内容.*并未|"
+    r"没有足够的信息|没有找到关于|未能找到|无法为您提供|信息缺失)",
     re.IGNORECASE,
+)
+_REFUSAL_OPENING_RE = re.compile(
+    r"^(很)?抱歉[，,]?\s*(根据)?(当前)?(提供的)?(上下文|知识库|参考资料|资料)",
+    re.IGNORECASE,
+)
+_ACTIONABLE_STEP_RE = re.compile(
+    r"(?:^|\n)\s*\d+[\.、．]\s*(?:检查|确认|调整|排查|更换|设置|进入|打开|定位|解除|按下|执行)",
+    re.MULTILINE,
 )
 
 
-def is_effective_answer(text: str) -> bool:
-    """Heuristic: answer looks like a substantive KB response, not refusal/hedge."""
+def classify_llm_answer(text: str) -> Literal["empty", "unable", "effective"]:
+    """Classify LLM output: substantive KB answer vs refusal hedge (not correctness)."""
     ans = (text or "").strip()
-    if len(ans) < 40:
-        return False
-    if _REFUSAL_RE.search(ans):
-        return False
-    if ans.startswith("抱歉") and ("无法" in ans[:120] or "不能" in ans[:120]):
-        return False
-    return True
+    if not ans:
+        return "empty"
+
+    head = ans[:420]
+    substantive_len = len(re.sub(r"\s+", "", ans))
+    has_headings = bool(re.search(r"^#{1,3}\s", ans, re.MULTILINE))
+    has_bullets = bool(re.search(r"(?:^|\n)\s*[\*\-]\s+\S", ans))
+    has_steps = bool(_ACTIONABLE_STEP_RE.search(ans))
+    refusal_opening = bool(
+        _REFUSAL_OPENING_RE.search(ans)
+        or re.search(
+            r"(没有足够的信息|无法提供.*准确|信息缺失|没有找到关于|未能找到|无法为您)",
+            head,
+        )
+    )
+
+    if substantive_len < 50:
+        return "unable"
+
+    if re.search(r"信息缺失说明", head):
+        return "unable"
+
+    if has_steps:
+        return "effective"
+
+    if has_bullets and substantive_len >= 150:
+        return "effective"
+
+    if refusal_opening:
+        tail = re.split(r"(?:没有足够的信息|无法为您提供)[^。]*。", ans, maxsplit=1)
+        remainder = tail[-1].strip() if len(tail) > 1 else ""
+        if has_steps or (len(remainder) >= 120 and (has_bullets or has_headings)):
+            return "effective"
+        if substantive_len < 140:
+            return "unable"
+        if not has_bullets and not has_headings and substantive_len < 220:
+            return "unable"
+        if _REFUSAL_RE.search(head) and not has_bullets:
+            return "unable"
+
+    if _REFUSAL_RE.search(ans) and substantive_len < 180:
+        return "unable"
+    if ans.startswith("抱歉") and substantive_len < 160 and not has_steps:
+        return "unable"
+
+    return "effective"
+
+
+def is_effective_answer(text: str) -> bool:
+    return classify_llm_answer(text) == "effective"
 
 
 def _ms_to_s(ms: int | float | None) -> float | None:
@@ -121,14 +172,24 @@ def _median(values: list[float]) -> float | None:
 def _answer_status(row: dict[str, Any]) -> str:
     outcome = row.get("gate_outcome")
     if outcome == "reject":
-        return "未作答(reject)"
+        return "门控拒答"
     if row.get("aquery_error"):
         return f"出错({row['aquery_error'][:40]})"
-    if not row.get("has_answer"):
+    answer_class = row.get("answer_class")
+    if answer_class == "empty" or not row.get("has_answer"):
         return "无答案"
-    if row.get("effective_answer"):
-        return "LLM有效作答"
+    if answer_class == "effective":
+        return "有效作答"
+    if answer_class == "unable":
+        return "无法回答"
     return "LLM拒答/含糊"
+
+
+def _set_answer_classification(row: dict[str, Any], answer: str) -> None:
+    cls = classify_llm_answer(answer)
+    row["answer_class"] = cls
+    row["effective_answer"] = cls == "effective"
+    row["unable_answer"] = cls == "unable"
 
 
 def _extract_gate_timing(gate: ClarifyBypass | ClarifyRequired) -> dict[str, Any]:
@@ -159,12 +220,15 @@ def _format_gate_timing_lines(timing: dict[str, Any]) -> list[str]:
             f"{_fmt_duration_s(pr.get('duration_s'))} final={pr.get('final_score')} {passed} | "
             f"{(pr.get('text') or '')[:50]}"
         )
-    if timing.get("candidate_gen_total_s") is not None:
-        lines.append(
-            f"  小计 生成={_fmt_duration_s(timing.get('candidate_gen_total_s'))} "
-            f"probe={_fmt_duration_s(timing.get('candidate_probe_total_s'))} "
-            f"澄清循环={_fmt_duration_s(timing.get('clarify_loop_total_s'))}"
-        )
+    gen_s = timing.get("candidate_gen_total_s")
+    probe_s = timing.get("candidate_probe_total_s")
+    loop_s = timing.get("clarify_loop_total_s")
+    if gen_s is not None or probe_s is not None or loop_s is not None:
+        parts = [f"生成={_fmt_duration_s(gen_s)}"]
+        if probe_s is not None:
+            parts.append(f"probe={_fmt_duration_s(probe_s)}")
+        parts.append(f"澄清循环={_fmt_duration_s(loop_s)}")
+        lines.append(f"  小计 {' '.join(parts)}")
     if timing.get("gate_total_s") is not None:
         lines.append(f"  门控合计(原问+澄清): {_fmt_duration_s(timing.get('gate_total_s'))}")
     return lines
@@ -190,23 +254,16 @@ async def _aquery_for_candidate(
     *,
     query: str,
     mode: str,
-    clarification_id: str | None,
-    candidate_id: str | None,
     parser_root: Path | None,
 ) -> tuple[int, str, str, str | None, bool]:
-    bundle = resolve_clarify_bundle(
-        clarification_id,
-        "use_candidate",
-        query,
-        candidate_id,
-    )
+    """Full aquery for a picked recommendation (route 2: no cached bundle)."""
     t0 = time.perf_counter()
     _thinking, answer, err, _meta = await _run_aquery(
-        rag, query, mode=mode, bundle=bundle, parser_root=parser_root
+        rag, query, mode=mode, bundle=None, parser_root=parser_root
     )
     ms = int((time.perf_counter() - t0) * 1000)
     ans = (answer or "").strip()
-    return ms, ans, answer or "", err, is_effective_answer(ans)
+    return ms, ans, answer or "", err, classify_llm_answer(ans)
 
 
 async def _bench_case(
@@ -225,6 +282,7 @@ async def _bench_case(
         utterances = case.get("utterances") or []
         orig_q = (utterances[0] if utterances else "").strip()
     case_id = case.get("id", "?")
+    skip_answer_grade = bool((case.get("grade") or {}).get("skip"))
 
     t_gate = time.perf_counter()
     gate = await evaluate_clarify_gate(rag.lightrag, orig_q, mode=mode)
@@ -283,10 +341,13 @@ async def _bench_case(
         "candidate_answers": [],
         "has_answer": False,
         "effective_answer": False,
+        "unable_answer": False,
+        "answer_class": "empty",
         "answer": "",
         "answer_preview": "",
         "aquery_error": None,
         "answer_status": "",
+        "skip_answer_grade": skip_answer_grade,
     }
 
     if gate_only or gate_outcome == "reject":
@@ -308,7 +369,7 @@ async def _bench_case(
             row["picked_query"] = orig_q
             row["pick_kind"] = "direct"
             row["has_answer"] = bool(ans)
-            row["effective_answer"] = is_effective_answer(ans)
+            _set_answer_classification(row, ans)
             row["answer"] = ans
             row["answer_preview"] = ans[:240].replace("\n", " ")
             row["aquery_error"] = err
@@ -340,12 +401,10 @@ async def _bench_case(
                         }
                     )
                     continue
-                cms, ans, _raw, err, eff = await _aquery_for_candidate(
+                cms, ans, _raw, err, ans_cls = await _aquery_for_candidate(
                     rag,
                     query=text,
                     mode=mode,
-                    clarification_id=clarification_id,
-                    candidate_id=cid,
                     parser_root=parser_root,
                 )
                 answer_ms += cms
@@ -355,7 +414,9 @@ async def _bench_case(
                         "final_score": cand.get("final_score"),
                         "text": text,
                         "answer_s": _ms_to_s(cms),
-                        "effective_answer": eff,
+                        "answer_class": ans_cls,
+                        "effective_answer": ans_cls == "effective",
+                        "unable_answer": ans_cls == "unable",
                         "has_answer": bool(ans),
                         "answer_preview": ans[:200].replace("\n", " "),
                         "error": err,
@@ -368,7 +429,9 @@ async def _bench_case(
                 row["picked_query"] = pick.get("text")
                 row["pick_kind"] = "all_candidates_sample"
                 row["has_answer"] = bool(pick.get("has_answer"))
+                row["answer_class"] = pick.get("answer_class") or "empty"
                 row["effective_answer"] = bool(pick.get("effective_answer"))
+                row["unable_answer"] = bool(pick.get("unable_answer"))
                 row["answer"] = pick.get("answer_preview", "")
                 row["answer_preview"] = pick.get("answer_preview", "")
         else:
@@ -393,16 +456,14 @@ async def _bench_case(
                 if not isinstance(bypass, ClarifyBypass):
                     row["aquery_error"] = "bypass_validation_failed"
                 else:
-                    answer_ms, ans, raw, err, eff = await _aquery_for_candidate(
+                    answer_ms, ans, raw, err, ans_cls = await _aquery_for_candidate(
                         rag,
                         query=final_q,
                         mode=mode,
-                        clarification_id=clarification_id,
-                        candidate_id=cid,
                         parser_root=parser_root,
                     )
                     row["has_answer"] = bool(ans)
-                    row["effective_answer"] = eff
+                    _set_answer_classification(row, ans)
                     row["answer"] = raw
                     row["answer_preview"] = ans[:240].replace("\n", " ")
                     row["aquery_error"] = err
@@ -425,14 +486,9 @@ def _format_report(rows: list[dict[str, Any]], *, source: str) -> str:
     lines.append(f"MIN_RERANK_SCORE: {clarify_candidate_min_rerank_score()}")
     lines.append(f"CLARIFY_DIRECT_RERANK_MIN: {clarify_direct_rerank_min()}")
     lines.append(f"CLARIFY_CANDIDATE_K: {clarify_candidate_k()}")
-    max_probes = clarify_candidate_max_probes()
     lines.append(f"CLARIFY_CANDIDATE_MAX_ROUNDS: {clarify_candidate_max_rounds()}")
-    lines.append(
-        f"CLARIFY_CANDIDATE_MAX_PROBES: {max_probes if max_probes is not None else '(unset)'}"
-    )
-    lines.append(
-        f"CLARIFY_CANDIDATE_SKIP_PROBE: {1 if clarify_candidate_skip_probe() else 0}"
-    )
+    lines.append(f"CLARIFY_CANDIDATE_STRATEGY: {clarify_candidate_strategy()}")
+    lines.append("candidate_validation: llm_only (route 2)")
     lines.append(f"cases: {len(rows)}")
     lines.append("")
 
@@ -476,9 +532,14 @@ def _format_report(rows: list[dict[str, Any]], *, source: str) -> str:
     n_direct = sum(1 for r in rows if r.get("gate_outcome") == "direct")
     n_offer = sum(1 for r in rows if r.get("gate_outcome") == "offer")
     n_reject = sum(1 for r in rows if r.get("gate_outcome") == "reject")
-    n_eff = sum(1 for r in rows if r.get("effective_answer"))
+    n_eff = sum(1 for r in rows if r.get("answer_class") == "effective")
+    n_unable = sum(1 for r in rows if r.get("answer_class") == "unable")
+    n_gate_reject = sum(1 for r in rows if r.get("gate_outcome") == "reject")
     lines.append(f"outcomes: direct={n_direct} offer={n_offer} reject={n_reject}")
-    lines.append(f"answers: has_answer={sum(1 for r in rows if r.get('has_answer'))} effective_answer={n_eff}")
+    lines.append(
+        f"answers: 有效作答={n_eff} 无法回答={n_unable} 门控拒答={n_gate_reject} "
+        f"has_answer={sum(1 for r in rows if r.get('has_answer'))}"
+    )
     lines.append("")
     lines.append(
         f"{'id':>4} {'gate':>12} {'answer':>12} {'outcome':>8} {'cands':>5} {'LLM结果':<14} query"
@@ -508,15 +569,16 @@ def _format_report(rows: list[dict[str, Any]], *, source: str) -> str:
         )
         if gen:
             lines.append(
-                f"  probes={gen.get('probes_used')} rounds={gen.get('rounds_used')} "
+                f"  rounds={gen.get('rounds_used')} validation={gen.get('candidate_validation')} "
                 f"reason={gen.get('reason')}"
             )
         for tl in _format_gate_timing_lines(r.get("gate_timing") or {}):
             lines.append(tl)
         for c in r.get("candidates") or []:
+            fs = c.get("final_score")
+            fs_label = fs if fs is not None else "llm_only"
             lines.append(
-                f"  候选 [{c.get('id')}] final={c.get('final_score')} "
-                f"chunks={c.get('chunk_count')} | {c.get('text')}"
+                f"  候选 [{c.get('id')}] final={fs_label} | {c.get('text')}"
             )
         if r.get("candidate_answers"):
             lines.append("  各候选答题 (--answer-all-candidates):")
@@ -524,7 +586,7 @@ def _format_report(rows: list[dict[str, Any]], *, source: str) -> str:
                 lines.append(
                     f"    [{ca.get('id')}] final={ca.get('final_score')} "
                     f"answer={_fmt_duration_s(ca.get('answer_s'))} "
-                    f"effective={ca.get('effective_answer')} | {ca.get('text', '')[:60]}"
+                    f"class={ca.get('answer_class')} | {ca.get('text', '')[:60]}"
                 )
                 if ca.get("answer_preview"):
                     lines.append(f"      摘要: {ca.get('answer_preview')}")
@@ -554,11 +616,13 @@ async def _main(args: argparse.Namespace) -> None:
     if not wd.is_dir():
         raise SystemExit(f"working_dir not found: {wd}")
 
-    print(f"working_dir: {wd}", flush=True)
-    rag, _, _ = await rpc._build_rag(wd, pod)
     cases, source_labels = _load_all_cases(args.source, limit=args.limit)
     cases = _filter_case_ids(cases, args.ids)
     source_label = args.source if args.source != "all" else "+".join(source_labels)
+
+    print(f"working_dir: {wd}", flush=True)
+    print(f"cases: {len(cases)} ({source_label})", flush=True)
+    rag, _, _ = await rpc._build_rag(wd, pod)
     rng = random.Random(args.seed if args.seed is not None else time.time_ns())
 
     ts = datetime.now().strftime("%Y%m%d_%H%M%S")

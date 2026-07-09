@@ -54,6 +54,10 @@ def _contains_any(text: str, needles: list[str]) -> list[str]:
 def grade_response(answer: str, case: dict) -> tuple[bool, list[str], str]:
     """Return (ok, misses, mode_used)."""
     grade = case.get("grade") or {}
+    if grade.get("skip"):
+        if not (answer or "").strip():
+            return False, ["（空应答）"], "empty"
+        return True, [], "skipped"
     expect = case.get("expect") or "script"
     answer = (answer or "").strip()
     if not answer:

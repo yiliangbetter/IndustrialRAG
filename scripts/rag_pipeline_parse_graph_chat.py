@@ -484,6 +484,31 @@ async def _ingest_folder(
         if on_event is not None:
             await on_event(ev)
 
+    async def _insert_with_cancel(
+        content_list: Any,
+        **insert_kw: Any,
+    ) -> bool:
+        """Run insert_content_list; return True if cancelled mid-flight."""
+        if should_cancel and should_cancel():
+            return True
+        task = asyncio.create_task(
+            rag.insert_content_list(content_list, **insert_kw)
+        )
+        try:
+            while not task.done():
+                if should_cancel and should_cancel():
+                    task.cancel()
+                    try:
+                        await task
+                    except asyncio.CancelledError:
+                        pass
+                    return True
+                await asyncio.sleep(0.25)
+            await task
+            return False
+        except asyncio.CancelledError:
+            return True
+
     await _emit({"type": "ingest_start", "total": total})
 
     for idx, fp in enumerate(files, start=1):
@@ -510,13 +535,26 @@ async def _ingest_folder(
             sub_out.mkdir(parents=True, exist_ok=True)
 
             await _emit({"type": "log", "message": f"解析文档：{rel}"})
-            content_list, doc_id = await rag.parse_document(
-                str(fp),
-                output_dir=str(sub_out),
-                parse_method=parse_method,
-                display_stats=config.display_content_stats,
-                **parse_extra,
-            )
+            try:
+                content_list, doc_id = await rag.parse_document(
+                    str(fp),
+                    output_dir=str(sub_out),
+                    parse_method=parse_method,
+                    display_stats=config.display_content_stats,
+                    **parse_extra,
+                )
+            except Exception as parse_exc:
+                from raganything.ingest_runtime import IngestCancelledError  # noqa: WPS433
+
+                if isinstance(parse_exc, IngestCancelledError) or (
+                    should_cancel and should_cancel()
+                ):
+                    cancelled = True
+                    await _emit(
+                        {"type": "log", "message": "收到停止请求，正在终止灌库…"}
+                    )
+                    break
+                raise
             if should_cancel and should_cancel():
                 cancelled = True
                 await _emit({"type": "log", "message": "收到停止请求，正在终止灌库…"})
@@ -531,12 +569,16 @@ async def _ingest_folder(
                 )
                 logger.info("INGEST_REPLACE::%s::removed=%d", rel, replaced)
             await _emit({"type": "log", "message": f"写入知识库：{rel}"})
-            await rag.insert_content_list(
+            insert_cancelled = await _insert_with_cancel(
                 content_list,
                 file_path=rel,
                 doc_id=doc_id,
                 skip_multimodal_processing=skip_multimodal,
             )
+            if insert_cancelled:
+                cancelled = True
+                await _emit({"type": "log", "message": "收到停止请求，正在终止灌库…"})
+                break
             ingest_ok, ingest_err = await _verify_doc_ingest_outcome(rag, rel, doc_id)
             if not ingest_ok:
                 raise RuntimeError(ingest_err or "灌库未完成")

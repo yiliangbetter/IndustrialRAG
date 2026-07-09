@@ -1,9 +1,10 @@
-"""Clarification gate before mix aquery (v4).
+"""Clarification gate before mix aquery (v4, route 2).
 
 Three-band gate on **final rerank score** (max among qualifying document chunks):
 - ``final_score is None`` → reject (no chunk >= MIN_RERANK_SCORE).
-- ``final_score > CLARIFY_DIRECT_RERANK_MIN`` (default 7) → direct aquery.
-- else → offer k recommendations; each candidate must probe with ``final_score >`` threshold.
+- ``final_score > CLARIFY_DIRECT_RERANK_MIN`` (default 7) → direct aquery (reuse probe bundle).
+- else → offer k LLM recommendations (**no per-candidate rerank**); original probe bundle
+  is cached for **keep_original** injection.
 
 See ``docs/澄清门控设计方案_v4.md``.
 """
@@ -59,6 +60,7 @@ class ClarifyBypass:
     reason: Literal["disabled", "direct", "use_candidate", "keep_original"]
     probe: RetrievalProbeResult | None = None
     gate_timing: dict[str, Any] | None = None
+    cached_bundle: CachedQueryBundle | None = None
 
 
 @dataclass(frozen=True)
@@ -118,16 +120,6 @@ def clarify_candidate_max_rounds() -> int:
     return max(1, _env_int("CLARIFY_CANDIDATE_MAX_ROUNDS", 3))
 
 
-def clarify_candidate_max_probes() -> int | None:
-    raw = (os.getenv("CLARIFY_CANDIDATE_MAX_PROBES") or "").strip()
-    if not raw:
-        return None
-    try:
-        return max(1, int(raw))
-    except ValueError:
-        return None
-
-
 def clarify_candidate_strategy() -> str:
     return (os.getenv("CLARIFY_CANDIDATE_STRATEGY") or "fill_k").strip().lower()
 
@@ -146,11 +138,6 @@ def clarify_candidate_min_rerank_score() -> float:
 
 def clarify_direct_rerank_min() -> float:
     return _env_float("CLARIFY_DIRECT_RERANK_MIN", 7.0)
-
-
-def clarify_candidate_skip_probe() -> bool:
-    """Route 2: accept LLM-generated recommendations without per-candidate rerank probe."""
-    return _env_bool("CLARIFY_CANDIDATE_SKIP_PROBE", False)
 
 
 def _chunk_rerank_score(doc: dict[str, Any]) -> float | None:
@@ -421,10 +408,7 @@ def _consume_keep_original_bundle(clarification_id: str | None) -> None:
         rec["keep_original_consumed"] = True
 
 
-def _consume_candidate_bundle(
-    clarification_id: str | None, candidate_id: str | None
-) -> None:
-    """Drop one candidate's cached bundle; other options and keep_original slot stay."""
+def _mark_candidate_used(clarification_id: str | None, candidate_id: str | None) -> None:
     rec = _get_clarification_record(clarification_id)
     if rec is None:
         return
@@ -433,9 +417,7 @@ def _consume_candidate_bundle(
         return
     entry = options.get((candidate_id or "").strip())
     if isinstance(entry, dict):
-        if isinstance(entry.get("bundle"), CachedQueryBundle):
-            entry["bundle_consumed"] = True
-        entry["bundle"] = None
+        entry["used"] = True
 
 
 def keep_original_consumed(clarification_id: str | None) -> bool:
@@ -443,7 +425,7 @@ def keep_original_consumed(clarification_id: str | None) -> bool:
     return bool(rec and rec.get("keep_original_consumed"))
 
 
-def candidate_bundle_consumed(
+def candidate_already_used(
     clarification_id: str | None, candidate_id: str | None
 ) -> bool:
     rec = _get_clarification_record(clarification_id)
@@ -453,7 +435,7 @@ def candidate_bundle_consumed(
     if not isinstance(options, dict):
         return False
     entry = options.get((candidate_id or "").strip())
-    return isinstance(entry, dict) and bool(entry.get("bundle_consumed"))
+    return isinstance(entry, dict) and bool(entry.get("used"))
 
 
 def validate_keep_original(
@@ -489,30 +471,27 @@ def validate_use_candidate(
     return isinstance(expected, str) and expected.strip() == text
 
 
-def resolve_clarify_bundle(
+def _peek_keep_original_bundle(
     clarification_id: str | None,
-    clarify_choice: str,
     query_text: str,
-    candidate_id: str | None = None,
 ) -> CachedQueryBundle | None:
-    choice = (clarify_choice or "").strip().lower()
-    cid = (clarification_id or "").strip()
-    if choice == "keep_original":
-        if not validate_keep_original(cid, query_text):
-            return None
-        rec = _get_clarification_record(cid)
-        if not rec:
-            return None
-        bundle = rec.get("original_bundle")
-        if not isinstance(bundle, CachedQueryBundle):
-            return None
-        _consume_keep_original_bundle(cid)
-        return bundle
-    if choice != "use_candidate":
+    if not validate_keep_original(clarification_id, query_text):
         return None
-    if not validate_use_candidate(cid, candidate_id, query_text):
+    rec = _get_clarification_record(clarification_id)
+    if not rec:
         return None
-    rec = _get_clarification_record(cid)
+    bundle = rec.get("original_bundle")
+    return bundle if isinstance(bundle, CachedQueryBundle) else None
+
+
+def _peek_candidate_bundle(
+    clarification_id: str | None,
+    candidate_id: str | None,
+    query_text: str,
+) -> CachedQueryBundle | None:
+    if not validate_use_candidate(clarification_id, candidate_id, query_text):
+        return None
+    rec = _get_clarification_record(clarification_id)
     if not rec:
         return None
     options = rec.get("options")
@@ -522,9 +501,34 @@ def resolve_clarify_bundle(
     if not isinstance(entry, dict):
         return None
     bundle = entry.get("bundle")
-    if isinstance(bundle, CachedQueryBundle):
-        _consume_candidate_bundle(cid, candidate_id)
-        return bundle
+    return bundle if isinstance(bundle, CachedQueryBundle) else None
+
+
+def finalize_clarify_bypass_consumption(
+    clarification_id: str | None,
+    clarify_choice: str | None,
+    *,
+    candidate_id: str | None = None,
+) -> None:
+    """Mark keep_original / use_candidate bundle consumed after answer aquery."""
+    choice = (clarify_choice or "").strip().lower()
+    if choice == "keep_original":
+        _consume_keep_original_bundle(clarification_id)
+    elif choice == "use_candidate":
+        _mark_candidate_used(clarification_id, candidate_id)
+
+
+def resolve_clarify_bundle(
+    clarification_id: str | None,
+    clarify_choice: str,
+    query_text: str,
+    candidate_id: str | None = None,
+) -> CachedQueryBundle | None:
+    choice = (clarify_choice or "").strip().lower()
+    if choice == "keep_original":
+        return _peek_keep_original_bundle(clarification_id, query_text)
+    if choice == "use_candidate":
+        return _peek_candidate_bundle(clarification_id, candidate_id, query_text)
     return None
 
 
@@ -607,14 +611,10 @@ def _candidate_generation_batch_size(
     strategy: str,
     k_target: int,
     answerable_count: int,
-    skip_probe: bool,
 ) -> int:
     if strategy == "first":
         return 1
-    need = max(k_target - answerable_count, 1)
-    if skip_probe:
-        return need
-    return max(need + 2, k_target)
+    return max(k_target - answerable_count, 1)
 
 
 def _append_llm_only_candidate(
@@ -646,12 +646,11 @@ async def _collect_high_confidence_candidates(
     original_bundle: CachedQueryBundle | None,
     mode: str,
 ) -> tuple[list[dict[str, Any]], dict[str, dict[str, Any]], dict[str, Any]]:
+    del mode  # recommendations are LLM-only; no per-candidate retrieval/rerank
     strategy = clarify_candidate_strategy()
     k_target = clarify_candidate_k()
     max_rounds = clarify_candidate_max_rounds()
-    max_probes = clarify_candidate_max_probes()
     direct_min = clarify_direct_rerank_min()
-    skip_probe = clarify_candidate_skip_probe()
     try:
         import sys
         from pathlib import Path
@@ -669,19 +668,13 @@ async def _collect_high_confidence_candidates(
     answerable: list[dict[str, Any]] = []
     option_entries: dict[str, dict[str, Any]] = {}
     rounds_used = 0
-    probes_used = 0
     gen_rounds: list[dict[str, Any]] = []
-    probe_attempts: list[dict[str, Any]] = []
     while rounds_used < max_rounds and len(answerable) < k_target:
-        if not skip_probe and max_probes is not None and probes_used >= max_probes:
-            break
-
         rounds_used += 1
         batch_size = _candidate_generation_batch_size(
             strategy=strategy,
             k_target=k_target,
             answerable_count=len(answerable),
-            skip_probe=skip_probe,
         )
 
         t_gen = time.perf_counter()
@@ -691,7 +684,7 @@ async def _collect_high_confidence_candidates(
             bundle=original_bundle,
             count=batch_size,
             exclude=seen,
-            parse_limit=batch_size if skip_probe else None,
+            parse_limit=batch_size,
         )
         gen_rounds.append(
             {
@@ -703,60 +696,15 @@ async def _collect_high_confidence_candidates(
         )
 
         for line in lines:
-            if not skip_probe and max_probes is not None and probes_used >= max_probes:
-                break
             if line in seen:
                 continue
             seen.add(line)
-
-            if skip_probe:
-                _append_llm_only_candidate(
-                    answerable=answerable,
-                    option_entries=option_entries,
-                    line=line,
-                    direct_min=direct_min,
-                )
-                if strategy == "first" and answerable:
-                    break
-                if len(answerable) >= k_target:
-                    break
-                continue
-
-            probes_used += 1
-            t_probe = time.perf_counter()
-            probe = await probe_llm_retrieval_full(lightrag, line, mode=mode)
-            probe_s = _elapsed_s(t_probe)
-            passed = _probe_passes_direct_threshold(probe) and probe.bundle is not None
-            probe_attempts.append(
-                {
-                    "index": probes_used,
-                    "round": rounds_used,
-                    "text": line[:100],
-                    "duration_s": probe_s,
-                    "final_score": probe.final_score,
-                    "passed": passed,
-                }
+            _append_llm_only_candidate(
+                answerable=answerable,
+                option_entries=option_entries,
+                line=line,
+                direct_min=direct_min,
             )
-            if not passed:
-                continue
-
-            cid = f"c{len(answerable) + 1}"
-            answerable.append(
-                {
-                    "id": cid,
-                    "text": line,
-                    "chunk_count": probe.chunk_count,
-                    "final_score": probe.final_score,
-                    "max_rerank_score": probe.final_score,
-                    "min_rerank_threshold": probe.min_rerank_threshold,
-                    "direct_rerank_min": direct_min,
-                }
-            )
-            option_entries[cid] = {
-                "query": line,
-                "bundle": probe.bundle,
-            }
-
             if strategy == "first" and answerable:
                 break
             if len(answerable) >= k_target:
@@ -772,19 +720,13 @@ async def _collect_high_confidence_candidates(
     option_entries = rekeyed_options
 
     gen_total = round(sum(float(r.get("duration_s") or 0) for r in gen_rounds), 1)
-    probe_total = round(
-        sum(float(p.get("duration_s") or 0) for p in probe_attempts), 1
-    )
     meta = {
         "k_requested": k_target,
         "k_answerable": len(answerable),
         "rounds_used": rounds_used,
-        "probes_used": probes_used,
+        "probes_used": 0,
         "strategy": strategy,
-        "candidate_skip_probe": skip_probe,
-        "candidate_validation": (
-            "llm_only" if skip_probe else "final_score_gt_direct_min"
-        ),
+        "candidate_validation": "llm_only",
         "min_rerank_threshold": clarify_candidate_min_rerank_score(),
         "direct_rerank_min": direct_min,
         "reason": (
@@ -794,10 +736,8 @@ async def _collect_high_confidence_candidates(
         ),
         "gate_timing": {
             "candidate_gen_rounds": gen_rounds,
-            "candidate_probes": probe_attempts,
             "candidate_gen_total_s": gen_total,
-            "candidate_probe_total_s": probe_total,
-            "clarify_loop_total_s": round(gen_total + probe_total, 1),
+            "clarify_loop_total_s": gen_total,
         },
     }
     return answerable, option_entries, meta
@@ -859,7 +799,7 @@ async def evaluate_clarify_gate(
 
     choice = (clarify_choice or "").strip().lower()
     if choice == "use_candidate":
-        if candidate_bundle_consumed(clarification_id, candidate_id):
+        if candidate_already_used(clarification_id, candidate_id):
             raise ClarifyValidationError(
                 "该推荐问已回答，请选择其他选项或重新提问"
             )
@@ -867,7 +807,9 @@ async def evaluate_clarify_gate(
             raise ClarifyValidationError(
                 "invalid clarification_id / candidate_id / query for use_candidate"
             )
-        return ClarifyBypass("use_candidate")
+        _mark_candidate_used(clarification_id, candidate_id)
+        bundle = _peek_candidate_bundle(clarification_id, candidate_id, q)
+        return ClarifyBypass("use_candidate", cached_bundle=bundle)
     if choice == "keep_original":
         if not validate_keep_original(clarification_id, q):
             raise ClarifyValidationError(
@@ -877,7 +819,8 @@ async def evaluate_clarify_gate(
             raise ClarifyValidationError(
                 "原问已回答，请选择推荐问或重新提问"
             )
-        return ClarifyBypass("keep_original")
+        bundle = _peek_keep_original_bundle(clarification_id, q)
+        return ClarifyBypass("keep_original", cached_bundle=bundle)
 
     if not is_clarify_gate_enabled(mode):
         return ClarifyBypass("disabled")

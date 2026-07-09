@@ -5,8 +5,13 @@ Each case runs a clarify-gate probe (``probe_llm_retrieval_full``) to record
 ``final_score``. Shili17 expects **direct** gate (``final_score > CLARIFY_DIRECT_RERANK_MIN``,
 default 7) on every question; sub-threshold scores are flagged prominently.
 
-Then the full web ``aquery`` answer path runs (no clarify pick UI). Query dumps go to
-``logs/query_dumps/`` (prefix ``Qxx_``) unless ``--no-dump``.
+Then the full web ``aquery`` answer path runs. By default (``--web-sim direct``) the
+answer reuses the gate probe's cached bundle when ``final_score > CLARIFY_DIRECT_RERANK_MIN``,
+matching Web ``ClarifyBypass(direct)``. Use ``--web-sim keep_original`` to reuse the probe
+bundle whenever the probe is answerable (simulates clicking「继续原问题」). ``--web-sim none``
+keeps the old independent second retrieval for A/B comparison.
+
+Query dumps go to ``logs/query_dumps/`` (prefix ``Qxx_``) unless ``--no-dump``.
 
 Use ``--rounds N`` to run the full batch N times; each round writes its own report
 (``…_r01.md``, ``…_r02.md``, … when N > 1). Multiple rounds reuse one ``_build_rag``
@@ -57,7 +62,7 @@ REF: dict[int, dict] = {
         "text_all": ["每天"],
         "text_any": [],
         "want_images": True,
-        "caption_any": ["清洁机器床身"],
+        "caption_any": ["清洁机器床身", "机床外部清洁"],
     },
     4: {
         "query": "高速智能封边机机床内部进行清洁，请问步骤是什么？",
@@ -478,6 +483,27 @@ def _gate_band(
     return "offer"
 
 
+_WEB_SIM_CHOICES = ("direct", "keep_original", "none")
+
+
+def _normalize_web_sim(value: str | None) -> str:
+    sim = (value or "direct").strip().lower()
+    if sim not in _WEB_SIM_CHOICES:
+        raise ValueError(f"web_sim must be one of {_WEB_SIM_CHOICES}, got {value!r}")
+    return sim
+
+
+def _should_reuse_probe_bundle(gate_probe: dict[str, Any], *, web_sim: str) -> bool:
+    """Whether batch answer should inject probe bundle like Web clarify bypass."""
+    if web_sim == "none":
+        return False
+    if web_sim == "direct":
+        return gate_probe.get("gate_direct_ok") is True
+    if web_sim == "keep_original":
+        return bool(gate_probe.get("answerable"))
+    return False
+
+
 def _gate_direct_ok(gate_probe: dict[str, Any] | None) -> bool | None:
     """True when probe qualifies for Web direct path (final > direct_min)."""
     if not gate_probe:
@@ -570,7 +596,9 @@ def _print_gate_failure_summary(rows: list[dict]) -> int:
     return len(failures)
 
 
-async def _run_gate_probe(lightrag: Any, query: str, *, mode: str) -> dict[str, Any]:
+async def _run_gate_probe(
+    lightrag: Any, query: str, *, mode: str
+) -> tuple[dict[str, Any], Any | None]:
     from raganything.clarify_gate import (  # noqa: WPS433
         clarify_direct_rerank_min,
         probe_llm_retrieval_full,
@@ -585,6 +613,7 @@ async def _run_gate_probe(lightrag: Any, query: str, *, mode: str) -> dict[str, 
         direct_min=direct_min,
         answerable=probe.answerable,
     )
+    bundle = probe.bundle
     payload = {
         "final_score": probe.final_score,
         "chunk_count": probe.chunk_count,
@@ -599,9 +628,11 @@ async def _run_gate_probe(lightrag: Any, query: str, *, mode: str) -> dict[str, 
         "duration_s": round(elapsed_s, 2),
         "duration_text": _format_duration(elapsed_s),
         "mode": probe.mode,
+        "bundle_chunk_count": len(bundle.document_chunks) if bundle is not None else 0,
+        "bundle_reused": False,
     }
     payload["gate_direct_ok"] = _gate_direct_ok(payload)
-    return payload
+    return payload, bundle
 
 
 async def run_cases(
@@ -612,6 +643,7 @@ async def run_cases(
     pod: Path,
     write_dumps: bool = True,
     skip_gate: bool = False,
+    web_sim: str = "direct",
     rag: Any | None = None,
 ) -> list[dict]:
     from query_debug_dump import persist_query_debug_dump
@@ -619,6 +651,7 @@ async def run_cases(
     from query_progress_hooks import (
         finalize_inline_images,
         query_progress_hooks,
+        set_clarify_context_injection,
         set_query_media_roots,
         set_query_text_for_images,
     )
@@ -638,8 +671,11 @@ async def run_cases(
             spec = REF[cid]
             query = spec["query"]
             gate_probe: dict[str, Any] | None = None
+            probe_bundle: Any | None = None
             if not skip_gate:
-                gate_probe = await _run_gate_probe(rag.lightrag, query, mode=mode)
+                gate_probe, probe_bundle = await _run_gate_probe(
+                    rag.lightrag, query, mode=mode
+                )
                 fs_txt = _format_gate_final_score(gate_probe)
                 print(
                     f"Q{cid:02d} gate {gate_probe.get('gate_band')} "
@@ -649,6 +685,17 @@ async def run_cases(
                 )
                 if gate_probe.get("gate_direct_ok") is False:
                     _print_gate_alert(cid, gate_probe)
+                if (
+                    probe_bundle is not None
+                    and _should_reuse_probe_bundle(gate_probe, web_sim=web_sim)
+                ):
+                    set_clarify_context_injection(probe_bundle)
+                    gate_probe["bundle_reused"] = True
+                    print(
+                        f"Q{cid:02d} web-sim={web_sim}: reusing gate probe bundle "
+                        f"({gate_probe.get('bundle_chunk_count')} chunks)",
+                        flush=True,
+                    )
             t0 = time.perf_counter()
             thinking = ""
             async with query_progress_hooks():
@@ -681,6 +728,7 @@ async def run_cases(
             row = {
                 "id": cid,
                 "query": query,
+                "web_sim": web_sim if not skip_gate else None,
                 "gate_probe": gate_probe,
                 "answer": answer,
                 "duration_ms": elapsed_ms,
@@ -778,6 +826,7 @@ def write_report(
     mode: str,
     wd: Path,
     media_root: Path,
+    web_sim: str | None = None,
     round_no: int | None = None,
     rounds_total: int | None = None,
 ) -> None:
@@ -804,6 +853,10 @@ def write_report(
             f"- 仅文字通过：**{text_only}/{len(rows)}**",
         ]
     )
+    if web_sim:
+        lines.append(
+            f"- Web 模拟：``{web_sim}``（answer 复用 gate probe bundle，对齐 Web clarify bypass）"
+        )
     if probed:
         lines.append(
             f"- Gate direct（final > 7，shili17 期望全达标）：**{direct_ok}/{probed}**"
@@ -886,7 +939,8 @@ def write_report(
                 f"llm_chunks={gp.get('llm_chunk_total')} · "
                 f"probe耗时={gp.get('duration_text') or _format_duration((gp.get('duration_ms') or 0) / 1000)} · "
                 f"min_rerank={gp.get('min_rerank_threshold')} · "
-                f"direct_min={gp.get('direct_rerank_min')}"
+                f"direct_min={gp.get('direct_rerank_min')} · "
+                f"bundle_reused={gp.get('bundle_reused')}"
             )
         lines.append(f"- 参考答案要点：{_expected_image_hint(spec)}")
         if g["text_miss"]:
@@ -979,6 +1033,7 @@ async def run_all_rounds(
     pod: Path,
     write_dumps: bool,
     skip_gate: bool,
+    web_sim: str,
     rounds: int,
     report_dir: Path,
     session_stamp: str,
@@ -1001,6 +1056,7 @@ async def run_all_rounds(
                 pod=pod,
                 write_dumps=write_dumps,
                 skip_gate=skip_gate,
+                web_sim=web_sim,
                 rag=rag,
             )
             round_tag = f"_r{rnd:02d}" if rounds > 1 else ""
@@ -1013,6 +1069,7 @@ async def run_all_rounds(
                 mode=mode,
                 wd=wd,
                 media_root=pod,
+                web_sim=web_sim if not skip_gate else None,
                 round_no=rnd if rounds > 1 else None,
                 rounds_total=rounds if rounds > 1 else None,
             )
@@ -1053,6 +1110,16 @@ def main() -> None:
         help="Skip clarify gate probe (no final_score; faster, old behavior)",
     )
     parser.add_argument(
+        "--web-sim",
+        default=os.getenv("RAG_WEB_PATH_WEB_SIM", "direct"),
+        choices=_WEB_SIM_CHOICES,
+        help=(
+            "How answer aquery reuses gate probe bundle: direct (Web ClarifyBypass direct, "
+            "default), keep_original (reuse whenever probe answerable), none (independent "
+            "second retrieval for A/B)"
+        ),
+    )
+    parser.add_argument(
         "--no-dump",
         action="store_true",
         help="Skip writing logs/query_dumps/*.json per case (default: write dumps)",
@@ -1077,8 +1144,10 @@ def main() -> None:
     print(f"Running {label} web path{rounds_label}, wd={wd}", flush=True)
     if not args.no_dump:
         print("Query dumps: logs/query_dumps/ (per case, prefix Qxx)", flush=True)
+    web_sim = _normalize_web_sim(args.web_sim)
     if not args.skip_gate:
         print("Gate probe: probe_llm_retrieval_full (mix + rerank, final_score)", flush=True)
+        print(f"Web sim: {web_sim} (answer bundle reuse)", flush=True)
     report_dir = _ROOT / "logs" / "web_path_q1_17"
     report_dir.mkdir(parents=True, exist_ok=True)
     session_stamp = datetime.now().astimezone().strftime("%Y%m%d_%H%M%S")
@@ -1091,6 +1160,7 @@ def main() -> None:
             pod=pod,
             write_dumps=not args.no_dump,
             skip_gate=args.skip_gate,
+            web_sim=web_sim,
             rounds=args.rounds,
             report_dir=report_dir,
             session_stamp=session_stamp,

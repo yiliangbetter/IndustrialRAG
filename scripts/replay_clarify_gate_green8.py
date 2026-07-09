@@ -577,6 +577,34 @@ _SOURCE_PRESETS: dict[str, Path | list[Path]] = {
     ],
 }
 
+# Builtin fallback when data/voice_script_green8.json is absent (bench / replay).
+_BUILTIN_GREEN8_CASES: list[dict[str, Any]] = [
+    {"id": 2, "standard_question": "漏胶", "category": "封边", "utterances": ["漏胶"]},
+    {"id": 4, "standard_question": "仿形效果不好", "category": "封边", "utterances": ["仿形效果不好"]},
+    {"id": 6, "standard_question": "气压报警？", "category": "所有", "utterances": ["气压报警？"]},
+    {"id": 7, "standard_question": "靠板上限？", "category": "电脑锯", "utterances": ["靠板上限？"]},
+    {"id": 11, "standard_question": "三相电异常", "category": "数控", "utterances": ["三相电异常"]},
+    {"id": 14, "standard_question": "变频器异常报警", "category": "数控", "utterances": ["变频器异常报警"]},
+    {"id": 26, "standard_question": "未检测到工作（板材）", "category": "数控", "utterances": ["未检测到工作（板材）"]},
+    {"id": 28, "standard_question": "未检测到工件", "category": "数控", "utterances": ["未检测到工件"]},
+]
+
+
+def _missing_source_hint(path: Path) -> str:
+    if path.name == "voice_script_tests.json":
+        return (
+            f"缺少用例文件: {path}\n"
+            "请从 Markdown 生成: uv run python scripts/build_voice_script_tests_from_md.py\n"
+            "或从 Excel 生成: uv run python scripts/build_voice_script_tests.py"
+        )
+    if path.name == "voice_script_green8.json":
+        return (
+            f"缺少用例文件: {path}\n"
+            "可运行: uv run python scripts/extract_voice_green8.py "
+            "(需先有 voice_script_tests.json)，或从 docs/voice_script_green8_tests.txt 恢复。"
+        )
+    return f"用例文件不存在: {path}"
+
 
 def _load_all_cases(source_key: str, *, limit: int) -> tuple[list[dict[str, Any]], list[str]]:
     preset = _SOURCE_PRESETS.get(source_key, source_key)
@@ -602,6 +630,15 @@ def _load_all_cases(source_key: str, *, limit: int) -> tuple[list[dict[str, Any]
 
 def _load_source_cases(source: Path, *, limit: int) -> list[dict[str, Any]]:
     if source.suffix.lower() == ".json":
+        if not source.is_file():
+            if source.name == "voice_script_green8.json":
+                rows = [dict(c) for c in _BUILTIN_GREEN8_CASES]
+                for row in rows:
+                    row["query"] = (row.get("standard_question") or "").strip()
+                if limit > 0:
+                    rows = rows[:limit]
+                return rows
+            raise SystemExit(_missing_source_hint(source))
         data = json.loads(source.read_text(encoding="utf-8"))
         rows: list[dict[str, Any]] = []
         for case in data.get("cases") or []:
@@ -619,6 +656,8 @@ def _load_source_cases(source: Path, *, limit: int) -> list[dict[str, Any]]:
             if limit > 0 and len(rows) >= limit:
                 break
         return rows
+    if not source.is_file():
+        raise SystemExit(_missing_source_hint(source))
     slim = _load_cases(source.resolve(), limit=limit)
     return [dict(c) for c in slim]
 

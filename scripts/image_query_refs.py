@@ -243,6 +243,24 @@ def _listing_target_head(span: str) -> str:
     return span
 
 
+def _answer_bullet_component_head(line: str) -> str:
+    """Component span from markdown answer bullet (``**部件**``), not a domain lexicon."""
+    payload = re.sub(r"^[-*•]\s+", "", (line or "").strip())
+    bold = re.match(r"^\*\*([^*]+)\*\*", payload)
+    if bold:
+        return _listing_target_head(bold.group(1).strip())
+    return _listing_target_head(payload)
+
+
+def _figure_target_topic_text(target: FigureTarget) -> str:
+    """Answer-structure topic for figure gates (selection), not placement."""
+    if target.kind == "answer_bullet":
+        return _answer_bullet_component_head(target.anchor_text)
+    if target.kind == "machine_component_pair":
+        return (target.component or target.anchor_text).strip()
+    return target.anchor_text
+
+
 def _ref_maintenance_topic(ref: dict[str, Any]) -> str:
     """Primary ``保养内容`` topic from ref context (ingest template field)."""
     blob = " ".join(str(ref.get(key) or "") for key in ("context", "caption", "label"))
@@ -280,6 +298,17 @@ def _listing_component_from_maint_chunk(content: str, topic: str) -> str:
         if subj_head:
             return subj_head
     return head
+
+
+def _ref_structure_align_text(ref: dict[str, Any]) -> str:
+    """Structure-driven align text: parser context/步骤 over caption when both exist."""
+    ctx = str(ref.get("context") or "").strip()
+    if ctx:
+        return ctx
+    label = _ref_effective_label(ref)
+    if label:
+        return label
+    return str(ref.get("caption") or "").strip()
 
 
 def _ref_inline_context_text(ref: dict[str, Any]) -> str:
@@ -734,6 +763,8 @@ _ANSWER_STRUCTURAL_LABEL_KEYS = frozenset(
         "润滑方式",
         "润滑周期",
         "操作要求",
+        "使用的测量工具",
+        "表针读数标准",
     )
 )
 
@@ -1330,12 +1361,28 @@ def _chunk_locality_image_enabled() -> bool:
     return _env_bool_image("RAG_IMAGE_CHUNK_LOCALITY", True)
 
 
-def _chunk_locality_window() -> int:
-    raw = os.getenv("RAG_IMAGE_CHUNK_LOCALITY_WINDOW") or "8"
+def _env_int_image(*keys: str, default: int, min_v: int = 1, max_v: int = 32) -> int:
+    """Read first set env among ``keys`` as bounded int (phase 5 alias unify)."""
+    raw = ""
+    for key in keys:
+        val = os.getenv(key)
+        if val is not None and str(val).strip():
+            raw = str(val).strip()
+            break
+    if not raw:
+        return default
     try:
-        return max(1, min(32, int(raw)))
+        return max(min_v, min(max_v, int(raw)))
     except ValueError:
-        return 8
+        return default
+
+
+def _chunk_locality_window() -> int:
+    return _env_int_image(
+        "RAG_CHUNK_ORDER_WINDOW",
+        "RAG_IMAGE_CHUNK_LOCALITY_WINDOW",
+        default=8,
+    )
 
 
 def _machine_targets_from_answer(answer: str) -> list[str]:
@@ -1430,6 +1477,83 @@ def _machine_bullet_lines_from_answer(answer: str) -> list[tuple[str, str]]:
     return out
 
 
+def _answer_bullet_lines_for_figure_targets(answer: str) -> list[str]:
+    """Full non-machine listing bullet lines for ``answer_bullet`` FigureTargets."""
+    if len(_machine_bullet_lines_from_answer(answer)) >= 2:
+        return []
+    body = _answer_text_for_placement(answer)
+    out: list[str] = []
+    seen: set[str] = set()
+    for raw_line in body.splitlines():
+        line = raw_line.strip()
+        if not re.match(r"^[-*•]\s+", line):
+            continue
+        payload = re.sub(r"^[-*•]\s+", "", line).strip()
+        if len(payload) < 4:
+            continue
+        machine_bullet = re.match(r"^\*\*([^*]+)\*\*[：:]", payload)
+        if machine_bullet and _machine_from_section_title(machine_bullet.group(1).strip()):
+            continue
+        head = _answer_bullet_component_head(line)
+        if _is_answer_structural_label(head):
+            continue
+        key = _normalize_label_key(head)
+        if not key or key in seen:
+            continue
+        seen.add(key)
+        out.append(line)
+    return out
+
+
+def _resolve_manual_hint_for_figure_targets(answer: str, query: str) -> str:
+    """Single manual scope for ``single`` / ``answer_bullet`` targets."""
+    machines = _machine_targets_from_answer(answer)
+    if len(machines) == 1:
+        return machines[0]
+    cited = _cited_manual_hints_from_answer(answer)
+    if len(cited) == 1:
+        return next(iter(cited))
+    if machines:
+        return machines[0]
+    q = (query or "").strip()
+    if q:
+        machine = _machine_from_section_title(q)
+        if machine:
+            return machine
+    return ""
+
+
+def _machine_bullet_subject_variants(line: str) -> list[str]:
+    """Subject spans from machine bullet body (primary + parenthetical qualifiers)."""
+    variants: list[str] = []
+    seen: set[str] = set()
+
+    def add(span: str) -> None:
+        span = (span or "").strip()
+        if len(span) < 2:
+            return
+        key = _normalize_label_key(span)
+        if not key or key in seen:
+            return
+        seen.add(key)
+        variants.append(span)
+
+    add(_machine_bullet_subject(line))
+    m = re.match(
+        r"^(?:\d+\.\s*)?[-*•]?\s*\*\*[^*]+\*\*[：:]\s*(.+)$",
+        (line or "").strip(),
+    )
+    if not m:
+        return variants
+    body = re.sub(r"\*\*([^*]+)\*\*", r"\1", m.group(1).strip())
+    body = re.split(r"保养周期", body, maxsplit=1)[0].strip().rstrip("。")
+    for inner in re.findall(r"[（(]([^）)]+)[）)]", body):
+        add(_listing_target_head(inner))
+    for part in re.split(r"[（(]", body, maxsplit=1):
+        add(_listing_target_head(part))
+    return variants
+
+
 def _chunk_is_table_heavy(content: str) -> bool:
     """Structural signal: HTML table blocks dominate the chunk (not domain keywords)."""
     stripped = (content or "").strip()
@@ -1502,36 +1626,165 @@ def _anchor_cite_bonus(
     return 0.0
 
 
-def _figure_ref_matches_query_subjects(
+def _ref_matches_query_theme_in_evidence(
+    query: str,
+    ref_hay: str,
+) -> bool:
+    """Query theme in ref evidence (substring or symmetric term align)."""
+    terms: list[str] = []
+    seen: set[str] = set()
+
+    def add(span: str) -> None:
+        span = span.strip()
+        if len(span) < _min_substantive_term_len() or span in seen:
+            return
+        seen.add(span)
+        terms.append(span)
+
+    for needle in _query_subject_needles(query):
+        add(needle)
+    for term in discriminative_terms(query, min_len=_min_substantive_term_len()):
+        add(term)
+
+    if not terms:
+        return True
+    if any(t in ref_hay for t in terms):
+        return True
+    compact = [t for t in terms if len(t) <= 8]
+    theme_blob = " ".join(compact[:10] if compact else terms[:8])
+    return text_term_alignment_symmetric(theme_blob, ref_hay) >= (
+        _image_min_ref_align() * 0.85
+    )
+
+
+def _chunk_heading_blob(content: str, *, limit: int = 200) -> str:
+    """First lines of a chunk (section heading), not full mega-chunk body."""
+    lines = [ln.strip() for ln in (content or "").splitlines() if ln.strip()]
+    return "\n".join(lines[:5])[:limit]
+
+
+def _anchor_section_carries_subject(
+    anchor_content: str,
+    subjects: list[str],
+) -> bool:
+    blob = _chunk_heading_blob(anchor_content)
+    if not blob:
+        return False
+    for subject in subjects:
+        subject = (subject or "").strip()
+        if len(subject) < 2:
+            continue
+        compact = _listing_target_head(subject)
+        if subject in blob or (compact and compact in blob):
+            return True
+    return False
+
+
+def _ref_matches_machine_bullet_theme(
+    anchor_text: str,
+    ref: dict[str, Any],
+    *,
+    anchor_content: str = "",
+) -> bool:
+    """Machine-line bullets: ref label/context or anchor-section align to bullet subject."""
+    variants = _machine_bullet_subject_variants(anchor_text)
+    for subject in variants:
+        if _figure_ref_matches_listing_target(ref, subject):
+            return True
+    anchor = (anchor_content or "").strip()
+    if not anchor or not _anchor_section_carries_subject(anchor, variants):
+        return False
+    struct = _ref_structure_align_text(ref)
+    if not struct:
+        return False
+    return text_term_alignment_symmetric(anchor, struct) >= _image_min_ref_align()
+
+
+def _figure_ref_matches_target_topic(
+    anchor_text: str,
     query: str,
     ref: dict[str, Any],
     *,
+    kind: str = "",
+    component: str = "",
     doc_content: str = "",
     anchor_content: str = "",
 ) -> bool:
-    """When query has substantive terms, figure/anchor text should mention at least one."""
-    q = (query or "").strip()
-    terms = sorted(
-        {
-            t
-            for t in discriminative_terms(q, min_len=2)
-            if 3 <= len(t) <= 8 and t != q
-        },
-        key=len,
-        reverse=True,
+    """Ref-level topic gate dispatched by ``FigureTarget.kind`` (§2.7c)."""
+    target_kind = (kind or "").strip()
+    section_anchor = (anchor_content or doc_content or "").strip()
+
+    if target_kind == "machine_component_pair":
+        comp = (component or "").strip()
+        if not comp:
+            return True
+        return _figure_ref_matches_listing_target(ref, comp)
+
+    if target_kind == "machine_bullet":
+        return _ref_matches_machine_bullet_theme(
+            anchor_text,
+            ref,
+            anchor_content=section_anchor,
+        )
+
+    if target_kind == "answer_bullet":
+        head = _answer_bullet_component_head(anchor_text)
+        if not head or len(head) < 2:
+            return False
+        return _figure_ref_matches_listing_target(ref, head)
+
+    if target_kind == "single":
+        struct = _ref_structure_align_text(ref)
+        chunk = (doc_content or "").strip()
+        ref_hay = "\n".join(p for p in (struct, chunk) if p.strip())
+        if not ref_hay:
+            return False
+        topics = _single_figure_supplement_topics(anchor_text, query)
+        if topics:
+            return any(_chunk_matches_answer_topic(ref_hay, t) for t in topics)
+        return _ref_matches_query_theme_in_evidence(query, ref_hay)
+
+    return True
+
+
+def _pick_figure_ref_for_target_kind(
+    doc: dict[str, Any],
+    *,
+    kind: str,
+    anchor_text: str,
+    query: str,
+    component: str = "",
+    anchor_content: str = "",
+) -> dict[str, Any] | None:
+    """Pick inline figure in ``doc`` using kind-aware listing/subject priority."""
+    content = (anchor_content or _doc_content(doc)).strip()
+    target_kind = (kind or "").strip()
+
+    if target_kind == "machine_bullet":
+        subject = _machine_bullet_subject(anchor_text)
+        if subject:
+            ref = _best_figure_ref_for_listing_target(doc, subject)
+            if ref is not None and _figure_ref_matches_listing_target(ref, subject):
+                return ref
+    elif target_kind == "answer_bullet":
+        head = _answer_bullet_component_head(anchor_text)
+        if head:
+            ref = _best_figure_ref_for_listing_target(doc, head)
+            if ref is not None and _figure_ref_matches_listing_target(ref, head):
+                return ref
+    elif target_kind == "machine_component_pair":
+        comp = (component or "").strip()
+        if comp:
+            ref = _best_figure_ref_for_listing_target(doc, comp)
+            if ref is not None and _figure_ref_matches_listing_target(ref, comp):
+                return ref
+
+    return _best_figure_ref_for_anchor_align(
+        doc,
+        anchor_text=anchor_text,
+        query=query,
+        anchor_content=content,
     )
-    if not terms:
-        return True
-    parts = [
-        _ref_effective_label(ref),
-        str(ref.get("context") or ref.get("inline_context") or ""),
-        _text_for_subject_alignment(doc_content),
-        _text_for_subject_alignment(anchor_content),
-    ]
-    hay = "\n".join(p.strip() for p in parts if p and p.strip())
-    if not hay:
-        return False
-    return any(term in hay for term in terms)
 
 
 def _best_anchor_chunk(
@@ -1666,7 +1919,12 @@ def _figure_ref_passes_align_gate(
     label = _ref_effective_label(ref) or ""
     ctx = str(ref.get("context") or ref.get("inline_context") or "").strip()
     chunk = (doc_content or "").strip()
+    struct = _ref_structure_align_text(ref)
     score = 0.0
+    if anchor_only and struct:
+        score = max(score, text_term_alignment_symmetric(anchor_only, struct))
+    if struct:
+        score = max(score, text_term_alignment_symmetric(blob, struct))
     if anchor_only:
         if label:
             score = max(score, text_term_alignment_symmetric(anchor_only, label))
@@ -1756,14 +2014,22 @@ def extract_figure_targets(
             for machine in machines
         ]
 
+    answer_lines = _answer_bullet_lines_for_figure_targets(ans)
+    if len(answer_lines) >= 2:
+        manual = _resolve_manual_hint_for_figure_targets(ans, q)
+        return [
+            FigureTarget(
+                manual_hint=manual,
+                anchor_text=line,
+                kind="answer_bullet",
+            )
+            for line in answer_lines
+        ]
+
     anchor_text = ans
     if q:
         anchor_text = f"{q}\n{ans}"
-    manual = machines[0] if machines else ""
-    if not manual:
-        cited = _cited_manual_hints_from_answer(ans)
-        if len(cited) == 1:
-            manual = next(iter(cited))
+    manual = _resolve_manual_hint_for_figure_targets(ans, q)
     return [
         FigureTarget(
             manual_hint=manual,
@@ -1774,16 +2040,22 @@ def extract_figure_targets(
 
 
 def _should_use_unified_figure_targets(query: str, answer: str) -> bool:
-    """True when answer has ≥2 structured targets → full unified pipeline."""
+    """True when answer maps to unified ``extract_figure_targets`` pipeline."""
     if not _chunk_locality_image_enabled():
         return False
     if not (answer or "").strip():
         return False
     targets = extract_figure_targets(query, answer)
+    if not targets:
+        return False
+    if len(targets) == 1 and targets[0].kind == "single":
+        return True
     if len(targets) < 2:
         return False
     kind = targets[0].kind
     if kind == "machine_component_pair":
+        return True
+    if kind == "answer_bullet":
         return True
     if kind == "machine_bullet":
         return bool(
@@ -1793,62 +2065,234 @@ def _should_use_unified_figure_targets(query: str, answer: str) -> bool:
     return False
 
 
-def _should_augment_with_unified_single_target(query: str, answer: str) -> bool:
-    """True when legacy pipeline should merge one ``single`` target via ``_figure_for_target``."""
-    if not _chunk_locality_image_enabled():
-        return False
-    if not (answer or "").strip():
-        return False
-    targets = extract_figure_targets(query, answer)
-    return len(targets) == 1 and targets[0].kind == "single"
+def _pipeline_parse_roots() -> list[Path]:
+    """Parse output dirs for content_list fallback (§4.2 step 3)."""
+    roots: list[Path] = []
+    for key in ("RAG_WEB_PARSER_OUTPUT_DIR", "RAG_PARSER_OUTPUT_DIR"):
+        raw = (os.getenv(key) or "").strip()
+        if raw:
+            roots.append(Path(raw))
+    repo = Path(__file__).resolve().parents[1]
+    for rel in ("data/pipeline_parse", "output/pipeline_parse"):
+        roots.append(repo / rel)
+    seen: set[str] = set()
+    out: list[Path] = []
+    for path in roots:
+        key = str(path.resolve()) if path.exists() else str(path)
+        if key in seen:
+            continue
+        seen.add(key)
+        out.append(path)
+    return out
 
 
-def _refs_from_unified_single_target_augment(
-    query: str,
-    answer: str,
+def _best_inline_figure_from_pool(
+    anchor_text: str,
+    pool: list[dict[str, Any]],
     *,
-    retrieved_docs: list[dict[str, Any]] | None,
-    cite_pool: list[dict[str, Any]] | None,
-) -> tuple[list[dict[str, Any]], dict[str, Any]]:
-    """Optional single-target figure for merge into legacy ``refs_from_context`` path."""
-    pool = _dedupe_doc_list_by_chunk_identity(
-        list(cite_pool or []) + list(retrieved_docs or [])
+    query: str,
+    manual_hint: str = "",
+    kind: str = "",
+    component: str = "",
+    strict_topic: bool = False,
+    anchor_content: str = "",
+    exclude_paths: set[str] | None = None,
+    exclude_chunk_ids: set[str] | None = None,
+) -> tuple[dict[str, Any] | None, dict[str, Any] | None, str]:
+    """Best inline-figure chunk in pool aligned to anchor (cite / manual evidence)."""
+    align_blob = _anchor_align_blob(anchor_text, query)
+    head = (
+        _answer_bullet_component_head(anchor_text)
+        if kind == "answer_bullet"
+        else _listing_target_head(anchor_text)
     )
-    targets = extract_figure_targets(
-        query,
-        answer,
-        cite_pool=pool,
-        kept_docs=list(retrieved_docs or []),
-    )
-    if len(targets) != 1:
-        return [], {"mode": "unified_single_augment", "skipped": "not_single"}
-    target = targets[0]
-    manual_cache: dict[str, list[dict[str, Any]]] = {}
-    ref, row = _figure_for_target(
-        target,
-        query=query,
-        cite_pool=pool,
-        manual_cache=manual_cache,
-    )
-    meta: dict[str, Any] = {
-        "mode": "unified_single_augment",
-        "target_count": 1,
-        "targets": [row],
-        "picked": 0,
-    }
-    if ref is None:
-        return [], meta
-    if _is_cover_page_ref(ref):
-        row["status"] = "cover_page"
-        return [], meta
-    ref = dict(ref)
-    ref["figure_target_kind"] = target.kind
-    ref["locality_machine"] = target.manual_hint
-    ref["locality_source"] = row.get("figure_source")
-    ref["source_key"] = _source_key_from_path(str(ref.get("path") or ""))
-    meta["picked"] = 1
+    machine_subject = _machine_bullet_subject(anchor_text)
+    excluded_paths = set(exclude_paths or [])
+    excluded_chunks = set(exclude_chunk_ids or [])
+    ranked: list[tuple[float, dict[str, Any], dict[str, Any]]] = []
+    section_anchor = (anchor_content or "").strip()
+    for doc in pool:
+        if manual_hint and not _doc_matches_manual_hint(doc, manual_hint):
+            continue
+        doc_id = _doc_storage_chunk_id(doc)
+        if doc_id and doc_id in excluded_chunks:
+            continue
+        content = _doc_content(doc).strip()
+        if not content or not extract_image_refs_from_context(content):
+            continue
+        refs = extract_image_refs_from_context(content)
+        if not refs:
+            continue
+        for ref in refs:
+            if _is_cover_page_ref(ref):
+                continue
+            path_key = Path(str(ref.get("path") or "")).name
+            if path_key and path_key in excluded_paths:
+                continue
+            if not _figure_ref_passes_align_gate(
+                anchor_text,
+                query,
+                ref,
+                doc_content=content,
+            ):
+                continue
+            if strict_topic and not _figure_ref_matches_target_topic(
+                anchor_text,
+                query,
+                ref,
+                kind=kind,
+                component=component,
+                anchor_content=section_anchor,
+            ):
+                continue
+            hay = "\n".join(
+                p
+                for p in (
+                    _ref_effective_label(ref),
+                    _ref_inline_context_text(ref),
+                    content,
+                )
+                if p
+            )
+            score = text_term_alignment_symmetric(align_blob, hay)
+            if head and _figure_ref_matches_listing_target(ref, head):
+                score += 0.25
+            if machine_subject and _figure_ref_matches_listing_target(
+                ref, machine_subject
+            ):
+                score += 0.25
+            ranked.append((score, ref, doc))
+    if not ranked:
+        return None, None, ""
+    ranked.sort(key=lambda row: (-row[0], _doc_chunk_order_index(row[2]) or 0))
+    best_ref, best_doc = ranked[0][1], ranked[0][2]
+    return best_ref, best_doc, "cite_pool"
+
+
+def _figure_ref_from_content_list_for_target(
+    anchor_text: str,
+    manual_hint: str,
+    *,
+    query: str,
+    kind: str = "",
+    component: str = "",
+    anchor_content: str = "",
+) -> tuple[dict[str, Any] | None, str]:
+    """content_list + ``best_image_for_text_item`` fallback (same priority as ingest)."""
+    from raganything.utils import best_image_for_text_item, context_text_for_image
+
+    align_blob = _anchor_align_blob(anchor_text, query)
+    head = _listing_target_head(anchor_text)
+    min_align = _image_min_ref_align()
+    best_ref: dict[str, Any] | None = None
+    best_score = 0.0
+
+    for root in _pipeline_parse_roots():
+        if not root.is_dir():
+            continue
+        try:
+            cl_paths = list(root.rglob("*_content_list.json"))
+        except OSError:
+            continue
+        for cl_path in cl_paths:
+            doc_hint = cl_path.stem.replace("_content_list", "").replace(
+                "_content_list_v2", ""
+            )
+            if manual_hint and not (
+                _doc_matches_manual_hint({"file_path": doc_hint + ".pdf"}, manual_hint)
+                or _source_hint_matches_doc(manual_hint, doc_hint)
+            ):
+                continue
+            items = _load_content_list_items(cl_path)
+            if not items:
+                continue
+            auto_dir = cl_path.parent
+            for ti, item in enumerate(items):
+                if not isinstance(item, dict) or item.get("type") != "text":
+                    continue
+                text = str(item.get("text") or "").strip()
+                if len(text) < 4:
+                    continue
+                align = text_term_alignment_symmetric(align_blob, text)
+                if head and head in text:
+                    align = max(align, min_align)
+                if align < min_align * 0.7:
+                    continue
+                img_item = best_image_for_text_item(items, ti)
+                if img_item is None:
+                    continue
+                try:
+                    img_idx = items.index(img_item)
+                except ValueError:
+                    img_idx = -1
+                ctx = (
+                    context_text_for_image(items, img_idx)
+                    if img_idx >= 0
+                    else ""
+                )
+                label = image_label_for_item(items, img_item) if img_idx >= 0 else ""
+                rel_path = (img_item.get("img_path") or "").strip()
+                if not rel_path:
+                    continue
+                full_path = (auto_dir / rel_path).resolve()
+                ref = {
+                    "path": str(full_path),
+                    "page": img_item.get("page_idx")
+                    if isinstance(img_item.get("page_idx"), int)
+                    else None,
+                    "caption": label,
+                    "label": label,
+                    "context": "\n".join(
+                        p for p in (text[:300], ctx.strip()) if p
+                    )[:400],
+                }
+                if _is_cover_page_ref(ref):
+                    continue
+                if not _figure_ref_passes_align_gate(
+                    anchor_text,
+                    query,
+                    ref,
+                    doc_content=ctx,
+                ):
+                    continue
+                section_anchor = (anchor_content or text).strip()
+                if not _figure_ref_matches_target_topic(
+                    anchor_text,
+                    query,
+                    ref,
+                    kind=kind,
+                    component=component,
+                    anchor_content=section_anchor,
+                ):
+                    continue
+                score = align + text_term_alignment_symmetric(
+                    align_blob,
+                    " ".join(part for part in (label, ctx) if part),
+                )
+                if score > best_score:
+                    best_score = score
+                    best_ref = ref
+    if best_ref is None:
+        return None, ""
+    return best_ref, "content_list"
+
+
+def _finalize_figure_target_row(
+    row: dict[str, Any],
+    ref: dict[str, Any],
+    *,
+    source: str,
+    anchor: dict[str, Any] | None,
+    fig_doc: dict[str, Any] | None,
+) -> None:
+    row["status"] = "ok"
+    row["figure_source"] = source
+    if anchor is not None:
+        row["anchor_id"] = str(anchor.get("id") or anchor.get("chunk_id") or "")
+        row["anchor_idx"] = _doc_chunk_order_index(anchor)
+    if fig_doc is not None:
+        row["figure_idx"] = _doc_chunk_order_index(fig_doc)
     row["path"] = Path(str(ref.get("path") or "")).name
-    return [ref], meta
 
 
 def _figure_for_target(
@@ -1857,13 +2301,17 @@ def _figure_for_target(
     query: str,
     cite_pool: list[dict[str, Any]] | None,
     manual_cache: dict[str, list[dict[str, Any]]],
+    exclude_paths: set[str] | None = None,
+    exclude_chunk_ids: set[str] | None = None,
 ) -> tuple[dict[str, Any] | None, dict[str, Any]]:
-    """One figure ref for a single ``FigureTarget`` (anchor → neighbor, manual-scoped)."""
+    """One figure ref for a single ``FigureTarget`` (anchor/neighbor → cite → pool → content_list)."""
     row: dict[str, Any] = {
         "manual_hint": target.manual_hint,
         "kind": target.kind,
         "status": "pending",
     }
+    excluded_paths = set(exclude_paths or [])
+    excluded_chunks = set(exclude_chunk_ids or [])
     machine = (target.manual_hint or "").strip()
     if not machine:
         row["status"] = "no_manual_hint"
@@ -1877,12 +2325,12 @@ def _figure_for_target(
 
     scoped_cite = _manual_scoped_cite_pool(cite_pool, machine)
     row["scoped_cite_n"] = len(scoped_cite)
+    scoped_pool = _dedupe_doc_list_by_chunk_identity(
+        list(manual_chunks) + list(scoped_cite)
+    )
 
     if target.kind == "machine_component_pair" and target.component:
         answer_blob = _normalize_citation_blob(target.anchor_text)
-        scoped_pool = _dedupe_doc_list_by_chunk_identity(
-            list(manual_chunks) + list(scoped_cite)
-        )
         fig_doc = _best_figure_doc_for_component(
             target.component,
             scoped_pool,
@@ -1907,6 +2355,7 @@ def _figure_for_target(
             return None, row
         row["status"] = "ok"
         row["figure_source"] = "component_pool"
+        row["path"] = Path(str(ref.get("path") or "")).name
         return ref, row
 
     anchor = _best_anchor_chunk(
@@ -1937,69 +2386,180 @@ def _figure_for_target(
         row["status"] = "no_anchor"
         return None, row
 
+    primary_anchor = anchor_candidates[0]
+    row["anchor_id"] = str(
+        primary_anchor.get("id") or primary_anchor.get("chunk_id") or ""
+    )
+    row["anchor_idx"] = _doc_chunk_order_index(primary_anchor)
+
+    anchor_text = target.anchor_text
+    topic_text = _figure_target_topic_text(target)
+    window = _chunk_locality_window()
+    anchor_section = _doc_content(primary_anchor)
+
+    def _accept(
+        ref: dict[str, Any] | None,
+        *,
+        source: str,
+        anchor_doc: dict[str, Any] | None,
+        fig_doc: dict[str, Any] | None,
+        align_extra: str = "",
+        align_anchor: str | None = None,
+    ) -> tuple[dict[str, Any] | None, dict[str, Any]]:
+        if ref is None:
+            return None, row
+        path_key = Path(str(ref.get("path") or "")).name
+        if path_key and path_key in excluded_paths:
+            return None, row
+        fig_cid = _doc_storage_chunk_id(fig_doc) if fig_doc else ""
+        if fig_cid and fig_cid in excluded_chunks:
+            return None, row
+        if (
+            source == "anchor"
+            and _anchor_inline_same_chunk(anchor_doc, fig_doc)
+            and not _is_cover_page_ref(ref)
+        ):
+            _finalize_figure_target_row(
+                row,
+                ref,
+                source=source,
+                anchor=anchor_doc,
+                fig_doc=fig_doc,
+            )
+            return ref, row
+        align_anchor_text = (align_anchor or topic_text or anchor_text).strip()
+        align_content = "\n".join(
+            p
+            for p in (
+                _doc_content(anchor_doc) if anchor_doc else "",
+                _doc_content(fig_doc) if fig_doc else "",
+                align_extra,
+            )
+            if p.strip()
+        )
+        if not _figure_ref_passes_align_gate(
+            align_anchor_text,
+            query,
+            ref,
+            doc_content=align_content or None,
+        ):
+            row["status"] = "align_gate"
+            row["figure_source"] = source
+            return None, row
+        _finalize_figure_target_row(
+            row,
+            ref,
+            source=source,
+            anchor=anchor_doc,
+            fig_doc=fig_doc,
+        )
+        return ref, row
+
+    # 1. Anchor inline figure + order_index neighbors (structure-first)
     fig_doc: dict[str, Any] | None = None
     source = ""
     anchor: dict[str, Any] | None = None
     for candidate in anchor_candidates:
         if not _doc_matches_manual_hint(candidate, machine):
             continue
-        fig_doc, source = _figure_doc_for_anchor_neighbor(
+        cand_fig, cand_src = _figure_doc_for_anchor_neighbor(
             candidate,
             manual_chunks,
-            window=_chunk_locality_window(),
-            anchor_text=target.anchor_text,
+            window=window,
+            anchor_text=topic_text,
             query=query,
             manual_hint=machine,
+            kind=target.kind,
+            component=target.component,
         )
-        if fig_doc is not None:
-            anchor = candidate
-            break
+        if cand_fig is None:
+            continue
+        ref = _pick_figure_ref_for_target_kind(
+            cand_fig,
+            kind=target.kind,
+            anchor_text=topic_text,
+            query=query,
+            component=target.component,
+            anchor_content=_doc_content(candidate),
+        )
+        accepted, out_row = _accept(
+            ref,
+            source=cand_src,
+            anchor_doc=candidate,
+            fig_doc=cand_fig,
+            align_anchor=topic_text,
+        )
+        if accepted is not None:
+            return accepted, out_row
 
-    if anchor is None or fig_doc is None:
-        row["status"] = "no_figure_near_anchor"
-        if anchor_candidates:
-            row["anchor_id"] = str(
-                anchor_candidates[0].get("id")
-                or anchor_candidates[0].get("chunk_id")
-                or ""
-            )
-            row["anchor_idx"] = _doc_chunk_order_index(anchor_candidates[0])
-        return None, row
-
-    ref = _best_figure_ref_for_anchor_align(
-        fig_doc,
-        anchor_text=target.anchor_text,
+    # 2. Scoped cite pool (evidence supplement, not global query-subject pick)
+    cite_ref, cite_doc, cite_src = _best_inline_figure_from_pool(
+        topic_text,
+        scoped_cite,
         query=query,
-        anchor_content=_doc_content(anchor),
+        manual_hint=machine,
+        kind=target.kind,
+        component=target.component,
+        strict_topic=True,
+        anchor_content=anchor_section,
+        exclude_paths=excluded_paths,
+        exclude_chunk_ids=excluded_chunks,
     )
-    if ref is None:
-        row["status"] = "no_figure_extracted"
-        return None, row
-    align_content = "\n".join(
-        p
-        for p in (
-            _doc_content(anchor),
-            _doc_content(fig_doc),
-        )
-        if p.strip()
+    accepted, out_row = _accept(
+        cite_ref,
+        source=cite_src,
+        anchor_doc=primary_anchor if cite_doc is None else cite_doc,
+        fig_doc=cite_doc,
+        align_anchor=topic_text,
     )
-    if not _figure_ref_passes_align_gate(
-        target.anchor_text,
-        query,
-        ref,
-        doc_content=align_content,
-    ):
-        row["status"] = "align_gate"
-        row["figure_source"] = source
-        return None, row
+    if accepted is not None:
+        return accepted, out_row
 
-    row["status"] = "ok"
-    row["figure_source"] = source
-    row["anchor_id"] = str(anchor.get("id") or anchor.get("chunk_id") or "")
-    row["anchor_idx"] = _doc_chunk_order_index(anchor)
-    row["figure_idx"] = _doc_chunk_order_index(fig_doc)
-    row["path"] = Path(str(ref.get("path") or "")).name
-    return ref, row
+    # 3. Full manual + cite pool (strict answer topic)
+    pool_ref, pool_doc, pool_src = _best_inline_figure_from_pool(
+        topic_text,
+        scoped_pool,
+        query=query,
+        manual_hint=machine,
+        kind=target.kind,
+        component=target.component,
+        strict_topic=True,
+        anchor_content=anchor_section,
+        exclude_paths=excluded_paths,
+        exclude_chunk_ids=excluded_chunks,
+    )
+    accepted, out_row = _accept(
+        pool_ref,
+        source=pool_src,
+        anchor_doc=pool_doc or primary_anchor,
+        fig_doc=pool_doc,
+        align_anchor=topic_text,
+    )
+    if accepted is not None:
+        return accepted, out_row
+
+    # 4. content_list / utils ingest pairing
+    cl_ref, cl_src = _figure_ref_from_content_list_for_target(
+        topic_text,
+        machine,
+        query=query,
+        kind=target.kind,
+        component=target.component,
+        anchor_content=anchor_section,
+    )
+    accepted, out_row = _accept(
+        cl_ref,
+        source=cl_src,
+        anchor_doc=primary_anchor,
+        fig_doc=None,
+        align_extra=topic_text,
+        align_anchor=topic_text,
+    )
+    if accepted is not None:
+        return accepted, out_row
+
+    row["status"] = "no_figure_near_anchor"
+    return None, row
 
 
 def _refs_from_unified_figure_targets(
@@ -2036,6 +2596,7 @@ def _refs_from_unified_figure_targets(
             query=query,
             cite_pool=pool,
             manual_cache=manual_cache,
+            exclude_paths=seen_paths,
         )
         meta["targets"].append(row)
         if ref is None:
@@ -2067,6 +2628,8 @@ def _figure_doc_for_anchor_neighbor(
     anchor_text: str = "",
     query: str = "",
     manual_hint: str = "",
+    kind: str = "",
+    component: str = "",
 ) -> tuple[dict[str, Any] | None, str]:
     """Return (doc_with_figure, source) where source is ``anchor`` or ``neighbor``."""
     anchor = _resolve_doc_with_order_index(anchor)
@@ -2077,17 +2640,15 @@ def _figure_doc_for_anchor_neighbor(
     min_align = _image_min_ref_align()
     anchor_content = _doc_content(anchor).strip()
     if anchor_content and extract_image_refs_from_context(anchor_content):
-        ref = _first_figure_ref_from_doc(anchor)
-        if ref is not None and _figure_ref_passes_align_gate(
-            anchor_text,
-            query,
-            ref,
-            doc_content=anchor_content,
-        ) and _figure_ref_matches_query_subjects(
-            query,
-            ref,
-            doc_content=anchor_content,
-        ):
+        ref = _pick_figure_ref_for_target_kind(
+            anchor,
+            kind=kind,
+            anchor_text=anchor_text,
+            query=query,
+            component=component,
+            anchor_content=anchor_content,
+        )
+        if ref is not None and not _is_cover_page_ref(ref):
             return anchor, "anchor"
 
     anchor_idx = _doc_chunk_order_index(anchor)
@@ -2136,74 +2697,45 @@ def _figure_doc_for_anchor_neighbor(
     if not scored:
         return None, ""
     scored.sort(key=lambda pair: (-pair[0], _doc_chunk_order_index(pair[1]) or 0))
-    best_doc = scored[0][1]
-    ref = _first_figure_ref_from_doc(best_doc)
-    align_content = "\n".join(
-        p
-        for p in (
-            anchor_content,
-            _doc_content(best_doc).strip(),
+    for _score, doc in scored:
+        ref = _pick_figure_ref_for_target_kind(
+            doc,
+            kind=kind,
+            anchor_text=anchor_text,
+            query=query,
+            component=component,
+            anchor_content=anchor_content,
         )
-        if p
-    )
-    if ref and not _figure_ref_passes_align_gate(
-        anchor_text,
-        query,
-        ref,
-        doc_content=align_content,
-    ):
-        if len(scored) > 1:
-            for _score, doc in scored[1:]:
-                alt = _first_figure_ref_from_doc(doc)
-                alt_content = "\n".join(
-                    p
-                    for p in (
-                        anchor_content,
-                        _doc_content(doc).strip(),
-                    )
-                    if p
-                )
-                if alt and _figure_ref_passes_align_gate(
-                    anchor_text,
-                    query,
-                    alt,
-                    doc_content=alt_content,
-                ) and _figure_ref_matches_query_subjects(
-                    query,
-                    alt,
-                    doc_content=alt_content,
-                ):
-                    return doc, "neighbor"
-        return None, ""
-    if ref and not _figure_ref_matches_query_subjects(
-        query,
-        ref,
-        doc_content=align_content,
-    ):
-        if len(scored) > 1:
-            for _score, doc in scored[1:]:
-                alt = _first_figure_ref_from_doc(doc)
-                alt_content = "\n".join(
-                    p
-                    for p in (
-                        anchor_content,
-                        _doc_content(doc).strip(),
-                    )
-                    if p
-                )
-                if alt and _figure_ref_passes_align_gate(
-                    anchor_text,
-                    query,
-                    alt,
-                    doc_content=alt_content,
-                ) and _figure_ref_matches_query_subjects(
-                    query,
-                    alt,
-                    doc_content=alt_content,
-                ):
-                    return doc, "neighbor"
-        return None, ""
-    return best_doc, "neighbor"
+        if ref is None:
+            continue
+        align_content = "\n".join(
+            p
+            for p in (
+                anchor_content,
+                _doc_content(doc).strip(),
+            )
+            if p
+        )
+        if not _figure_ref_passes_align_gate(
+            anchor_text,
+            query,
+            ref,
+            doc_content=align_content,
+        ):
+            continue
+        if _is_cover_page_ref(ref):
+            continue
+        if not _figure_ref_matches_target_topic(
+            anchor_text,
+            query,
+            ref,
+            kind=kind,
+            component=component,
+            anchor_content=anchor_content,
+        ):
+            continue
+        return doc, "neighbor"
+    return None, ""
 
 
 def _best_figure_ref_for_anchor_align(
@@ -2236,6 +2768,8 @@ def _best_figure_ref_for_anchor_align(
         if anchor_blob:
             score += text_term_alignment_symmetric(anchor_blob, hay) * 3.0
         scored.append((score, idx, ref))
+    if not scored:
+        return None
     scored.sort(key=lambda row: (row[0], row[1]))
     best_score = scored[-1][0]
     tied = [ref for score, _idx, ref in scored if score >= best_score - 1e-6]
@@ -2267,22 +2801,6 @@ def _apply_unified_figure_debug(
     ]
     debug["selected_paths"] = [str(ref.get("path") or "") for ref in refs]
     debug["listing_targets"] = _machine_targets_from_answer(answer or "")
-
-
-def _refs_from_chunk_locality_listing(
-    query: str,
-    answer: str,
-    *,
-    retrieved_docs: list[dict[str, Any]] | None,
-    cite_pool: list[dict[str, Any]] | None,
-) -> tuple[list[dict[str, Any]], dict[str, Any]]:
-    """Deprecated wrapper — delegates to ``_refs_from_unified_figure_targets``."""
-    return _refs_from_unified_figure_targets(
-        query,
-        answer,
-        retrieved_docs=retrieved_docs,
-        cite_pool=cite_pool,
-    )
 
 
 def _env_bool_image(key: str, default: bool = True) -> bool:
@@ -4518,7 +5036,10 @@ def _figure_chunks_near_primary_top_lines(
 
 
 def _answer_section_topics(answer: str) -> list[str]:
-    """Bold spans in the answer body (machine headers, component names)."""
+    """Bold spans in the answer body (machine headers, component names).
+
+    Note: LLM markdown bold is volatile; do not use alone to gate anchor inline figures.
+    """
     body = _answer_text_for_placement(answer)
     topics: list[str] = []
     seen: set[str] = set()
@@ -4529,6 +5050,53 @@ def _answer_section_topics(answer: str) -> list[str]:
         seen.add(topic)
         topics.append(topic)
     return topics
+
+
+def _single_figure_supplement_topics(anchor_text: str, query: str) -> list[str]:
+    """Topic spans for cite/neighbor supplement gates on ``single`` targets.
+
+    Combines query terms, answer listing spans, and optional LLM-bold — bold alone
+    must not be the only signal (formatting varies per generation).
+    """
+    spans: list[str] = []
+    seen: set[str] = set()
+
+    def add(raw: str) -> None:
+        raw = (raw or "").strip()
+        if len(raw) < 2:
+            return
+        if _is_answer_structural_label(raw) or _is_maintenance_cycle_value(raw):
+            return
+        key = _normalize_label_key(raw)
+        if not key or key in seen:
+            return
+        seen.add(key)
+        spans.append(raw)
+
+    ans_blob = (anchor_text or "").strip()
+    for topic in _answer_image_span_targets(query, ans_blob):
+        add(topic)
+    for topic in _answer_section_topics(ans_blob):
+        add(topic)
+    body = _answer_text_for_placement(ans_blob)
+    hay = f"{body}\n{ans_blob}"
+    for term in discriminative_terms(query, min_len=3):
+        if len(term) < 3:
+            continue
+        if term in hay or term in (query or ""):
+            add(term)
+    return spans
+
+
+def _anchor_inline_same_chunk(
+    anchor_doc: dict[str, Any] | None,
+    fig_doc: dict[str, Any] | None,
+) -> bool:
+    if anchor_doc is None or fig_doc is None:
+        return False
+    aid = _doc_storage_chunk_id(anchor_doc)
+    fid = _doc_storage_chunk_id(fig_doc)
+    return bool(aid and fid and aid == fid)
 
 
 def _supplement_query_topic_figure_chunks(
@@ -4749,23 +5317,20 @@ def llm_chunk_locality_enabled() -> bool:
 
 
 def _llm_chunk_locality_window() -> int:
-    raw = (
-        os.getenv("RAG_QUERY_CHUNK_LOCALITY_WINDOW")
-        or os.getenv("RAG_IMAGE_CHUNK_LOCALITY_WINDOW")
-        or "2"
+    return _env_int_image(
+        "RAG_CHUNK_ORDER_WINDOW",
+        "RAG_QUERY_CHUNK_LOCALITY_WINDOW",
+        "RAG_IMAGE_CHUNK_LOCALITY_WINDOW",
+        default=2,
     )
-    try:
-        return max(1, min(32, int(raw)))
-    except ValueError:
-        return 2
 
 
 def _llm_chunk_locality_max_add() -> int:
-    raw = os.getenv("RAG_QUERY_CHUNK_LOCALITY_MAX_ADD") or "3"
-    try:
-        return max(1, min(32, int(raw)))
-    except ValueError:
-        return 3
+    return _env_int_image(
+        "RAG_CHUNK_ORDER_MAX_ADD",
+        "RAG_QUERY_CHUNK_LOCALITY_MAX_ADD",
+        default=3,
+    )
 
 
 def _llm_chunk_locality_skipped(query: str) -> str | None:
@@ -8438,17 +9003,6 @@ def explain_query_images(
     )
 
     refs = from_context
-    if _should_augment_with_unified_single_target(query or "", answer or ""):
-        aug_refs, aug_meta = _refs_from_unified_single_target_augment(
-            query or "",
-            answer or "",
-            retrieved_docs=retrieved_docs,
-            cite_pool=list(figure_pool or retrieved_docs or []),
-        )
-        debug["unified_single_augment"] = aug_meta
-        if aug_refs:
-            debug["refs_from_unified_augment"] = len(aug_refs)
-            refs = _merge_refs(refs, aug_refs)
     if _should_expand_cited_manual_kv_pool(query or "", answer or ""):
         span_pool = _expand_pool_with_cited_manual_figure_chunks(
             list(span_pool),
@@ -8637,15 +9191,6 @@ def images_for_api(
         retrieved_docs=retrieved_docs,
         full_context=primary_text,
     )
-    if _should_augment_with_unified_single_target(query or "", answer or ""):
-        aug_refs, _aug_meta = _refs_from_unified_single_target_augment(
-            query or "",
-            answer or "",
-            retrieved_docs=retrieved_docs,
-            cite_pool=list(figure_pool or retrieved_docs or []),
-        )
-        if aug_refs:
-            refs = _merge_refs(refs, aug_refs)
     if _should_expand_cited_manual_kv_pool(query or "", answer or ""):
         span_pool = _expand_pool_with_cited_manual_figure_chunks(
             list(figure_pool or retrieved_docs or []),

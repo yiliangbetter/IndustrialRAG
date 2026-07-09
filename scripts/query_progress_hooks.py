@@ -553,27 +553,15 @@ def _sync_llm_chunks_for_images(query: str, chunks: list[dict]) -> None:
     """Persist LLM input chunks (same batch the answer LLM sees)."""
     if not chunks:
         return
-    from image_query_refs import (  # noqa: WPS433
-        llm_rerank_figure_supplement_enabled,
-        supplement_llm_docs_with_rerank_figures,
-        text_from_retrieved_docs,
-    )
-
     try:
         from query_doc_steering import filter_retrieved_docs_by_query  # noqa: WPS433
 
         filtered = filter_retrieved_docs_by_query(query, chunks)
-        final = filtered if filtered else chunks
+        merged = filtered if filtered else chunks
     except Exception:
-        final = chunks
+        merged = list(chunks)
     rerank_pool = list(_rerank_docs.get() or [])
-    if llm_rerank_figure_supplement_enabled() and rerank_pool:
-        merged, added = supplement_llm_docs_with_rerank_figures(
-            query, final, rerank_pool
-        )
-    else:
-        merged, added = final, 0
-    _llm_chunks_rerank_figure_supplement.set(added)
+    _llm_chunks_rerank_figure_supplement.set(0)
     try:
         from query_doc_steering import (  # noqa: WPS433
             record_catalog_boost,
@@ -615,6 +603,8 @@ def _sync_llm_chunks_for_images(query: str, chunks: list[dict]) -> None:
                 _rerank_figure_pool.set(fig_docs)
         except Exception:
             pass
+    from image_query_refs import text_from_retrieved_docs  # noqa: WPS433
+
     docs_text = text_from_retrieved_docs(merged).strip()
     if docs_text:
         _retrieved_docs_text.set(docs_text)
