@@ -490,9 +490,9 @@ def _segment_starts_new_section(segment: str) -> bool:
 
 
 def _maintenance_section_step_closed(text: str) -> bool:
-    """True once a subsection already has a procedure line or inline figure."""
+    """True once a subsection already has a ``保养步骤：`` procedure line."""
     seg = (text or "").strip()
-    return bool(seg) and ("保养步骤：" in seg or _IMAGE_REF_MARKER in seg)
+    return bool(seg) and "保养步骤：" in seg
 
 
 def _section_heading_needs_field_merge(segment: str) -> bool:
@@ -548,10 +548,8 @@ def _split_overmerged_maintenance_segment(segment: str) -> List[str]:
         if _is_image_ref_segment(block):
             if current:
                 current.append(block)
-                sections.append(current)
-                current = []
             else:
-                sections.append([block])
+                current = [block]
             continue
         first_line = block.split("\n", 1)[0].strip()
         if _is_orphan_heading_segment(block):
@@ -698,8 +696,24 @@ def _assemble_maintenance_section_segments(segments: List[str]) -> List[str]:
     return out
 
 
+def _preceding_section_accepts_trailing_fields(segment: str) -> bool:
+    """True when a prior block may absorb following 保养周期/内容/步骤 lines."""
+    seg = (segment or "").strip()
+    if not seg or _is_image_ref_segment(seg) or _TABLE_INGEST_MARKER in seg:
+        return False
+    if _maintenance_section_step_closed(seg):
+        return False
+    if _is_orphan_maintenance_field_segment(seg):
+        return False
+    return (
+        _segment_starts_new_section(seg)
+        or _segment_has_inline_image(seg)
+        or _segment_has_maintenance_body(seg)
+    )
+
+
 def _merge_trailing_procedure_into_preceding(segments: List[str]) -> List[str]:
-    """Attach trailing ``保养内容/步骤：…`` blocks to the preceding section (Q7/Q13)."""
+    """Attach trailing 保养周期/内容/步骤 field blocks to the preceding section (Q7)."""
     working = [(segment or "").strip() for segment in segments if (segment or "").strip()]
     max_passes = max(len(working) * 2, 8)
     for _ in range(max_passes):
@@ -711,21 +725,20 @@ def _merge_trailing_procedure_into_preceding(segments: List[str]) -> List[str]:
                 i += 1
                 continue
             first_prefix = _maintenance_field_prefix(_segment_first_line(seg))
-            if first_prefix not in ("保养内容：", "保养步骤："):
+            if first_prefix not in _MAINTENANCE_FIELD_PREFIXES:
                 i += 1
                 continue
             prev = working[i - 1]
-            if _is_image_ref_segment(prev) or _TABLE_INGEST_MARKER in prev:
+            if not _preceding_section_accepts_trailing_fields(prev):
                 i += 1
                 continue
-            if _maintenance_section_step_closed(prev):
+            if first_prefix == "保养周期：" and _segment_has_maintenance_cycle(prev):
                 i += 1
                 continue
-            if not (
-                _segment_starts_new_section(prev)
-                or _segment_has_maintenance_body(prev)
-                or _segment_has_inline_image(prev)
-            ):
+            if first_prefix == "保养内容：" and "保养内容：" in prev:
+                i += 1
+                continue
+            if first_prefix == "保养步骤：" and "保养步骤：" in prev:
                 i += 1
                 continue
             working[i - 1] = f"{prev}\n\n{seg}"

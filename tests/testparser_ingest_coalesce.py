@@ -2,7 +2,10 @@
 
 from __future__ import annotations
 
-from raganything.utils import coalesce_text_image_segments
+from raganything.utils import (
+    build_table_aware_ingest_segments,
+    coalesce_text_image_segments,
+)
 
 _FEED_IMG = (
     "[图片]\n"
@@ -71,3 +74,51 @@ def test_coalesce_does_not_cross_numbered_sections() -> None:
     assert "百分表" in feed[0]
     assert "百分表" not in chain[0]
     assert "输送链条打润滑脂" in chain[0]
+
+
+def test_coalesce_inline_heading_image_with_trailing_field_parts() -> None:
+    """Q7 prod path: text+image in one ingest part, 保养 fields in following parts."""
+    inline_heading_img = (
+        "3.1.3 进料部分保养\n\n"
+        + _FEED_IMG
+        + "\n关联正文：3.1.3 进料部分保养"
+    )
+    parts = [
+        inline_heading_img,
+        "保养周期：每半年保养一次",
+        "保养内容：进料靠板无倾斜，进料丝杆加润滑脂。",
+        (
+            "保养步骤：用3.6米标准胶木板从前端贴紧进料靠板，百分表吸在机架上，"
+            "指针对准胶板侧面，表针跳动如超过0.15mm需调整。"
+        ),
+        "3.1.4 输送电机保养",
+        "保养周期：每半年保养一次",
+    ]
+    merged = build_table_aware_ingest_segments(parts)
+    feed = [seg for seg in merged if "3.1.3" in seg]
+    assert len(feed) == 1
+    block = feed[0]
+    assert "[图片]" in block
+    assert "百分表" in block
+    assert "0.15mm" in block
+    assert "保养周期：" in block
+    assert "保养内容：" in block
+    assert "保养步骤：" in block
+    motor = [seg for seg in merged if "3.1.4" in seg]
+    assert len(motor) == 1
+    assert "百分表" not in motor[0]
+
+
+def test_coalesce_exploded_inline_image_block_keeps_following_fields() -> None:
+    """Single segment with heading+image blocks must not strand 保养周期/步骤."""
+    seg = (
+        "3.1.3 进料部分保养\n\n"
+        + _FEED_IMG
+        + "\n\n保养周期：每半年保养一次\n\n"
+        "保养内容：进料靠板无倾斜。\n\n"
+        "保养步骤：百分表吸在机架上，表针跳动如超过0.15mm。"
+    )
+    merged = coalesce_text_image_segments([seg])
+    assert len(merged) == 1
+    assert "[图片]" in merged[0]
+    assert "百分表" in merged[0]
