@@ -1,5 +1,9 @@
 """Tests for the processing callbacks and events system."""
 
+import asyncio
+from types import SimpleNamespace
+from unittest.mock import AsyncMock
+
 import pytest
 from raganything.callbacks import (
     ProcessingCallback,
@@ -238,11 +242,112 @@ class TestRAGAnythingIntegration:
         assert "text_insert_complete" in event_kinds
         assert "document_complete" in event_kinds
 
+    def test_embedding_only_process_document_emits_document_complete(self, tmp_path):
+        from raganything.processor import ProcessorMixin
+
+        class DummyProcessor(ProcessorMixin):
+            pass
+
+        processor = DummyProcessor()
+        processor.logger = SimpleNamespace(
+            info=lambda *args, **kwargs: None,
+            warning=lambda *args, **kwargs: None,
+            error=lambda *args, **kwargs: None,
+            debug=lambda *args, **kwargs: None,
+        )
+        processor.config = SimpleNamespace(
+            allow_embedding_only_ingestion=True,
+            parser_output_dir=str(tmp_path),
+            parse_method="auto",
+            display_content_stats=False,
+            use_full_path=False,
+        )
+        processor.callback_manager = CallbackManager()
+        processor._insert_text_content_embedding_only = AsyncMock()
+
+        async def fake_ensure_lightrag_initialized():
+            return {"success": True}
+
+        async def fake_parse_document(*args, **kwargs):
+            return ([{"type": "text", "text": "hello world"}], "doc-embed")
+
+        processor._ensure_lightrag_initialized = fake_ensure_lightrag_initialized
+        processor.parse_document = fake_parse_document
+        cb = RecordingCallback()
+        processor.callback_manager.register(cb)
+
+        pdf_path = tmp_path / "dummy.pdf"
+        pdf_path.write_bytes(b"%PDF-1.4\n")
+
+        asyncio.run(
+            processor.process_document_complete(
+                str(pdf_path),
+                output_dir=str(tmp_path),
+                parse_method="auto",
+                display_stats=False,
+            )
+        )
+
+        processor._insert_text_content_embedding_only.assert_awaited_once_with(
+            text_content="hello world",
+            file_ref="dummy.pdf",
+            doc_id="doc-embed",
+        )
+        event_kinds = [e[0] for e in cb.events]
+        assert "document_complete" in event_kinds
+        assert "text_insert_start" not in event_kinds
+
+    def test_embedding_only_insert_content_list_emits_document_complete(self):
+        from raganything.processor import ProcessorMixin
+
+        class DummyProcessor(ProcessorMixin):
+            pass
+
+        processor = DummyProcessor()
+        processor.logger = SimpleNamespace(
+            info=lambda *args, **kwargs: None,
+            warning=lambda *args, **kwargs: None,
+            error=lambda *args, **kwargs: None,
+            debug=lambda *args, **kwargs: None,
+        )
+        processor.config = SimpleNamespace(
+            allow_embedding_only_ingestion=True,
+            content_format="minerU",
+            display_content_stats=False,
+            use_full_path=False,
+        )
+        processor.callback_manager = CallbackManager()
+        processor.lightrag = SimpleNamespace()
+        processor._insert_text_content_embedding_only = AsyncMock()
+
+        async def fake_ensure_lightrag_initialized():
+            return {"success": True}
+
+        processor._ensure_lightrag_initialized = fake_ensure_lightrag_initialized
+        cb = RecordingCallback()
+        processor.callback_manager.register(cb)
+
+        asyncio.run(
+            processor.insert_content_list(
+                [{"type": "text", "text": "hello content"}],
+                file_path="/tmp/content_list_v2.json",
+                doc_id="doc-content",
+            )
+        )
+
+        processor._insert_text_content_embedding_only.assert_awaited_once_with(
+            text_content="hello content",
+            file_ref="content_list_v2.json",
+            doc_id="doc-content",
+        )
+        event_kinds = [e[0] for e in cb.events]
+        assert "document_complete" in event_kinds
+        assert "text_insert_start" not in event_kinds
+
     def test_query_emits_callbacks(self, monkeypatch):
         pytest.importorskip("lightrag")
 
         from raganything import RAGAnything, RAGAnythingConfig
-        import asyncio
 
         class FakeLightRAG:
             async def aquery(self, query, param, system_prompt=None):
