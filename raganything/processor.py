@@ -216,6 +216,33 @@ class ProcessorMixin:
 
         return "\n\n".join(parts)
 
+    def _separate_content_with_text_recovery(
+        self, content_list: List[Dict[str, Any]]
+    ) -> Tuple[str, List[Dict[str, Any]]]:
+        """Separate content and recover text from MinerU v2 text-like blocks."""
+        text_content, multimodal_items = separate_content(content_list)
+        if text_content.strip():
+            return text_content, multimodal_items
+
+        text_content = self._plaintext_from_mineru_blocks(content_list)
+        if text_content.strip():
+            text_like_types = {"paragraph", "title", "list"}
+            multimodal_items = [
+                item
+                for item in multimodal_items
+                if item.get("type") not in text_like_types
+            ]
+            return text_content, multimodal_items
+
+        text_parts = []
+        for item in content_list:
+            if not isinstance(item, dict):
+                continue
+            candidate = item.get("text")
+            if isinstance(candidate, str) and candidate.strip():
+                text_parts.append(candidate.strip())
+        return "\n\n".join(text_parts), multimodal_items
+
     async def _insert_text_content_embedding_only(
         self, text_content: str, file_ref: str, doc_id: str
     ) -> None:
@@ -1712,12 +1739,21 @@ class ProcessorMixin:
                 file_path, output_dir, parse_method, display_stats, **kwargs
             )
 
+            normalized_content_list = self._normalize_nested_content_list(content_list)
+            if normalized_content_list:
+                content_list = normalized_content_list
+
             # Use provided doc_id or fall back to content-based doc_id
             if doc_id is None:
-                doc_id = content_based_doc_id
+                if content_list:
+                    doc_id = self._generate_content_based_doc_id(content_list)
+                else:
+                    doc_id = content_based_doc_id
 
             # Step 2: Separate text and multimodal content
-            text_content, multimodal_items = separate_content(content_list)
+            text_content, multimodal_items = self._separate_content_with_text_recovery(
+                content_list
+            )
 
             if self.config.allow_embedding_only_ingestion:
                 if file_name is None:
@@ -1985,6 +2021,7 @@ class ProcessorMixin:
                         }
                     }
                 )
+                await self.lightrag.doc_status.index_done_callback()
                 self.logger.info(
                     f"Error processing document {file_path}: MineruExecutionError"
                 )
@@ -1999,15 +2036,25 @@ class ProcessorMixin:
                         }
                     }
                 )
+                await self.lightrag.doc_status.index_done_callback()
                 self.logger.info(f"Error processing document {file_path}: {str(e)}")
                 return False
 
+            normalized_content_list = self._normalize_nested_content_list(content_list)
+            if normalized_content_list:
+                content_list = normalized_content_list
+
             # Use provided doc_id or fall back to content-based doc_id
             if doc_id is None:
-                doc_id = content_based_doc_id
+                if content_list:
+                    doc_id = self._generate_content_based_doc_id(content_list)
+                else:
+                    doc_id = content_based_doc_id
 
             # Step 2: Separate text and multimodal content
-            text_content, multimodal_items = separate_content(content_list)
+            text_content, multimodal_items = self._separate_content_with_text_recovery(
+                content_list
+            )
 
             # Step 2.5: Set content source for context extraction in multimodal processing
             if hasattr(self, "set_content_source_for_context") and multimodal_items:
@@ -2030,6 +2077,35 @@ class ProcessorMixin:
                     ids=doc_id,
                     scheme_name=scheme_name,
                 )
+            else:
+                error_msg = "No text content was extracted for LightRAG API insertion"
+                await self.lightrag.doc_status.upsert(
+                    {
+                        doc_pre_id: {
+                            **current_doc_status,
+                            "status": DocStatus.FAILED,
+                            "error_msg": error_msg,
+                        }
+                    }
+                )
+                await self.lightrag.doc_status.index_done_callback()
+                self.logger.info(f"Error processing document {file_path}: {error_msg}")
+                return False
+
+            await self.lightrag.doc_status.upsert(
+                {
+                    doc_pre_id: {
+                        **current_doc_status,
+                        "status": DocStatus.PROCESSED,
+                        "error_msg": "",
+                        "content": text_content[:2000],
+                        "content_summary": text_content[:500],
+                        "content_length": len(text_content),
+                        "updated_at": time.strftime("%Y-%m-%dT%H:%M:%S+00:00"),
+                    }
+                }
+            )
+            await self.lightrag.doc_status.index_done_callback()
 
             self.logger.info(f"Document {file_path} processing completed successfully")
             return True
@@ -2174,17 +2250,9 @@ class ProcessorMixin:
                 self.logger.info(f"  - {block_type}: {count}")
 
         # Step 1: Separate text and multimodal content
-        text_content, multimodal_items = separate_content(normalized_content_list)
-
-        if not text_content.strip():
-            text_content = self._plaintext_from_mineru_blocks(normalized_content_list)
-        if not text_content.strip():
-            text_parts = []
-            for item in normalized_content_list:
-                candidate = item.get("text")
-                if isinstance(candidate, str) and candidate.strip():
-                    text_parts.append(candidate.strip())
-            text_content = "\n\n".join(text_parts)
+        text_content, multimodal_items = self._separate_content_with_text_recovery(
+            normalized_content_list
+        )
 
         # Step 1.5: Set content source for context extraction in multimodal processing
         if hasattr(self, "set_content_source_for_context") and multimodal_items:
