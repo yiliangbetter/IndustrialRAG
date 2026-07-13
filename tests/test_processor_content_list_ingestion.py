@@ -76,7 +76,9 @@ def make_processor():
         return {"success": True}
 
     async def fail_multimodal(*args, **kwargs):
-        raise AssertionError("embedding-only ingestion must not process multimodal items")
+        raise AssertionError(
+            "embedding-only ingestion must not process multimodal items"
+        )
 
     processor._ensure_lightrag_initialized = fake_ensure_lightrag_initialized
     processor._process_multimodal_content = fail_multimodal
@@ -130,7 +132,10 @@ def test_plaintext_from_mineru_v2_blocks_recovers_searchable_text():
                     ]
                 },
             },
-            {"type": "table", "content": {"html": "<table><tr><td>42</td></tr></table>"}},
+            {
+                "type": "table",
+                "content": {"html": "<table><tr><td>42</td></tr></table>"},
+            },
             {"type": "image", "content": {"image_caption": ["Factory floor"]}},
             {"type": "unknown", "content": {"text": "ignored"}},
             "not-a-block",
