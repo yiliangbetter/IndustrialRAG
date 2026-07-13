@@ -64,6 +64,28 @@ def test_mineru_env_propagation(
     assert kwargs["env"]["PATH"] == os.environ["PATH"]
 
 
+@patch("raganything.parser.time.monotonic", side_effect=[0.0, 2.0])
+@patch("raganything.parser.subprocess.Popen")
+def test_mineru_timeout_kills_hung_process(
+    mock_popen, mock_monotonic, mineru_parser, dummy_path
+):
+    mock_process = MagicMock()
+    mock_process.poll.return_value = None
+    mock_process.wait.return_value = None
+    mock_process.stdout.readline.return_value = ""
+    mock_process.stderr.readline.return_value = ""
+    mock_popen.return_value = mock_process
+
+    with pytest.raises(RuntimeError) as excinfo:
+        mineru_parser._run_mineru_command(dummy_path, "out", timeout=1)
+
+    assert mock_monotonic.call_count == 2
+    mock_process.kill.assert_called_once()
+    assert mock_process.wait.called
+    assert isinstance(excinfo.value.__cause__, TimeoutError)
+    assert "MinerU did not finish within 1s" in str(excinfo.value.__cause__)
+
+
 @patch("subprocess.run")
 def test_docling_env_propagation(mock_run, docling_parser, dummy_path):
     mock_run.return_value = MagicMock(returncode=0, stdout="")
