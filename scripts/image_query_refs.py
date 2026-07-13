@@ -11,6 +11,7 @@ import json
 import logging
 import os
 import re
+from functools import lru_cache
 from pathlib import Path
 from typing import Any, NamedTuple
 
@@ -26,6 +27,10 @@ from raganything.utils import (
 )
 
 logger = logging.getLogger(__name__)
+
+_kv_store_cache: dict[str, Any] | None = None
+_kv_store_mtime: float = -1.0
+_cl_path_index: list[tuple[Path, str, Path]] | None = None
 
 __all__ = [
     "build_image_ref_block",
@@ -1369,20 +1374,13 @@ def _load_manual_chunks_for_locality(manual_hint: str) -> list[dict[str, Any]]:
     try:
         from query_doc_steering import (  # noqa: WPS433
             _path_hits_deny,
-            _text_chunks_store_path,
             active_deny_substrings,
         )
     except ImportError:
         return []
     deny, _ = active_deny_substrings("")
-    path = _text_chunks_store_path()
-    if not path.is_file():
-        return []
-    try:
-        raw = json.loads(path.read_text(encoding="utf-8"))
-    except (OSError, json.JSONDecodeError):
-        return []
-    if not isinstance(raw, dict):
+    raw = _kv_text_chunks_store()
+    if not raw:
         return []
     out: list[dict[str, Any]] = []
     for chunk_id, row in raw.items():
@@ -2038,6 +2036,28 @@ def _should_use_unified_figure_targets(query: str, answer: str) -> bool:
     return False
 
 
+def _pipeline_content_list_entries() -> list[tuple[Path, str, Path]]:
+    """Cached ``(content_list_path, doc_hint, auto_dir)`` under parse roots."""
+    global _cl_path_index
+    if _cl_path_index is not None:
+        return _cl_path_index
+    entries: list[tuple[Path, str, Path]] = []
+    for root in _pipeline_parse_roots():
+        if not root.is_dir():
+            continue
+        try:
+            cl_paths = list(root.rglob("*_content_list.json"))
+        except OSError:
+            continue
+        for cl_path in cl_paths:
+            doc_hint = cl_path.stem.replace("_content_list", "").replace(
+                "_content_list_v2", ""
+            )
+            entries.append((cl_path, doc_hint, cl_path.parent))
+    _cl_path_index = entries
+    return entries
+
+
 def _pipeline_parse_roots() -> list[Path]:
     """Parse output dirs for content_list fallback (§4.2 step 3)."""
     roots: list[Path] = []
@@ -2160,91 +2180,80 @@ def _figure_ref_from_content_list_for_target(
     best_ref: dict[str, Any] | None = None
     best_score = 0.0
 
-    for root in _pipeline_parse_roots():
-        if not root.is_dir():
+    for cl_path, doc_hint, auto_dir in _pipeline_content_list_entries():
+        if manual_hint and not (
+            _doc_matches_manual_hint({"file_path": doc_hint + ".pdf"}, manual_hint)
+            or _source_hint_matches_doc(manual_hint, doc_hint)
+        ):
             continue
-        try:
-            cl_paths = list(root.rglob("*_content_list.json"))
-        except OSError:
+        items = _load_content_list_items(cl_path)
+        if not items:
             continue
-        for cl_path in cl_paths:
-            doc_hint = cl_path.stem.replace("_content_list", "").replace(
-                "_content_list_v2", ""
+        for ti, item in enumerate(items):
+            if not isinstance(item, dict) or item.get("type") != "text":
+                continue
+            text = str(item.get("text") or "").strip()
+            if len(text) < 4:
+                continue
+            align = text_term_alignment_symmetric(align_blob, text)
+            if head and head in text:
+                align = max(align, min_align)
+            if align < min_align * 0.7:
+                continue
+            img_item = best_image_for_text_item(items, ti)
+            if img_item is None:
+                continue
+            try:
+                img_idx = items.index(img_item)
+            except ValueError:
+                img_idx = -1
+            ctx = (
+                context_text_for_image(items, img_idx)
+                if img_idx >= 0
+                else ""
             )
-            if manual_hint and not (
-                _doc_matches_manual_hint({"file_path": doc_hint + ".pdf"}, manual_hint)
-                or _source_hint_matches_doc(manual_hint, doc_hint)
+            label = image_label_for_item(items, img_item) if img_idx >= 0 else ""
+            rel_path = (img_item.get("img_path") or "").strip()
+            if not rel_path:
+                continue
+            full_path = (auto_dir / rel_path).resolve()
+            ref = {
+                "path": str(full_path),
+                "page": img_item.get("page_idx")
+                if isinstance(img_item.get("page_idx"), int)
+                else None,
+                "caption": label,
+                "label": label,
+                "context": "\n".join(
+                    p for p in (text[:300], ctx.strip()) if p
+                )[:400],
+            }
+            if _is_cover_page_ref(ref):
+                continue
+            if not _figure_ref_passes_align_gate(
+                anchor_text,
+                query,
+                ref,
+                doc_content=ctx,
             ):
                 continue
-            items = _load_content_list_items(cl_path)
-            if not items:
+            section_anchor = (anchor_content or text).strip()
+            if not _figure_ref_matches_target_topic(
+                anchor_text,
+                query,
+                ref,
+                kind=kind,
+                component=component,
+                anchor_content=section_anchor,
+            ):
                 continue
-            auto_dir = cl_path.parent
-            for ti, item in enumerate(items):
-                if not isinstance(item, dict) or item.get("type") != "text":
-                    continue
-                text = str(item.get("text") or "").strip()
-                if len(text) < 4:
-                    continue
-                align = text_term_alignment_symmetric(align_blob, text)
-                if head and head in text:
-                    align = max(align, min_align)
-                if align < min_align * 0.7:
-                    continue
-                img_item = best_image_for_text_item(items, ti)
-                if img_item is None:
-                    continue
-                try:
-                    img_idx = items.index(img_item)
-                except ValueError:
-                    img_idx = -1
-                ctx = (
-                    context_text_for_image(items, img_idx)
-                    if img_idx >= 0
-                    else ""
-                )
-                label = image_label_for_item(items, img_item) if img_idx >= 0 else ""
-                rel_path = (img_item.get("img_path") or "").strip()
-                if not rel_path:
-                    continue
-                full_path = (auto_dir / rel_path).resolve()
-                ref = {
-                    "path": str(full_path),
-                    "page": img_item.get("page_idx")
-                    if isinstance(img_item.get("page_idx"), int)
-                    else None,
-                    "caption": label,
-                    "label": label,
-                    "context": "\n".join(
-                        p for p in (text[:300], ctx.strip()) if p
-                    )[:400],
-                }
-                if _is_cover_page_ref(ref):
-                    continue
-                if not _figure_ref_passes_align_gate(
-                    anchor_text,
-                    query,
-                    ref,
-                    doc_content=ctx,
-                ):
-                    continue
-                section_anchor = (anchor_content or text).strip()
-                if not _figure_ref_matches_target_topic(
-                    anchor_text,
-                    query,
-                    ref,
-                    kind=kind,
-                    component=component,
-                    anchor_content=section_anchor,
-                ):
-                    continue
-                score = align + text_term_alignment_symmetric(
-                    align_blob,
-                    " ".join(part for part in (label, ctx) if part),
-                )
-                if score > best_score:
-                    best_score = score
-                    best_ref = ref
+            score = align + text_term_alignment_symmetric(
+                align_blob,
+                " ".join(part for part in (label, ctx) if part),
+            )
+            if score > best_score:
+                best_score = score
+                best_ref = ref
     if best_ref is None:
         return None, ""
     return best_ref, "content_list"
@@ -2562,6 +2571,7 @@ def _refs_from_unified_figure_targets(
     pool = _dedupe_doc_list_by_chunk_identity(
         list(cite_pool or []) + list(retrieved_docs or [])
     )
+    pool = [_resolve_doc_with_order_index(doc) for doc in pool]
     targets = extract_figure_targets(
         query,
         answer,
@@ -2578,6 +2588,13 @@ def _refs_from_unified_figure_targets(
     refs: list[dict[str, Any]] = []
     seen_paths: set[str] = set()
     manual_cache: dict[str, list[dict[str, Any]]] = {}
+    for target in targets:
+        machine = (target.manual_hint or "").strip()
+        if not machine:
+            continue
+        hint_key = _normalize_label_key(machine)
+        if hint_key not in manual_cache:
+            manual_cache[hint_key] = _load_manual_chunks_for_locality(machine)
 
     for target in targets:
         ref, row = _figure_for_target(
@@ -4916,18 +4933,29 @@ def _doc_storage_chunk_id(doc: dict[str, Any]) -> str:
 
 
 def _kv_text_chunks_store() -> dict[str, Any]:
+    global _kv_store_cache, _kv_store_mtime
     try:
         from query_doc_steering import _text_chunks_store_path  # noqa: WPS433
     except ImportError:
         return {}
     path = _text_chunks_store_path()
     if not path.is_file():
+        _kv_store_cache = {}
+        _kv_store_mtime = -1.0
         return {}
+    try:
+        mtime = path.stat().st_mtime
+    except OSError:
+        return {}
+    if _kv_store_cache is not None and mtime == _kv_store_mtime:
+        return _kv_store_cache
     try:
         raw = json.loads(path.read_text(encoding="utf-8"))
     except (OSError, json.JSONDecodeError):
         return {}
-    return raw if isinstance(raw, dict) else {}
+    _kv_store_cache = raw if isinstance(raw, dict) else {}
+    _kv_store_mtime = mtime
+    return _kv_store_cache
 
 
 def _kv_chunk_row(chunk_id: str) -> dict[str, Any] | None:
@@ -5247,6 +5275,7 @@ def _answer_body_for_citation_match(answer: str) -> str:
     return _normalize_citation_blob(text)
 
 
+@lru_cache(maxsize=16384)
 def _line_citation_overlap(answer_blob: str, line: str) -> float:
     line = (line or "").strip()
     if not line or _is_image_metadata_line(line) or _is_toc_or_directory_line(line):
@@ -5256,18 +5285,28 @@ def _line_citation_overlap(answer_blob: str, line: str) -> float:
     norm = _normalize_citation_blob(line)
     if len(norm) < 12:
         return 0.0
+    if norm in answer_blob:
+        return 1.0
     min_sub = 7 if len(norm) >= 14 else 6
     best_len = 0
-    for i in range(len(norm)):
-        for j in range(i + min_sub, len(norm) + 1):
-            sub = norm[i:j]
-            if sub in answer_blob and len(sub) > best_len:
-                best_len = len(sub)
+    if len(norm) > 320:
+        ov = _answer_chunk_term_overlap(answer_blob, norm)
+        if ov >= 0.34:
+            return min(1.0, 0.55 + 0.45 * ov)
+        return 0.0
+    for length in range(len(norm), min_sub - 1, -1):
+        for i in range(0, len(norm) - length + 1):
+            if norm[i : i + length] in answer_blob:
+                best_len = length
+                break
+        if best_len:
+            break
     if best_len < min_sub:
         return 0.0
     return best_len / max(len(norm), 1)
 
 
+@lru_cache(maxsize=4096)
 def _chunk_citation_score(answer_blob: str, content: str) -> float:
     if not answer_blob or not (content or "").strip():
         return 0.0
@@ -7671,16 +7710,30 @@ def resolve_query_images(
     return images, debug
 
 
-def _load_content_list_items(path: Path) -> list[dict[str, Any]] | None:
+@lru_cache(maxsize=64)
+def _load_content_list_items_cached(path_str: str, mtime_ns: int) -> tuple[Any, ...] | None:
+    del mtime_ns
+    path = Path(path_str)
     try:
         raw = json.loads(path.read_text(encoding="utf-8"))
     except (OSError, json.JSONDecodeError):
         return None
     if isinstance(raw, list) and raw and isinstance(raw[0], list):
-        return raw[0]
+        return tuple(raw[0])
     if isinstance(raw, list):
-        return raw
+        return tuple(raw)
     return None
+
+
+def _load_content_list_items(path: Path) -> list[dict[str, Any]] | None:
+    try:
+        mtime_ns = path.stat().st_mtime_ns
+    except OSError:
+        return None
+    cached = _load_content_list_items_cached(str(path.resolve()), mtime_ns)
+    if cached is None:
+        return None
+    return list(cached)
 
 
 def _ref_matches_manual_hint(ref: dict[str, Any], manual_hint: str) -> bool:
