@@ -1720,6 +1720,8 @@ class ProcessorMixin:
             text_content, multimodal_items = separate_content(content_list)
 
             if self.config.allow_embedding_only_ingestion:
+                if not text_content.strip():
+                    text_content = self._plaintext_from_mineru_blocks(content_list)
                 if file_name is None:
                     file_name = self._get_file_reference(file_path)
                 await self._insert_text_content_embedding_only(
