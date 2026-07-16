@@ -29,18 +29,14 @@ async def test_process_document_embedding_only_recovers_mineru_v2_text():
     )
     processor.logger = FakeLogger()
     processor.callback_manager = None
-    processor._ensure_lightrag_initialized = AsyncMock(
-        return_value={"success": True}
-    )
+    processor._ensure_lightrag_initialized = AsyncMock(return_value={"success": True})
     processor.parse_document = AsyncMock(
         return_value=(
             [
                 {
                     "type": "title",
                     "content": {
-                        "title_content": [
-                            {"type": "text", "content": "Safety Manual"}
-                        ]
+                        "title_content": [{"type": "text", "content": "Safety Manual"}]
                     },
                 },
                 {
