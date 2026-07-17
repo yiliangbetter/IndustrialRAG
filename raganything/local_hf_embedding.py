@@ -8,6 +8,7 @@ from __future__ import annotations
 
 import asyncio
 import os
+import threading
 from typing import Any
 
 import numpy as np
@@ -42,13 +43,16 @@ def make_local_hf_embedding_func(
     model_id = embedding_model or os.getenv("EMBEDDING_MODEL", "BAAI/bge-m3")
     hf_home = os.getenv("HF_HOME")
     holder: dict[str, Any] = {"model": None}
+    model_init_lock = threading.Lock()
 
     def _get_model():
         if holder["model"] is None:
-            kwargs: dict[str, Any] = {}
-            if hf_home:
-                kwargs["cache_folder"] = hf_home
-            holder["model"] = SentenceTransformer(model_id, **kwargs)
+            with model_init_lock:
+                if holder["model"] is None:
+                    kwargs: dict[str, Any] = {}
+                    if hf_home:
+                        kwargs["cache_folder"] = hf_home
+                    holder["model"] = SentenceTransformer(model_id, **kwargs)
         return holder["model"]
 
     max_token_size = int(os.getenv("HF_EMBED_MAX_TOKEN", "8192"))
