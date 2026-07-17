@@ -181,6 +181,75 @@ class TestMetricsCallback:
 
 
 class TestRAGAnythingIntegration:
+    def test_embedding_only_content_list_persists_chunks_and_emits_completion(
+        self, monkeypatch, tmp_path
+    ):
+        pytest.importorskip("lightrag")
+
+        from raganything import RAGAnything, RAGAnythingConfig
+        from raganything.base import DocStatus
+        import asyncio
+
+        class FakeStorage:
+            def __init__(self):
+                self.records = {}
+                self.index_done_calls = 0
+
+            async def upsert(self, data):
+                self.records.update(data)
+
+            async def index_done_callback(self):
+                self.index_done_calls += 1
+
+        class FakeTokenizer:
+            def encode(self, text):
+                return text.split()
+
+        class FakeLightRAG:
+            def __init__(self):
+                self.tokenizer = FakeTokenizer()
+                self.text_chunks = FakeStorage()
+                self.chunks_vdb = FakeStorage()
+                self.doc_status = FakeStorage()
+                self.insert_done_calls = 0
+
+            async def _insert_done(self):
+                self.insert_done_calls += 1
+
+        config = RAGAnythingConfig(
+            working_dir=str(tmp_path), allow_embedding_only_ingestion=True
+        )
+        rag = RAGAnything(config=config)
+        rag.lightrag = FakeLightRAG()
+        cb = RecordingCallback()
+        rag.callback_manager.register(cb)
+
+        async def fake_ensure():
+            return {"success": True}
+
+        monkeypatch.setattr(rag, "_ensure_lightrag_initialized", fake_ensure)
+
+        asyncio.run(
+            rag.insert_content_list(
+                [{"type": "text", "text": "first chunk\n\nsecond chunk"}],
+                file_path="source.json",
+                doc_id="doc-123",
+                display_stats=False,
+            )
+        )
+
+        assert cb.events == [("document_complete", "source.json")]
+        assert len(rag.lightrag.text_chunks.records) == 2
+        assert rag.lightrag.chunks_vdb.records == rag.lightrag.text_chunks.records
+        doc_status = rag.lightrag.doc_status.records["doc-123"]
+        assert doc_status["status"] == DocStatus.PROCESSED
+        assert doc_status["chunks_count"] == 2
+        assert doc_status["multimodal_processed"] is True
+        assert rag.lightrag.text_chunks.index_done_calls == 1
+        assert rag.lightrag.chunks_vdb.index_done_calls == 1
+        assert rag.lightrag.doc_status.index_done_calls == 1
+        assert rag.lightrag.insert_done_calls == 1
+
     def test_process_document_emits_callbacks(self, monkeypatch, tmp_path):
         pytest.importorskip("lightrag")
 
