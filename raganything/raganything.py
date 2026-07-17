@@ -278,7 +278,9 @@ class RAGAnything(QueryMixin, ProcessorMixin, BatchMixin):
                         return {"success": False, "error": error_msg}
 
                     self._parser_installation_checked = True
-                    self.logger.info(f"Parser '{self.config.parser}' installation verified")
+                    self.logger.info(
+                        f"Parser '{self.config.parser}' installation verified"
+                    )
 
             if self.lightrag is not None:
                 # LightRAG was pre-provided, but we need to ensure it's properly initialized

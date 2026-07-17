@@ -194,14 +194,16 @@ class TestRAGAnythingIntegration:
         cb = RecordingCallback()
         rag.callback_manager.register(cb)
 
+        pdf_path = tmp_path / "dummy.pdf"
+        pdf_path.write_bytes(b"%PDF-1.4\n")
+
+        cached_parse = ([{"type": "text", "text": "hello world"}], "doc-123")
+
         async def fake_ensure():
             return {"success": True}
 
-        async def fake_parse(
-            file_path, output_dir, parse_method, display_stats, **kwargs
-        ):
-            # Single text block, no multimodal content.
-            return ([{"type": "text", "text": "hello world"}], "doc-123")
+        async def fake_cached_result(cache_key, file_path, parse_method=None, **kwargs):
+            return cached_parse
 
         async def fake_mm(items, file_path, doc_id):
             return
@@ -213,7 +215,7 @@ class TestRAGAnythingIntegration:
             return
 
         monkeypatch.setattr(rag, "_ensure_lightrag_initialized", fake_ensure)
-        monkeypatch.setattr(rag, "parse_document", fake_parse)
+        monkeypatch.setattr(rag, "_get_cached_result", fake_cached_result)
         monkeypatch.setattr(rag, "_process_multimodal_content", fake_mm)
         monkeypatch.setattr(rag, "_mark_multimodal_processing_complete", fake_mark)
         monkeypatch.setattr(
@@ -222,7 +224,7 @@ class TestRAGAnythingIntegration:
 
         asyncio.run(
             rag.process_document_complete(
-                str(tmp_path / "dummy.pdf"),
+                str(pdf_path),
                 output_dir=str(tmp_path),
                 parse_method="auto",
                 display_stats=False,

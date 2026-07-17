@@ -26,6 +26,10 @@ site/
 *.log.*
 *.logfire
 *.coverage/
+.coverage
+.coverage.*
+coverage.xml
+htmlcov/
 log/
 logs/
 
@@ -70,9 +74,6 @@ download_models_hf.py
 lightrag-dev/
 gui/
 tiktoken_cache/
-
-# unit-test files
-test_*
 
 # Cline files
 memory-bank/

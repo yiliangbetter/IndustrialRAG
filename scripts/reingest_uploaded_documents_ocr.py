@@ -96,7 +96,11 @@ def _mineru_parse_kwargs(parser_name: str) -> dict:
             out[key] = v
     if parser_name.lower() == "mineru" and "backend" not in out:
         out["backend"] = "pipeline"
-    if parser_name.lower() == "mineru" and "device" not in out and sys.platform == "darwin":
+    if (
+        parser_name.lower() == "mineru"
+        and "device" not in out
+        and sys.platform == "darwin"
+    ):
         out["device"] = "cpu"
     return out
 
@@ -182,9 +186,7 @@ async def main() -> None:
         embedding_model = os.getenv("EMBEDDING_MODEL", "BAAI/bge-m3")
     else:
         embedding_dim = int(os.getenv("EMBEDDING_DIM", "1536"))
-        embedding_model = os.getenv(
-            "EMBEDDING_MODEL", "text-embedding-3-small"
-        ).strip()
+        embedding_model = os.getenv("EMBEDDING_MODEL", "text-embedding-3-small").strip()
 
     config = RAGAnythingConfig(
         working_dir=str(working_dir),
@@ -198,7 +200,9 @@ async def main() -> None:
     )
     parse_extra = _mineru_parse_kwargs(config.parser)
 
-    def llm_model_func(prompt, system_prompt=None, history_messages=[], **kwargs):
+    def llm_model_func(prompt, system_prompt=None, history_messages=None, **kwargs):
+        if history_messages is None:
+            history_messages = []
         return openai_complete_if_cache(
             llm_model,
             prompt,

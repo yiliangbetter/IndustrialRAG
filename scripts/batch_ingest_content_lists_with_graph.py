@@ -6,7 +6,7 @@ embedding-only ingestion; multimodal batch is skipped by default after text inse
 (--skip-multimodal, default True) to avoid duplicate vision/table costs when building
 a text-first graph.
 
-Mirrors embedding env handling in scripts/batch_ingest_content_lists.py.
+Mirrors embedding-related env vars where applicable; see ``scripts/batch_ingest_content_lists_local_hf.py`` for local-only batch ingest.
 
 Run from the repo root so `.env` resolves; use uv so `python-dotenv` (dev dependency) is available:
 
@@ -106,7 +106,9 @@ async def async_main() -> None:
         or os.getenv("LLM_BINDING_API_KEY", "").strip()
     )
     if not llm_key:
-        raise SystemExit("Set OPENAI_API_KEY or LLM_BINDING_API_KEY for graph extraction.")
+        raise SystemExit(
+            "Set OPENAI_API_KEY or LLM_BINDING_API_KEY for graph extraction."
+        )
 
     emb_key = os.getenv("EMBEDDING_API_KEY", "").strip() or llm_key
     embedding_backend = os.getenv("EMBEDDING_BACKEND", "openai").strip().lower()
@@ -245,9 +247,7 @@ async def async_main() -> None:
     )
 
     pattern = args.content_list_glob.lstrip("/")
-    paths = sorted(
-        p for p in glob_root.rglob(pattern) if p.is_file()
-    )
+    paths = sorted(p for p in glob_root.rglob(pattern) if p.is_file())
     if not paths:
         raise SystemExit(f"No files matching {pattern!r} under {glob_root}")
 

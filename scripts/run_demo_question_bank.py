@@ -9,6 +9,7 @@ import json
 import math
 import os
 import sys
+import time
 from functools import partial
 from pathlib import Path
 
@@ -55,6 +56,7 @@ async def run_batch(
     embedding_func_max_async: int,
     embedding_batch_num: int,
     limit_questions: int,
+    timing_log: Path | None,
 ) -> None:
     import openpyxl
 
@@ -88,9 +90,7 @@ async def run_batch(
         embedding_model = os.getenv("EMBEDDING_MODEL", "BAAI/bge-m3")
     else:
         embedding_dim = int(os.getenv("EMBEDDING_DIM", "1536"))
-        embedding_model = os.getenv(
-            "EMBEDDING_MODEL", "text-embedding-3-small"
-        ).strip()
+        embedding_model = os.getenv("EMBEDDING_MODEL", "text-embedding-3-small").strip()
 
     config = RAGAnythingConfig(
         working_dir=str(working_dir),
@@ -101,7 +101,9 @@ async def run_batch(
         enable_equation_processing=True,
     )
 
-    def llm_model_func(prompt, system_prompt=None, history_messages=[], **kwargs):
+    def llm_model_func(prompt, system_prompt=None, history_messages=None, **kwargs):
+        if history_messages is None:
+            history_messages = []
         return openai_complete_if_cache(
             llm_model,
             prompt,
@@ -227,19 +229,33 @@ async def run_batch(
         question = str(question).strip()
         row_num = q_cell.row
         logger.info(f"[{row_num}] Q: {question[:80]}...")
+        t0 = time.perf_counter()
         answer = await rag.aquery(
             question,
             mode=mode,
             vlm_enhanced=False,
         )
+        q_secs = time.perf_counter() - t0
+        if timing_log is not None:
+            timing_log.parent.mkdir(parents=True, exist_ok=True)
+            with open(timing_log, "a", encoding="utf-8") as tf:
+                tf.write(
+                    json.dumps(
+                        {
+                            "row": row_num,
+                            "question_chars": len(question),
+                            "query_seconds": round(q_secs, 4),
+                        },
+                        ensure_ascii=False,
+                    )
+                    + "\n"
+                )
         if answer is None:
             answer = ""
         ws_in.cell(row=row_num, column=r_col, value=answer)
         row_vals = [c.value for c in row_cells]
         rec = {
-            headers[i]: _json_safe(row_vals[i])
-            if i < len(row_vals)
-            else None
+            headers[i]: _json_safe(row_vals[i]) if i < len(row_vals) else None
             for i in range(len(headers))
         }
         rec["RAG回答"] = answer
@@ -251,9 +267,7 @@ async def run_batch(
     wb_in.save(out_xlsx)
     with open(out_jsonl, "w", encoding="utf-8") as f:
         for rec in records:
-            f.write(
-                json.dumps(rec, ensure_ascii=False, default=str) + "\n"
-            )
+            f.write(json.dumps(rec, ensure_ascii=False, default=str) + "\n")
 
     logger.info(f"Wrote {len(records)} rows → {out_xlsx} and {out_jsonl}")
 
@@ -309,6 +323,12 @@ def main() -> None:
         default=0,
         help="Answer at most N non-empty questions from the sheet (0 = all).",
     )
+    p.add_argument(
+        "--timing-log",
+        type=Path,
+        default=None,
+        help="Append one JSON line per answered question with row + query_seconds (wall time for aquery).",
+    )
     args = p.parse_args()
     asyncio.run(
         run_batch(
@@ -321,6 +341,7 @@ def main() -> None:
             args.embedding_max_async,
             args.embedding_batch_num,
             args.limit,
+            args.timing_log,
         )
     )
 

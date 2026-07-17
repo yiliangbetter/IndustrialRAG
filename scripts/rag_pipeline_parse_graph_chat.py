@@ -70,7 +70,11 @@ def _mineru_parse_kwargs(parser_name: str) -> dict:
             out[key] = v
     if parser_name.lower() == "mineru" and "backend" not in out:
         out["backend"] = "pipeline"
-    if parser_name.lower() == "mineru" and "device" not in out and sys.platform == "darwin":
+    if (
+        parser_name.lower() == "mineru"
+        and "device" not in out
+        and sys.platform == "darwin"
+    ):
         out["device"] = "cpu"
     return out
 

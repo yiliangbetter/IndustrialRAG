@@ -32,9 +32,7 @@ def _venv_path() -> None:
     candidates = [_ROOT / ".venv" / "bin", _ROOT.parent.parent / ".venv" / "bin"]
     for bin_dir in candidates:
         if bin_dir.is_dir():
-            os.environ["PATH"] = str(bin_dir) + os.pathsep + os.environ.get(
-                "PATH", ""
-            )
+            os.environ["PATH"] = str(bin_dir) + os.pathsep + os.environ.get("PATH", "")
             return
 
 
@@ -90,7 +88,9 @@ def main() -> int:
         default=os.getenv("MINERU_MODEL_SOURCE", "modelscope"),
         help="MinerU --source (default: env MINERU_MODEL_SOURCE or modelscope)",
     )
-    parser.add_argument("--device", "-d", default=None, help="MinerU device e.g. cpu, mps")
+    parser.add_argument(
+        "--device", "-d", default=None, help="MinerU device e.g. cpu, mps"
+    )
     parser.add_argument(
         "--max-workers",
         type=int,
