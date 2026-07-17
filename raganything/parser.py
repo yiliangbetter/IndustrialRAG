@@ -857,6 +857,20 @@ class MineruParser(Parser):
 
             # Start subprocess
             process = subprocess.Popen(cmd, **subprocess_kwargs)
+            try:
+                from raganything.ingest_runtime import (  # noqa: WPS433
+                    IngestCancelledError,
+                    clear_ingest_subprocess,
+                    ingest_cancel_requested,
+                    register_ingest_subprocess,
+                )
+
+                register_ingest_subprocess(process)
+            except ImportError:
+                IngestCancelledError = None  # type: ignore[misc, assignment]
+                ingest_cancel_requested = lambda: False  # type: ignore[misc, assignment]
+                register_ingest_subprocess = lambda _p: None  # type: ignore[misc, assignment]
+                clear_ingest_subprocess = lambda: None  # type: ignore[misc, assignment]
 
             # Create queues for stdout and stderr
             stdout_queue = Queue()
@@ -878,48 +892,61 @@ class MineruParser(Parser):
             # Process output in real time
             start_time = time.monotonic()
 
-            while process.poll() is None:
-                # Check stdout queue
-                try:
-                    while True:
-                        prefix, line = stdout_queue.get_nowait()
-                        output_lines.append(line)
-                        # Log mineru output with INFO level, prefixed with [MinerU]
-                        cls.logger.info(f"[MinerU] {line}")
-                except Empty:
-                    pass
-
-                # Check stderr queue
-                try:
-                    while True:
-                        prefix, line = stderr_queue.get_nowait()
-                        # Log mineru errors with WARNING level
-                        if "warning" in line.lower():
-                            cls.logger.warning(f"[MinerU] {line}")
-                        elif "error" in line.lower():
-                            cls.logger.error(f"[MinerU] {line}")
-                            error_message = line.split("\n")[0]
-                            error_lines.append(error_message)
-                        else:
+            try:
+                while process.poll() is None:
+                    if ingest_cancel_requested():
+                        process.kill()
+                        process.wait()
+                        stdout_thread.join(timeout=1)
+                        stderr_thread.join(timeout=1)
+                        if IngestCancelledError is not None:
+                            raise IngestCancelledError(
+                                "MinerU parse aborted after ingest stop request"
+                            )
+                        raise RuntimeError("MinerU parse aborted after ingest stop request")
+                    # Check stdout queue
+                    try:
+                        while True:
+                            prefix, line = stdout_queue.get_nowait()
+                            output_lines.append(line)
+                            # Log mineru output with INFO level, prefixed with [MinerU]
                             cls.logger.info(f"[MinerU] {line}")
-                except Empty:
-                    pass
+                    except Empty:
+                        pass
 
-                # Enforce timeout — kill the process and raise if exceeded
-                if timeout is not None and (time.monotonic() - start_time) > timeout:
-                    process.kill()
-                    process.wait()
-                    # Give reader threads a moment to drain before raising
-                    stdout_thread.join(timeout=1)
-                    stderr_thread.join(timeout=1)
-                    raise TimeoutError(
-                        f"MinerU did not finish within {timeout}s. "
-                        "This often means a model download is stuck due to network issues. "
-                        "Check your internet connection or pre-download the required models."
-                    )
+                    # Check stderr queue
+                    try:
+                        while True:
+                            prefix, line = stderr_queue.get_nowait()
+                            # Log mineru errors with WARNING level
+                            if "warning" in line.lower():
+                                cls.logger.warning(f"[MinerU] {line}")
+                            elif "error" in line.lower():
+                                cls.logger.error(f"[MinerU] {line}")
+                                error_message = line.split("\n")[0]
+                                error_lines.append(error_message)
+                            else:
+                                cls.logger.info(f"[MinerU] {line}")
+                    except Empty:
+                        pass
 
-                # Small delay to prevent busy waiting
-                time.sleep(0.1)
+                    # Enforce timeout — kill the process and raise if exceeded
+                    if timeout is not None and (time.monotonic() - start_time) > timeout:
+                        process.kill()
+                        process.wait()
+                        # Give reader threads a moment to drain before raising
+                        stdout_thread.join(timeout=1)
+                        stderr_thread.join(timeout=1)
+                        raise TimeoutError(
+                            f"MinerU did not finish within {timeout}s. "
+                            "This often means a model download is stuck due to network issues. "
+                            "Check your internet connection or pre-download the required models."
+                        )
+
+                    # Small delay to prevent busy waiting
+                    time.sleep(0.1)
+            finally:
+                clear_ingest_subprocess()
 
             # Process any remaining output after process completion
             try:

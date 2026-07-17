@@ -99,6 +99,28 @@ class QueryMixin:
 
         return f"multimodal_query:{cache_hash}"
 
+    async def score_naive_relevance(
+        self,
+        query: str,
+        *,
+        mode: str = "mix",
+        **kwargs: Any,
+    ) -> dict[str, Any]:
+        """Coarse chunk-vector relevance for query / high_level / low_level keywords.
+
+        See :mod:`raganything.naive_relevance` for payload schema and env knobs.
+        """
+        if self.lightrag is None:
+            raise ValueError(
+                "No LightRAG instance available. Please process documents first."
+            )
+        from lightrag import QueryParam
+
+        from raganything.naive_relevance import score_naive_relevance
+
+        param = QueryParam(mode=mode, **kwargs)
+        return await score_naive_relevance(self.lightrag, query, query_param=param)
+
     async def aquery(
         self, query: str, mode: str = "mix", system_prompt: str | None = None, **kwargs
     ) -> str:
