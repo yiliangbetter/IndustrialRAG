@@ -216,6 +216,9 @@ class TestRAGAnythingIntegration:
             async def _insert_done(self):
                 self.insert_done_calls += 1
 
+            async def finalize_storages(self):
+                return
+
         config = RAGAnythingConfig(
             working_dir=str(tmp_path), allow_embedding_only_ingestion=True
         )
