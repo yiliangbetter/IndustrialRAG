@@ -188,6 +188,7 @@ class TestRAGAnythingIntegration:
 
         from raganything import RAGAnything, RAGAnythingConfig
         from raganything.base import DocStatus
+        import atexit
         import asyncio
 
         class FakeStorage:
@@ -216,13 +217,11 @@ class TestRAGAnythingIntegration:
             async def _insert_done(self):
                 self.insert_done_calls += 1
 
-            async def finalize_storages(self):
-                return
-
         config = RAGAnythingConfig(
             working_dir=str(tmp_path), allow_embedding_only_ingestion=True
         )
         rag = RAGAnything(config=config)
+        atexit.unregister(rag.close)
         rag.lightrag = FakeLightRAG()
         cb = RecordingCallback()
         rag.callback_manager.register(cb)
