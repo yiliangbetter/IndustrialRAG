@@ -102,10 +102,11 @@ def test_mineru_timeout_kills_process_and_raises(mineru_parser, dummy_path):
         patch(
             "raganything.parser.time.monotonic", side_effect=[10.0, 12.0]
         ),
-        pytest.raises(TimeoutError, match="did not finish within 1s"),
+        pytest.raises(RuntimeError, match="did not finish within 1s") as exc_info,
     ):
         mineru_parser._run_mineru_command(dummy_path, "out", timeout=1)
 
+    assert isinstance(exc_info.value.__cause__, TimeoutError)
     mock_process.kill.assert_called_once_with()
     mock_process.wait.assert_called_once_with()
     stdout_thread.join.assert_called_once_with(timeout=1)
