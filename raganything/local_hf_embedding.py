@@ -8,6 +8,7 @@ from __future__ import annotations
 
 import asyncio
 import os
+import threading
 from typing import Any
 
 import numpy as np
@@ -42,6 +43,7 @@ def make_local_hf_embedding_func(
     model_id = embedding_model or os.getenv("EMBEDDING_MODEL", "BAAI/bge-m3")
     hf_home = os.getenv("HF_HOME")
     holder: dict[str, Any] = {"model": None}
+    encode_lock = threading.Lock()
 
     def _get_model():
         if holder["model"] is None:
@@ -55,11 +57,12 @@ def make_local_hf_embedding_func(
 
     def _encode_sync(text_list: list[str]) -> np.ndarray:
         model = _get_model()
-        vecs = model.encode(
-            text_list,
-            normalize_embeddings=True,
-            convert_to_numpy=True,
-        )
+        with encode_lock:
+            vecs = model.encode(
+                text_list,
+                normalize_embeddings=True,
+                convert_to_numpy=True,
+            )
         out = np.asarray(vecs, dtype=np.float32)
         if out.ndim == 2 and out.shape[1] != embedding_dim:
             raise ValueError(
