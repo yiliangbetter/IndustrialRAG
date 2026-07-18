@@ -1,4 +1,5 @@
 import asyncio
+import threading
 import time
 import types
 
@@ -63,3 +64,55 @@ async def test_hf_embed_does_not_block_event_loop(monkeypatch):
     # and ticker does not advance during embedding.
     assert tick_count >= 5
     assert result.shape == (2, 3)
+
+
+@pytest.mark.asyncio
+async def test_hf_embed_serializes_shared_model_encode(monkeypatch):
+    active_encodes = 0
+    max_active_encodes = 0
+    counter_lock = threading.Lock()
+
+    class FakeSentenceTransformer:
+        def __init__(self, model_id, **kwargs):
+            self.model_id = model_id
+            self.kwargs = kwargs
+
+        def encode(self, texts, normalize_embeddings=True, convert_to_numpy=True):
+            nonlocal active_encodes, max_active_encodes
+            with counter_lock:
+                active_encodes += 1
+                max_active_encodes = max(max_active_encodes, active_encodes)
+            try:
+                time.sleep(0.05)
+                return [[1.0, 2.0, 3.0] for _ in texts]
+            finally:
+                with counter_lock:
+                    active_encodes -= 1
+
+    class FakeEmbeddingFunc:
+        def __init__(self, embedding_dim, max_token_size, func):
+            self.embedding_dim = embedding_dim
+            self.max_token_size = max_token_size
+            self.func = func
+
+    fake_sentence_transformers = types.ModuleType("sentence_transformers")
+    fake_sentence_transformers.SentenceTransformer = FakeSentenceTransformer
+    monkeypatch.setitem(
+        __import__("sys").modules, "sentence_transformers", fake_sentence_transformers
+    )
+
+    fake_lightrag = types.ModuleType("lightrag")
+    fake_lightrag_utils = types.ModuleType("lightrag.utils")
+    fake_lightrag_utils.EmbeddingFunc = FakeEmbeddingFunc
+    monkeypatch.setitem(__import__("sys").modules, "lightrag", fake_lightrag)
+    monkeypatch.setitem(
+        __import__("sys").modules, "lightrag.utils", fake_lightrag_utils
+    )
+
+    embedding = make_local_hf_embedding_func(
+        embedding_dim=3, embedding_model="fake/model"
+    )
+
+    await asyncio.gather(*(embedding.func([str(i)]) for i in range(4)))
+
+    assert max_active_encodes == 1
