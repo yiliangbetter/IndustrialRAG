@@ -42,6 +42,65 @@ def test_raganything_initializes_selected_parser(monkeypatch, tmp_path):
 
 
 @pytest.mark.asyncio
+async def test_embedding_only_initialization_skips_parser_and_llm(monkeypatch, tmp_path):
+    pytest.importorskip("lightrag")
+
+    import lightrag.kg.shared_storage as shared_storage
+    import raganything.raganything as rag_module
+    from raganything.config import RAGAnythingConfig
+
+    class StubParser:
+        def check_installation(self):
+            raise AssertionError("embedding-only initialization must not check the parser")
+
+    class StubParseCache:
+        async def initialize(self):
+            pass
+
+    captured = {}
+
+    class StubLightRAG:
+        def __init__(self, **kwargs):
+            captured.update(kwargs)
+            self.workspace = "test"
+
+        async def initialize_storages(self):
+            pass
+
+        def key_string_value_json_storage_cls(self, **kwargs):
+            return StubParseCache()
+
+    async def fake_initialize_pipeline_status():
+        pass
+
+    monkeypatch.setattr(rag_module, "get_parser", lambda parser_name: StubParser())
+    monkeypatch.setattr(rag_module, "LightRAG", StubLightRAG)
+    monkeypatch.setattr(
+        shared_storage, "initialize_pipeline_status", fake_initialize_pipeline_status
+    )
+    monkeypatch.setattr(rag_module.atexit, "register", lambda *args, **kwargs: None)
+
+    embedding_func = object()
+    config = RAGAnythingConfig(
+        working_dir=str(tmp_path / "rag_workdir"),
+        allow_embedding_only_ingestion=True,
+    )
+    rag = rag_module.RAGAnything(config=config, embedding_func=embedding_func)
+    monkeypatch.setattr(rag, "_initialize_processors", lambda: None)
+
+    result = await rag._ensure_lightrag_initialized()
+
+    assert result == {"success": True}
+    assert captured["embedding_func"] is embedding_func
+    assert captured["llm_model_func"] is rag.llm_model_func
+    assert await rag.llm_model_func("unused") == ""
+    assert rag._parser_installation_checked is True
+    assert config.enable_image_processing is False
+    assert config.enable_table_processing is False
+    assert config.enable_equation_processing is False
+
+
+@pytest.mark.asyncio
 async def test_processor_parse_document_uses_selected_parser(monkeypatch, tmp_path):
     import raganything.processor as processor_module
 
