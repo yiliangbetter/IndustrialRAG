@@ -42,7 +42,9 @@ def test_raganything_initializes_selected_parser(monkeypatch, tmp_path):
 
 
 @pytest.mark.asyncio
-async def test_embedding_only_initialization_skips_parser_and_llm(monkeypatch, tmp_path):
+async def test_embedding_only_initialization_skips_parser_and_llm(
+    monkeypatch, tmp_path
+):
     pytest.importorskip("lightrag")
 
     import lightrag.kg.shared_storage as shared_storage
@@ -51,7 +53,9 @@ async def test_embedding_only_initialization_skips_parser_and_llm(monkeypatch, t
 
     class StubParser:
         def check_installation(self):
-            raise AssertionError("embedding-only initialization must not check the parser")
+            raise AssertionError(
+                "embedding-only initialization must not check the parser"
+            )
 
     class StubParseCache:
         async def initialize(self):
