@@ -10,7 +10,6 @@ import inspect
 import math
 import os
 import re
-from dataclasses import asdict
 from datetime import datetime, timezone
 from typing import Any, Dict, List, Tuple
 from pathlib import Path
@@ -2105,7 +2104,7 @@ async def insert_doc_scoped_text_content(
         knowledge_graph_inst=lightrag.chunk_entity_relation_graph,
         entity_vdb=lightrag.entities_vdb,
         relationships_vdb=lightrag.relationships_vdb,
-        global_config=asdict(lightrag),
+        global_config=lightrag.__dict__,
         full_entities_storage=lightrag.full_entities,
         full_relations_storage=lightrag.full_relations,
         doc_id=doc_id,
