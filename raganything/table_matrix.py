@@ -25,7 +25,11 @@ _TABLE_LEGACY_FLAT_MARKER = "[TableFlat]"
 
 _MATRIX_STORE_NAME = "kv_store_table_matrix.json"
 _TABLE_ROW_RE = re.compile(r"<tr>.*?</tr>", re.IGNORECASE | re.DOTALL)
-_TABLE_CELL_RE = re.compile(r"<td[^>]*>([^<]*)</td>", re.IGNORECASE)
+_TABLE_CELL_RE = re.compile(
+    r"<(td|th)\b[^>]*>(.*?)</\1>",
+    re.IGNORECASE | re.DOTALL,
+)
+_HTML_TAG_RE = re.compile(r"<[^>]+>")
 
 
 def strip_table_flat_from_content(content: str) -> str:
@@ -74,11 +78,18 @@ def matrix_store_path(working_dir: str | Path) -> Path:
     return Path(working_dir) / _MATRIX_STORE_NAME
 
 
+def _cell_text(raw: str) -> str:
+    text = _HTML_TAG_RE.sub("", raw or "")
+    return re.sub(r"\s+", " ", text).strip()
+
+
 def _table_row_cells(row_html: str) -> list[str]:
-    return [
-        re.sub(r"\s+", " ", cell.strip())
-        for cell in _TABLE_CELL_RE.findall(row_html or "")
-    ]
+    cells: list[str] = []
+    for match in _TABLE_CELL_RE.finditer(row_html or ""):
+        text = _cell_text(match.group(2))
+        if text:
+            cells.append(text)
+    return cells
 
 
 def parse_table_html(html: str) -> tuple[list[str], list[list[str]]]:
