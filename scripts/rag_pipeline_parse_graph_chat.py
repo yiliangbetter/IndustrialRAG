@@ -207,9 +207,13 @@ async def _remove_existing_docs_for_file(rag, rel: str) -> int:
     matches: list[str] = []
     page = 1
     while True:
-        rows, total = await doc_status.get_docs_paginated(
-            page=page, page_size=200, sort_field="updated_at", sort_direction="desc"
-        )
+        try:
+            rows, total = await doc_status.get_docs_paginated(
+                page=page, page_size=200, sort_field="updated_at", sort_direction="desc"
+            )
+        except Exception:
+            logging.warning("doc_status pagination failed", exc_info=True)
+            break
         if not rows:
             break
         for doc_id, meta in rows:
