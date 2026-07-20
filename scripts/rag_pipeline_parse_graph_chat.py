@@ -26,6 +26,7 @@ from __future__ import annotations
 
 import argparse
 import asyncio
+import logging
 import os
 import subprocess
 import sys
@@ -139,9 +140,13 @@ async def _lookup_doc_status_meta(rag, rel: str, doc_id: str) -> Any | None:
     target = Path(rel).name
     page = 1
     while True:
-        rows, total = await doc_status.get_docs_paginated(
-            page=page, page_size=200, sort_field="updated_at", sort_direction="desc"
-        )
+        try:
+            rows, total = await doc_status.get_docs_paginated(
+                page=page, page_size=200, sort_field="updated_at", sort_direction="desc"
+            )
+        except Exception:
+            logging.warning("doc_status pagination failed", exc_info=True)
+            break
         if not rows:
             break
         for did, row_meta in rows:
@@ -180,7 +185,10 @@ async def _verify_doc_ingest_outcome(rag, rel: str, doc_id: str) -> tuple[bool, 
             return False, err or "文档已标记完成但未生成任何分块"
         return True, ""
     if status in ("processing", "pending", "handling"):
-        return False, err or f"文档仍处于处理中（{status}），可能 LLM 配额不足或抽取中断"
+        return (
+            False,
+            err or f"文档仍处于处理中（{status}），可能 LLM 配额不足或抽取中断",
+        )
     return False, err or f"未知文档状态：{status or 'empty'}"
 
 
@@ -468,9 +476,7 @@ async def _ingest_folder(
     session_started: list[str] | None = None,
     session_completed: list[str] | None = None,
 ) -> tuple[int, int, list[dict[str, str]], bool]:
-    files = _collect_files(
-        input_folder, config.supported_file_extensions, recursive
-    )
+    files = _collect_files(input_folder, config.supported_file_extensions, recursive)
     if not files:
         raise SystemExit(
             f"No supported files under {input_folder} "
@@ -495,9 +501,7 @@ async def _ingest_folder(
         """Run insert_content_list; return True if cancelled mid-flight."""
         if should_cancel and should_cancel():
             return True
-        task = asyncio.create_task(
-            rag.insert_content_list(content_list, **insert_kw)
-        )
+        task = asyncio.create_task(rag.insert_content_list(content_list, **insert_kw))
         try:
             while not task.done():
                 if should_cancel and should_cancel():
@@ -590,7 +594,9 @@ async def _ingest_folder(
             if session_completed is not None:
                 session_completed.append(rel)
             logger.info(f"INGEST_FILE_OK::{rel}")
-            await _emit({"type": "file_ok", "file": rel, "current": idx, "total": total})
+            await _emit(
+                {"type": "file_ok", "file": rel, "current": idx, "total": total}
+            )
         except Exception as e:
             err = str(e)
             logger.error(f"INGEST_FILE_FAIL::{fp}: {e}")

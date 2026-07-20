@@ -178,9 +178,7 @@ def _summarize_llm_chunks(
             if rs >= min_thr:
                 qualifying_scores.append(rs)
 
-    max_rerank_any = (
-        round(max(all_rerank_scores), 4) if all_rerank_scores else None
-    )
+    max_rerank_any = round(max(all_rerank_scores), 4) if all_rerank_scores else None
 
     if not qualifying_scores:
         return {
@@ -296,9 +294,7 @@ async def probe_llm_retrieval_full(
                 (chunks, _summarize_llm_chunks(chunks, min_thr=min_thr)),
             ]
             if pool:
-                candidates.append(
-                    (pool, _summarize_llm_chunks(pool, min_thr=min_thr))
-                )
+                candidates.append((pool, _summarize_llm_chunks(pool, min_thr=min_thr)))
             if raw_pool and raw_pool is not pool:
                 candidates.append(
                     (raw_pool, _summarize_llm_chunks(raw_pool, min_thr=min_thr))
@@ -408,7 +404,9 @@ def _consume_keep_original_bundle(clarification_id: str | None) -> None:
         rec["keep_original_consumed"] = True
 
 
-def _mark_candidate_used(clarification_id: str | None, candidate_id: str | None) -> None:
+def _mark_candidate_used(
+    clarification_id: str | None, candidate_id: str | None
+) -> None:
     rec = _get_clarification_record(clarification_id)
     if rec is None:
         return
@@ -579,7 +577,9 @@ async def _generate_candidate_lines(
     k = max(count, 1)
     exclude_block = ""
     if exclude:
-        exclude_block = "不要重复以下已有问句：\n" + "\n".join(f"- {x}" for x in sorted(exclude))
+        exclude_block = "不要重复以下已有问句：\n" + "\n".join(
+            f"- {x}" for x in sorted(exclude)
+        )
 
     context = ""
     if bundle is not None:
@@ -603,7 +603,9 @@ async def _generate_candidate_lines(
     )
 
     raw = await _call_lightrag_llm(lightrag, prompt, system_prompt=system)
-    return _parse_candidate_lines(raw, limit=parse_limit if parse_limit is not None else k + 2)
+    return _parse_candidate_lines(
+        raw, limit=parse_limit if parse_limit is not None else k + 2
+    )
 
 
 def _candidate_generation_batch_size(
@@ -800,14 +802,11 @@ async def evaluate_clarify_gate(
     choice = (clarify_choice or "").strip().lower()
     if choice == "use_candidate":
         if candidate_already_used(clarification_id, candidate_id):
-            raise ClarifyValidationError(
-                "该推荐问已回答，请选择其他选项或重新提问"
-            )
+            raise ClarifyValidationError("该推荐问已回答，请选择其他选项或重新提问")
         if not validate_use_candidate(clarification_id, candidate_id, q):
             raise ClarifyValidationError(
                 "invalid clarification_id / candidate_id / query for use_candidate"
             )
-        _mark_candidate_used(clarification_id, candidate_id)
         bundle = _peek_candidate_bundle(clarification_id, candidate_id, q)
         return ClarifyBypass("use_candidate", cached_bundle=bundle)
     if choice == "keep_original":
@@ -816,9 +815,7 @@ async def evaluate_clarify_gate(
                 "invalid clarification_id / query for keep_original"
             )
         if keep_original_consumed(clarification_id):
-            raise ClarifyValidationError(
-                "原问已回答，请选择推荐问或重新提问"
-            )
+            raise ClarifyValidationError("原问已回答，请选择推荐问或重新提问")
         bundle = _peek_keep_original_bundle(clarification_id, q)
         return ClarifyBypass("keep_original", cached_bundle=bundle)
 
@@ -882,7 +879,11 @@ async def _evaluate_clarify_gate_probed(
         gate_timing["gate_total_s"] = orig_probe_s
         return ClarifyBypass("direct", probe=original_probe, gate_timing=gate_timing)
 
-    candidates, candidate_options, generation = await _collect_high_confidence_candidates(
+    (
+        candidates,
+        candidate_options,
+        generation,
+    ) = await _collect_high_confidence_candidates(
         lightrag,
         query=q,
         original_bundle=original_probe.bundle,

@@ -10,6 +10,8 @@ from raganything.prompt_manager import (
     reset_prompts,
     register_prompt_language,
     get_available_languages,
+    resolve_prompt_language_from_env,
+    apply_prompt_language_from_env,
 )
 
 
@@ -91,6 +93,49 @@ class TestGetAvailableLanguages:
         langs = get_available_languages()
         assert "en" in langs
         assert "zh" in langs
+
+
+class TestResolvePromptLanguageFromEnv:
+    def test_no_env_returns_none(self, monkeypatch):
+        monkeypatch.delenv("RAG_PROMPT_LANGUAGE", raising=False)
+        monkeypatch.delenv("SUMMARY_LANGUAGE", raising=False)
+        assert resolve_prompt_language_from_env() is None
+
+    def test_rag_prompt_language_zh(self, monkeypatch):
+        monkeypatch.setenv("RAG_PROMPT_LANGUAGE", "zh")
+        monkeypatch.delenv("SUMMARY_LANGUAGE", raising=False)
+        assert resolve_prompt_language_from_env() == "zh"
+
+    def test_rag_prompt_language_aliases(self, monkeypatch):
+        monkeypatch.delenv("SUMMARY_LANGUAGE", raising=False)
+        for value in ("Chinese", "中文", "zh-cn", "ZH"):
+            monkeypatch.setenv("RAG_PROMPT_LANGUAGE", value)
+            assert resolve_prompt_language_from_env() == "zh"
+
+    def test_summary_language_fallback(self, monkeypatch):
+        monkeypatch.delenv("RAG_PROMPT_LANGUAGE", raising=False)
+        monkeypatch.setenv("SUMMARY_LANGUAGE", "Chinese")
+        assert resolve_prompt_language_from_env() == "zh"
+
+    def test_rag_prompt_takes_precedence(self, monkeypatch):
+        monkeypatch.setenv("RAG_PROMPT_LANGUAGE", "en")
+        monkeypatch.setenv("SUMMARY_LANGUAGE", "zh")
+        assert resolve_prompt_language_from_env() == "en"
+
+
+class TestApplyPromptLanguageFromEnv:
+    def test_apply_zh_from_env(self, monkeypatch):
+        monkeypatch.setenv("RAG_PROMPT_LANGUAGE", "zh")
+        monkeypatch.delenv("SUMMARY_LANGUAGE", raising=False)
+        assert apply_prompt_language_from_env() == "zh"
+        assert get_prompt_language() == "zh"
+
+    def test_no_env_keeps_current_language(self, monkeypatch):
+        set_prompt_language("zh")
+        monkeypatch.delenv("RAG_PROMPT_LANGUAGE", raising=False)
+        monkeypatch.delenv("SUMMARY_LANGUAGE", raising=False)
+        assert apply_prompt_language_from_env() == "zh"
+        assert get_prompt_language() == "zh"
 
 
 class TestAtomicPromptSwitches:
