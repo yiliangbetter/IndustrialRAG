@@ -136,11 +136,7 @@ def _cross_encoder_predict(ce: Any, pairs: list[tuple[str, str]]) -> Any:
 
 def release_cross_encoder() -> None:
     """Drop the global CrossEncoder singleton and free GPU memory if applicable."""
-    global \
-        _cross_encoder_id, \
-        _cross_encoder_device, \
-        _cross_encoder_dtype_key, \
-        _cross_encoder
+    global _cross_encoder_id, _cross_encoder_device, _cross_encoder_dtype_key, _cross_encoder  # fmt: skip
     if _cross_encoder is None:
         return
     device = (_cross_encoder_device or _resolve_rerank_device() or "").lower()
@@ -211,11 +207,7 @@ def _hub_snapshot_dir_cross_encoder(repo_id: str, hf_home: str) -> Path | None:
 
 
 def _get_cross_encoder(model_id: str) -> Any:
-    global \
-        _cross_encoder_id, \
-        _cross_encoder_device, \
-        _cross_encoder_dtype_key, \
-        _cross_encoder
+    global _cross_encoder_id, _cross_encoder_device, _cross_encoder_dtype_key, _cross_encoder  # fmt: skip
     device = _resolve_rerank_device()
     dtype_key = _rerank_torch_dtype_key()
     if (
