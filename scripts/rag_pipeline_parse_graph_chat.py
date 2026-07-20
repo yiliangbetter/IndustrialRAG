@@ -562,8 +562,14 @@ async def _ingest_folder(
                     **parse_extra,
                 )
             except Exception as parse_exc:
-                from raganything.ingest_runtime import IngestCancelledError  # noqa: WPS433
-
+                # Optional until ingest_runtime lands in a later PR; keep forever
+                # as a soft dependency (no-op when the module is present).
+                try:
+                    from raganything.ingest_runtime import (  # noqa: WPS433
+                        IngestCancelledError,
+                    )
+                except ImportError:
+                    IngestCancelledError = ()  # type: ignore[misc, assignment]
                 if isinstance(parse_exc, IngestCancelledError) or (
                     should_cancel and should_cancel()
                 ):
