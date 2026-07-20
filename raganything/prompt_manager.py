@@ -184,5 +184,15 @@ def apply_prompt_language_from_env() -> str:
     lang = resolve_prompt_language_from_env()
     if lang is None:
         return get_prompt_language()
-    set_prompt_language(lang)
+    try:
+        set_prompt_language(lang)
+    except ValueError:
+        # Bad/typo env must not crash import-time pipeline CLI (--help, argparse).
+        import logging
+
+        logging.getLogger(__name__).warning(
+            "Ignoring invalid prompt language from env: %r (keeping %s)",
+            lang,
+            get_prompt_language(),
+        )
     return get_prompt_language()

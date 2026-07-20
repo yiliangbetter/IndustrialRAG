@@ -9,6 +9,7 @@ from .naive_relevance import (
 )
 from .clarify_gate import (
     evaluate_clarify_gate as evaluate_clarify_gate,
+    finalize_clarify_bypass_consumption as finalize_clarify_bypass_consumption,
     is_clarify_gate_enabled as is_clarify_gate_enabled,
     probe_llm_retrieval as probe_llm_retrieval,
     ClarifyBypass as ClarifyBypass,
@@ -85,6 +86,7 @@ __all__ = [
     "primary_relevance_score",
     "format_relevance_report",
     "evaluate_clarify_gate",
+    "finalize_clarify_bypass_consumption",
     "is_clarify_gate_enabled",
     "probe_llm_retrieval",
     "ClarifyBypass",

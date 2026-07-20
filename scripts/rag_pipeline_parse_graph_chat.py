@@ -832,36 +832,41 @@ async def async_main() -> None:
         skip_multimodal=args.skip_multimodal,
     )
 
-    if not args.query_only:
-        parse_extra = _mineru_parse_kwargs(config.parser)
-        await _ingest_folder(
-            rag,
-            config,
-            logger,
-            input_folder=input_folder,
-            parser_output_dir=args.parser_output_dir,
-            parse_method=args.parse_method,
-            parse_extra=parse_extra,
-            recursive=args.recursive,
-            limit=args.limit,
-            skip_multimodal=args.skip_multimodal,
-        )
-        await rag.finalize_storages()
+    try:
+        if not args.query_only:
+            parse_extra = _mineru_parse_kwargs(config.parser)
+            await _ingest_folder(
+                rag,
+                config,
+                logger,
+                input_folder=input_folder,
+                parser_output_dir=args.parser_output_dir,
+                parse_method=args.parse_method,
+                parse_extra=parse_extra,
+                recursive=args.recursive,
+                limit=args.limit,
+                skip_multimodal=args.skip_multimodal,
+            )
 
-    if args.ingest_only:
-        return
+        if args.ingest_only:
+            return
 
-    if args.query.strip():
-        ans = await rag.aquery(
-            args.query.strip(),
-            mode=args.query_mode,
-            vlm_enhanced=False,
-            **_query_extras_from_env(args.query.strip()),
-        )
-        print(ans or "", flush=True)
-        return
+        if args.query.strip():
+            ans = await rag.aquery(
+                args.query.strip(),
+                mode=args.query_mode,
+                vlm_enhanced=False,
+                **_query_extras_from_env(args.query.strip()),
+            )
+            print(ans or "", flush=True)
+            return
 
-    await _interactive_loop(rag, args.query_mode)
+        await _interactive_loop(rag, args.query_mode)
+    finally:
+        try:
+            await rag.finalize_storages()
+        except Exception:
+            logging.warning("finalize_storages failed", exc_info=True)
 
 
 def main() -> None:

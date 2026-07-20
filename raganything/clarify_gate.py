@@ -14,6 +14,7 @@ from __future__ import annotations
 import asyncio
 import os
 import re
+import threading
 import time
 import uuid
 from dataclasses import dataclass
@@ -75,6 +76,7 @@ _ClarifyResult = ClarifyBypass | ClarifyRequired
 
 _STORE_TTL_SEC = 3600
 _CLARIFICATION_STORE: dict[str, dict[str, Any]] = {}
+_CLARIFICATION_STORE_LOCK = threading.RLock()
 
 
 def _env_int(name: str, default: int) -> int:
@@ -345,13 +347,14 @@ async def probe_llm_retrieval_full(
 
 def _purge_clarification_store() -> None:
     now = time.time()
-    expired = [
-        key
-        for key, rec in _CLARIFICATION_STORE.items()
-        if now - float(rec.get("created", 0)) > _STORE_TTL_SEC
-    ]
-    for key in expired:
-        _CLARIFICATION_STORE.pop(key, None)
+    with _CLARIFICATION_STORE_LOCK:
+        expired = [
+            key
+            for key, rec in _CLARIFICATION_STORE.items()
+            if now - float(rec.get("created", 0)) > _STORE_TTL_SEC
+        ]
+        for key in expired:
+            _CLARIFICATION_STORE.pop(key, None)
 
 
 def _register_clarification(
@@ -364,18 +367,54 @@ def _register_clarification(
 ) -> str:
     _purge_clarification_store()
     clarification_id = str(uuid.uuid4())
-    _CLARIFICATION_STORE[clarification_id] = {
-        "created": time.time(),
-        "original_query": original_query,
-        "original_bundle": original_bundle,
-        "options": options,
-        "candidates": {c["id"]: c["text"] for c in candidates},
-        "generation": generation,
-    }
+    with _CLARIFICATION_STORE_LOCK:
+        _CLARIFICATION_STORE[clarification_id] = {
+            "created": time.time(),
+            "original_query": original_query,
+            "original_bundle": original_bundle,
+            "options": options,
+            "candidates": {c["id"]: c["text"] for c in candidates},
+            "generation": generation,
+        }
     return clarification_id
 
 
 def _get_clarification_record(clarification_id: str | None) -> dict[str, Any] | None:
+    cid = (clarification_id or "").strip()
+    if not cid:
+        return None
+    with _CLARIFICATION_STORE_LOCK:
+        rec = _CLARIFICATION_STORE.get(cid)
+        if not rec:
+            return None
+        if time.time() - float(rec.get("created", 0)) > _STORE_TTL_SEC:
+            _CLARIFICATION_STORE.pop(cid, None)
+            return None
+        return rec
+
+
+def consume_clarification_record(clarification_id: str | None) -> bool:
+    """Remove an entire clarification session (TTL purge helper; not used on point-select)."""
+    cid = (clarification_id or "").strip()
+    if not cid:
+        return False
+    with _CLARIFICATION_STORE_LOCK:
+        return _CLARIFICATION_STORE.pop(cid, None) is not None
+
+
+def _consume_keep_original_bundle(clarification_id: str | None) -> None:
+    """Drop only the cached original-query bundle; keep candidates for further picks."""
+    with _CLARIFICATION_STORE_LOCK:
+        rec = _get_clarification_record_unlocked(clarification_id)
+        if rec is not None:
+            rec["original_bundle"] = None
+            rec["keep_original_consumed"] = True
+
+
+def _get_clarification_record_unlocked(
+    clarification_id: str | None,
+) -> dict[str, Any] | None:
+    """Lookup without taking the store lock (caller must hold ``_CLARIFICATION_STORE_LOCK``)."""
     cid = (clarification_id or "").strip()
     if not cid:
         return None
@@ -388,52 +427,39 @@ def _get_clarification_record(clarification_id: str | None) -> dict[str, Any] | 
     return rec
 
 
-def consume_clarification_record(clarification_id: str | None) -> bool:
-    """Remove an entire clarification session (TTL purge helper; not used on point-select)."""
-    cid = (clarification_id or "").strip()
-    if not cid:
-        return False
-    return _CLARIFICATION_STORE.pop(cid, None) is not None
-
-
-def _consume_keep_original_bundle(clarification_id: str | None) -> None:
-    """Drop only the cached original-query bundle; keep candidates for further picks."""
-    rec = _get_clarification_record(clarification_id)
-    if rec is not None:
-        rec["original_bundle"] = None
-        rec["keep_original_consumed"] = True
-
-
 def _mark_candidate_used(
     clarification_id: str | None, candidate_id: str | None
 ) -> None:
-    rec = _get_clarification_record(clarification_id)
-    if rec is None:
-        return
-    options = rec.get("options")
-    if not isinstance(options, dict):
-        return
-    entry = options.get((candidate_id or "").strip())
-    if isinstance(entry, dict):
-        entry["used"] = True
+    with _CLARIFICATION_STORE_LOCK:
+        rec = _get_clarification_record_unlocked(clarification_id)
+        if rec is None:
+            return
+        options = rec.get("options")
+        if not isinstance(options, dict):
+            return
+        entry = options.get((candidate_id or "").strip())
+        if isinstance(entry, dict):
+            entry["used"] = True
 
 
 def keep_original_consumed(clarification_id: str | None) -> bool:
-    rec = _get_clarification_record(clarification_id)
-    return bool(rec and rec.get("keep_original_consumed"))
+    with _CLARIFICATION_STORE_LOCK:
+        rec = _get_clarification_record_unlocked(clarification_id)
+        return bool(rec and rec.get("keep_original_consumed"))
 
 
 def candidate_already_used(
     clarification_id: str | None, candidate_id: str | None
 ) -> bool:
-    rec = _get_clarification_record(clarification_id)
-    if not rec:
-        return False
-    options = rec.get("options")
-    if not isinstance(options, dict):
-        return False
-    entry = options.get((candidate_id or "").strip())
-    return isinstance(entry, dict) and bool(entry.get("used"))
+    with _CLARIFICATION_STORE_LOCK:
+        rec = _get_clarification_record_unlocked(clarification_id)
+        if not rec:
+            return False
+        options = rec.get("options")
+        if not isinstance(options, dict):
+            return False
+        entry = options.get((candidate_id or "").strip())
+        return isinstance(entry, dict) and bool(entry.get("used"))
 
 
 def validate_keep_original(
@@ -508,7 +534,11 @@ def finalize_clarify_bypass_consumption(
     *,
     candidate_id: str | None = None,
 ) -> None:
-    """Mark keep_original / use_candidate bundle consumed after answer aquery."""
+    """Mark keep_original / use_candidate consumed **after** a successful aquery.
+
+    Call this only once the answer path succeeds; ``evaluate_clarify_gate`` only
+    peeks bundles and does not consume them (so retries stay possible on failure).
+    """
     choice = (clarify_choice or "").strip().lower()
     if choice == "keep_original":
         _consume_keep_original_bundle(clarification_id)

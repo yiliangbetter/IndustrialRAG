@@ -1176,8 +1176,6 @@ def _coalesce_immediate_text_image_segments(segments: List[str]) -> List[str]:
             nxt = (segments[j] or "").strip()
             if not nxt or not _is_image_ref_segment(nxt):
                 break
-            if j > i + 1:
-                break
             match_text = _image_match_text_from_ref_segment(nxt)
             if match_text and text_term_alignment_symmetric(seg, match_text) < 0.2:
                 break
@@ -2124,6 +2122,15 @@ async def insert_text_content(
         document_parts: optional pre-split parts (``[Table]`` blocks stay atomic when table-aware ingest is on)
     """
     logger.info("Starting text content insertion into LightRAG...")
+
+    if isinstance(ids, list) and not ids:
+        ids = None
+    if isinstance(file_paths, list) and not file_paths:
+        file_paths = None
+    if isinstance(ids, str) and not ids.strip():
+        ids = None
+    if isinstance(file_paths, str) and not file_paths.strip():
+        file_paths = None
 
     if isinstance(input, str) and ids is not None:
         doc_id = ids if isinstance(ids, str) else ids[0]
