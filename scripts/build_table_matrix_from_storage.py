@@ -53,7 +53,9 @@ def main() -> None:
     store = build_matrix_from_text_chunks(chunks)
     save_matrix_store(wd, store)
     linked = sum(len(r.chunk_ids) for r in store.values())
-    print(f"Wrote {len(store)} table matrix record(s), {linked} chunk link(s) → {wd / 'kv_store_table_matrix.json'}")
+    print(
+        f"Wrote {len(store)} table matrix record(s), {linked} chunk link(s) → {wd / 'kv_store_table_matrix.json'}"
+    )
 
 
 if __name__ == "__main__":

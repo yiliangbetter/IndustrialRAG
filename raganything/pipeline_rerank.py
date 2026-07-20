@@ -83,7 +83,11 @@ def release_rerank_after_query_if_enabled() -> None:
 
 def _rerank_torch_dtype() -> Any | None:
     """CrossEncoder ``model_kwargs['torch_dtype']``; ``None`` keeps library default (FP32)."""
-    raw = (os.getenv("RERANK_TORCH_DTYPE") or os.getenv("RERANK_DTYPE") or "").strip().lower()
+    raw = (
+        (os.getenv("RERANK_TORCH_DTYPE") or os.getenv("RERANK_DTYPE") or "")
+        .strip()
+        .lower()
+    )
     if not raw:
         return None
     if raw in ("auto", "config"):
@@ -132,7 +136,11 @@ def _cross_encoder_predict(ce: Any, pairs: list[tuple[str, str]]) -> Any:
 
 def release_cross_encoder() -> None:
     """Drop the global CrossEncoder singleton and free GPU memory if applicable."""
-    global _cross_encoder_id, _cross_encoder_device, _cross_encoder_dtype_key, _cross_encoder
+    global \
+        _cross_encoder_id, \
+        _cross_encoder_device, \
+        _cross_encoder_dtype_key, \
+        _cross_encoder
     if _cross_encoder is None:
         return
     device = (_cross_encoder_device or _resolve_rerank_device() or "").lower()
@@ -157,15 +165,19 @@ def release_cross_encoder() -> None:
                 torch.cuda.empty_cache()
         except ImportError:
             pass
-    logger.debug("RERANK hf: released CrossEncoder (device was %s)", device or "unknown")
+    logger.debug(
+        "RERANK hf: released CrossEncoder (device was %s)", device or "unknown"
+    )
 
 
 def _hf_hub_offline_requested() -> bool:
     return (
         (os.getenv("HF_EMBED_OFFLINE") or "").strip().lower() in ("1", "true", "yes")
         or (os.getenv("HF_HUB_OFFLINE") or "").strip().lower() in ("1", "true", "yes")
-        or (os.getenv("TRANSFORMERS_OFFLINE") or "").strip().lower() in ("1", "true", "yes")
-        or (os.getenv("RERANK_HF_OFFLINE") or "").strip().lower() in ("1", "true", "yes")
+        or (os.getenv("TRANSFORMERS_OFFLINE") or "").strip().lower()
+        in ("1", "true", "yes")
+        or (os.getenv("RERANK_HF_OFFLINE") or "").strip().lower()
+        in ("1", "true", "yes")
     )
 
 
@@ -199,7 +211,11 @@ def _hub_snapshot_dir_cross_encoder(repo_id: str, hf_home: str) -> Path | None:
 
 
 def _get_cross_encoder(model_id: str) -> Any:
-    global _cross_encoder_id, _cross_encoder_device, _cross_encoder_dtype_key, _cross_encoder
+    global \
+        _cross_encoder_id, \
+        _cross_encoder_device, \
+        _cross_encoder_dtype_key, \
+        _cross_encoder
     device = _resolve_rerank_device()
     dtype_key = _rerank_torch_dtype_key()
     if (
@@ -249,7 +265,9 @@ def _get_cross_encoder(model_id: str) -> Any:
                 model_id,
             )
         else:
-            logger.info("RERANK hf: loading CrossEncoder from hub/cache for %s", model_id)
+            logger.info(
+                "RERANK hf: loading CrossEncoder from hub/cache for %s", model_id
+            )
     kwargs["device"] = device
     torch_dtype = _rerank_torch_dtype()
     if torch_dtype is not None:
@@ -309,7 +327,12 @@ async def hf_cross_encoder_rerank(
         try:
             from raganything.query_timing_trace import trace_event
 
-            trace_event("rerank_predict_done", model=model, pairs=len(pairs), predict_s=predict_s)
+            trace_event(
+                "rerank_predict_done",
+                model=model,
+                pairs=len(pairs),
+                predict_s=predict_s,
+            )
         except ImportError:
             pass
         try:
@@ -323,9 +346,7 @@ async def hf_cross_encoder_rerank(
         )
         if top_n is not None and top_n > 0:
             order = order[:top_n]
-        return [
-            {"index": i, "relevance_score": float(scores_list[i])} for i in order
-        ]
+        return [{"index": i, "relevance_score": float(scores_list[i])} for i in order]
     finally:
         if rerank_release_after_predict():
             release_cross_encoder()
@@ -364,10 +385,7 @@ def build_rerank_model_func_from_env() -> Callable[..., Any] | None:
     if binding in ("cohere", "cohere_rerank"):
         from lightrag.rerank import cohere_rerank
 
-        if not (
-            api_key
-            or os.getenv("COHERE_API_KEY", "").strip()
-        ):
+        if not (api_key or os.getenv("COHERE_API_KEY", "").strip()):
             raise SystemExit(
                 "RERANK_BINDING=cohere requires RERANK_BINDING_API_KEY or COHERE_API_KEY."
             )

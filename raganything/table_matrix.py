@@ -148,11 +148,7 @@ def row_query_text(headers: list[str], cells: list[str]) -> str:
     width = len(headers)
     padded = (cells + [""] * width)[:width] if width else cells
     if headers and width:
-        return " ".join(
-            f"{headers[i]} {padded[i]}"
-            for i in range(width)
-            if padded[i]
-        )
+        return " ".join(f"{headers[i]} {padded[i]}" for i in range(width) if padded[i])
     return " ".join(c for c in padded if c)
 
 
@@ -266,7 +262,9 @@ def link_records_to_chunks(
         if not record.chunk_ids and record.rows:
             first_row = [c for c in record.rows[0] if c]
             for cid, html in doc_chunks:
-                if first_row and all(c in html for c in first_row[: min(3, len(first_row))]):
+                if first_row and all(
+                    c in html for c in first_row[: min(3, len(first_row))]
+                ):
                     record.chunk_ids.append(cid)
 
 
@@ -296,9 +294,7 @@ def table_matrix_matches_query(query: str, record: TableMatrixRecord) -> bool:
     terms = discriminative_terms(query, min_len=3)
     if not terms:
         return False
-    row_blob = " ".join(
-        row_query_text(record.headers, row) for row in record.rows[:40]
-    )
+    row_blob = " ".join(row_query_text(record.headers, row) for row in record.rows[:40])
     if record.caption:
         row_blob = f"{record.caption} {row_blob}"
     hit = sum(1 for t in terms if t in row_blob)
@@ -325,7 +321,9 @@ def load_matrix_store(working_dir: str | Path) -> dict[str, TableMatrixRecord]:
     return out
 
 
-def save_matrix_store(working_dir: str | Path, store: dict[str, TableMatrixRecord]) -> None:
+def save_matrix_store(
+    working_dir: str | Path, store: dict[str, TableMatrixRecord]
+) -> None:
     path = matrix_store_path(working_dir)
     path.parent.mkdir(parents=True, exist_ok=True)
     payload = {k: v.to_dict() for k, v in store.items()}
@@ -413,7 +411,10 @@ async def persist_table_matrix_after_ingest(
                     raw = json.loads(path.read_text(encoding="utf-8"))
                     if isinstance(raw, dict):
                         for cid, row in raw.items():
-                            if isinstance(row, dict) and row.get("full_doc_id") == full_doc_id:
+                            if (
+                                isinstance(row, dict)
+                                and row.get("full_doc_id") == full_doc_id
+                            ):
                                 all_chunks[str(cid)] = row
                 except (OSError, json.JSONDecodeError):
                     pass
@@ -441,7 +442,6 @@ def build_matrix_from_text_chunks(
         if _TABLE_INGEST_MARKER not in content:
             continue
         doc_id = str(row.get("full_doc_id") or "")
-        fp = str(row.get("file_path") or "")
         caption, html = extract_table_from_chunk_content(
             strip_table_flat_from_content(content)
         )

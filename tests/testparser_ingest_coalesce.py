@@ -8,10 +8,7 @@ from raganything.utils import (
 )
 
 _FEED_IMG = (
-    "[图片]\n"
-    "图片路径：D:/data/images/feed_section.jpg\n"
-    "页码：9\n"
-    "脚注：进料"
+    "[图片]\n" "图片路径：D:/data/images/feed_section.jpg\n" "页码：9\n" "脚注：进料"
 )
 _CHAIN_IMG = (
     "[图片]\n"
@@ -79,9 +76,7 @@ def test_coalesce_does_not_cross_numbered_sections() -> None:
 def test_coalesce_inline_heading_image_with_trailing_field_parts() -> None:
     """Q7 prod path: text+image in one ingest part, 保养 fields in following parts."""
     inline_heading_img = (
-        "3.1.3 进料部分保养\n\n"
-        + _FEED_IMG
-        + "\n关联正文：3.1.3 进料部分保养"
+        "3.1.3 进料部分保养\n\n" + _FEED_IMG + "\n关联正文：3.1.3 进料部分保养"
     )
     parts = [
         inline_heading_img,
@@ -112,9 +107,7 @@ def test_coalesce_inline_heading_image_with_trailing_field_parts() -> None:
 def test_coalesce_exploded_inline_image_block_keeps_following_fields() -> None:
     """Single segment with heading+image blocks must not strand 保养周期/步骤."""
     seg = (
-        "3.1.3 进料部分保养\n\n"
-        + _FEED_IMG
-        + "\n\n保养周期：每半年保养一次\n\n"
+        "3.1.3 进料部分保养\n\n" + _FEED_IMG + "\n\n保养周期：每半年保养一次\n\n"
         "保养内容：进料靠板无倾斜。\n\n"
         "保养步骤：百分表吸在机架上，表针跳动如超过0.15mm。"
     )

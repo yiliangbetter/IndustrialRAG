@@ -7,8 +7,12 @@ import time
 from contextvars import ContextVar
 from typing import Any
 
-_TRACE_ENABLED: ContextVar[bool] = ContextVar("query_timing_trace_enabled", default=False)
-_TRACE_START: ContextVar[float | None] = ContextVar("query_timing_trace_start", default=None)
+_TRACE_ENABLED: ContextVar[bool] = ContextVar(
+    "query_timing_trace_enabled", default=False
+)
+_TRACE_START: ContextVar[float | None] = ContextVar(
+    "query_timing_trace_start", default=None
+)
 _TRACE_META: ContextVar[dict[str, Any] | None] = ContextVar(
     "query_timing_trace_meta", default=None
 )

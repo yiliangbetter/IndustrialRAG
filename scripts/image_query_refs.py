@@ -76,7 +76,10 @@ except ImportError:
     def detect_table_filter_signal(query: str, text: str) -> bool:  # type: ignore[misc]
         return False
 
-_IMAGE_EXTS = frozenset({".png", ".jpg", ".jpeg", ".gif", ".webp", ".bmp", ".tif", ".tiff"})
+
+_IMAGE_EXTS = frozenset(
+    {".png", ".jpg", ".jpeg", ".gif", ".webp", ".bmp", ".tif", ".tiff"}
+)
 
 _MIN_SUBSTANTIVE_TERM_LEN = 3
 _MIN_QUERY_CHARS_FOR_IMAGES = 6
@@ -102,7 +105,7 @@ def _min_query_chars_for_images() -> int:
 
 def _normalize_query_for_match(query: str) -> str:
     q = (query or "").strip()
-    q = re.sub(r"[\s!！?？。.，,~、；;：:""''\"']+", "", q, flags=re.I)
+    q = re.sub(r"[\s!！?？。.，,~、；;：:" "''\"']+", "", q, flags=re.I)
     return q
 
 
@@ -444,7 +447,6 @@ def _answer_listing_spans(answer: str) -> list[str]:
         if not field:
             continue
         fname = (field.group(1) or field.group(2) or "").strip()
-        fkey = _normalize_label_key(fname)
         if _is_component_field_name(fname):
             value = field.group(3).strip().strip("*").rstrip("。")
             value = re.split(r"[（(]", value, maxsplit=1)[0].strip()
@@ -526,9 +528,7 @@ def _is_procedure_steps_query(query: str) -> bool:
     q = (query or "").strip()
     if not q:
         return False
-    return bool(
-        re.search(r"步骤|怎么做|如何操作|操作方法|操作流程|怎样|如何进行", q)
-    )
+    return bool(re.search(r"步骤|怎么做|如何操作|操作方法|操作流程|怎样|如何进行", q))
 
 
 def _is_maintenance_cycle_query(query: str) -> bool:
@@ -599,8 +599,7 @@ def _is_component_listing_across_machines(query: str) -> bool:
     if not q:
         return False
     return bool(
-        re.search(r"部件|零件|组件", q)
-        and re.search(r"哪些|有什么|有哪|各自", q)
+        re.search(r"部件|零件|组件", q) and re.search(r"哪些|有什么|有哪|各自", q)
     )
 
 
@@ -737,7 +736,9 @@ def _is_maintenance_cycle_value(span: str) -> bool:
     if not span:
         return False
     compact = re.sub(r"\s+", "", span)
-    return bool(_MAINT_CYCLE_VALUE_RE.match(span) or _MAINT_CYCLE_VALUE_RE.match(compact))
+    return bool(
+        _MAINT_CYCLE_VALUE_RE.match(span) or _MAINT_CYCLE_VALUE_RE.match(compact)
+    )
 
 
 def _pair_component_spans_from_answer(answer: str, *, query: str = "") -> list[str]:
@@ -790,7 +791,9 @@ def _is_component_field_name(field_name: str) -> bool:
     name = (field_name or "").strip()
     if _normalize_label_key(name) in _COMPONENT_FIELD_KEYS:
         return True
-    return bool(re.fullmatch(r"保养部件\d*", name) or re.fullmatch(r"润滑部位\d*", name))
+    return bool(
+        re.fullmatch(r"保养部件\d*", name) or re.fullmatch(r"润滑部位\d*", name)
+    )
 
 
 def _is_query_subject_echo(span: str, query: str) -> bool:
@@ -973,7 +976,6 @@ def _machine_component_targets_from_answer(
                         ):
                             pairs.append((machine, comp))
                 continue
-            field_key = _normalize_label_key(field_name)
             if current_machine and _is_component_field_name(field_name):
                 bold_parts = re.findall(r"\*\*([^*]+)\*\*", value)
                 if bold_parts:
@@ -1212,9 +1214,17 @@ def _source_hint_matches_doc(hint: str, doc_hint: str) -> bool:
         return False
     hint_compact = re.sub(r"\s+", "", hint)
     doc_compact = re.sub(r"\s+", "", doc_hint)
-    if "高速智能" in hint_compact and "高速自动" in doc_compact and "高速智能" not in doc_compact:
+    if (
+        "高速智能" in hint_compact
+        and "高速自动" in doc_compact
+        and "高速智能" not in doc_compact
+    ):
         return False
-    if "高速自动" in hint_compact and "高速智能" in doc_compact and "高速自动" not in doc_compact:
+    if (
+        "高速自动" in hint_compact
+        and "高速智能" in doc_compact
+        and "高速自动" not in doc_compact
+    ):
         return False
     if hint_compact in ("自动封边机", "自动封边") or hint == "自动封边机":
         if "高速自动" in doc_compact or "高速智能" in doc_compact:
@@ -1224,7 +1234,9 @@ def _source_hint_matches_doc(hint: str, doc_hint: str) -> bool:
     if hint_machine and doc_machine:
         return hint_machine == doc_machine
     if hint_machine:
-        return hint_machine in doc_hint or re.sub(r"\s+", "", hint_machine) in doc_compact
+        return (
+            hint_machine in doc_hint or re.sub(r"\s+", "", hint_machine) in doc_compact
+        )
     if hint_compact in doc_compact or doc_compact in hint_compact:
         return True
     if len(hint_compact) >= 8 and hint_compact[:8] in doc_compact:
@@ -1243,9 +1255,17 @@ def _doc_matches_manual_hint(doc: dict[str, Any], manual_hint: str) -> bool:
     hint_compact = re.sub(r"\s+", "", hint)
     if not fp_compact:
         return False
-    if "高速智能" in hint_compact and "高速自动" in fp_compact and "高速智能" not in fp_compact:
+    if (
+        "高速智能" in hint_compact
+        and "高速自动" in fp_compact
+        and "高速智能" not in fp_compact
+    ):
         return False
-    if "高速自动" in hint_compact and "高速智能" in fp_compact and "高速自动" not in fp_compact:
+    if (
+        "高速自动" in hint_compact
+        and "高速智能" in fp_compact
+        and "高速自动" not in fp_compact
+    ):
         return False
     if hint_compact in ("自动封边机", "自动封边") or hint == "自动封边机":
         if "高速自动" in fp_compact or "高速智能" in fp_compact:
@@ -1397,7 +1417,9 @@ def _load_manual_chunks_for_locality(manual_hint: str) -> list[dict[str, Any]]:
         out.append(doc)
     out.sort(
         key=lambda doc: (
-            _doc_chunk_order_index(doc) if _doc_chunk_order_index(doc) is not None else 10**9,
+            _doc_chunk_order_index(doc)
+            if _doc_chunk_order_index(doc) is not None
+            else 10**9,
             str(doc.get("id") or ""),
         )
     )
@@ -1440,10 +1462,14 @@ def _answer_bullet_lines_for_figure_targets(answer: str) -> list[str]:
         if len(payload) < 4:
             continue
         machine_bullet = re.match(r"^\*\*([^*]+)\*\*[：:]", payload)
-        if machine_bullet and _machine_from_section_title(machine_bullet.group(1).strip()):
+        if machine_bullet and _machine_from_section_title(
+            machine_bullet.group(1).strip()
+        ):
             continue
         head = _answer_bullet_component_head(line)
-        if _is_answer_structural_label(head) or _is_ordinal_enumeration_bullet_head(head):
+        if _is_answer_structural_label(head) or _is_ordinal_enumeration_bullet_head(
+            head
+        ):
             continue
         key = _normalize_label_key(head)
         if not key or key in seen:
@@ -1804,9 +1830,7 @@ def _best_anchor_chunk(
         if not content:
             continue
         anchor_align = text_term_alignment_symmetric(anchor_text, content)
-        query_align = (
-            text_term_alignment_symmetric(query, content) if query else 0.0
-        )
+        query_align = text_term_alignment_symmetric(query, content) if query else 0.0
         score = max(
             _line_citation_overlap(answer_blob, content),
             _chunk_citation_score(answer_blob, content),
@@ -1867,11 +1891,7 @@ def _manual_scoped_cite_pool(
     hint = (manual_hint or "").strip()
     if not hint:
         return list(cite_pool or [])
-    return [
-        doc
-        for doc in cite_pool or []
-        if _doc_matches_manual_hint(doc, hint)
-    ]
+    return [doc for doc in cite_pool or [] if _doc_matches_manual_hint(doc, hint)]
 
 
 def _anchor_align_blob(anchor_text: str, query: str) -> str:
@@ -2207,11 +2227,7 @@ def _figure_ref_from_content_list_for_target(
                 img_idx = items.index(img_item)
             except ValueError:
                 img_idx = -1
-            ctx = (
-                context_text_for_image(items, img_idx)
-                if img_idx >= 0
-                else ""
-            )
+            ctx = context_text_for_image(items, img_idx) if img_idx >= 0 else ""
             label = image_label_for_item(items, img_item) if img_idx >= 0 else ""
             rel_path = (img_item.get("img_path") or "").strip()
             if not rel_path:
@@ -2224,9 +2240,7 @@ def _figure_ref_from_content_list_for_target(
                 else None,
                 "caption": label,
                 "label": label,
-                "context": "\n".join(
-                    p for p in (text[:300], ctx.strip()) if p
-                )[:400],
+                "context": "\n".join(p for p in (text[:300], ctx.strip()) if p)[:400],
             }
             if _is_cover_page_ref(ref):
                 continue
@@ -2454,9 +2468,6 @@ def _figure_for_target(
         return ref, row
 
     # 1. Anchor inline figure + order_index neighbors (structure-first)
-    fig_doc: dict[str, Any] | None = None
-    source = ""
-    anchor: dict[str, Any] | None = None
     for candidate in anchor_candidates:
         if not _doc_matches_manual_hint(candidate, machine):
             continue
@@ -2802,8 +2813,7 @@ def _apply_unified_figure_debug(
     debug["refs_after_align"] = [_summarize_ref(ref) for ref in refs]
     debug["refs_dropped_align"] = []
     debug["scored"] = [
-        {"score": 1000 - idx, **_summarize_ref(ref)}
-        for idx, ref in enumerate(refs)
+        {"score": 1000 - idx, **_summarize_ref(ref)} for idx, ref in enumerate(refs)
     ]
     debug["selected_paths"] = [str(ref.get("path") or "") for ref in refs]
     debug["listing_targets"] = _machine_targets_from_answer(answer or "")
@@ -2838,9 +2848,7 @@ def _load_figure_chunks_for_manual_paths(
     loaded = _load_manual_chunks_for_paths(allowed_paths, deny)
     if not loaded:
         return []
-    q_terms = [
-        t for t in discriminative_terms(query or "", min_len=2) if len(t) >= 2
-    ]
+    q_terms = [t for t in discriminative_terms(query or "", min_len=2) if len(t) >= 2]
     focus_terms = sorted(
         {t for t in q_terms if 2 <= len(t) <= 8},
         key=len,
@@ -2852,8 +2860,10 @@ def _load_figure_chunks_for_manual_paths(
         if not content or not extract_image_refs_from_context(content):
             continue
         term_hit = focus_terms and any(term in content for term in focus_terms)
-        if q_terms and not term_hit and not _chunk_figure_context_aligns_query(
-            query or "", content
+        if (
+            q_terms
+            and not term_hit
+            and not _chunk_figure_context_aligns_query(query or "", content)
         ):
             continue
         manual = _doc_basename(doc)
@@ -2990,7 +3000,9 @@ def _best_figure_doc_for_component(
             for ref in refs
             if (lab := _ref_effective_label(ref))
         )
-        ref_topic_match = any(_figure_ref_matches_listing_target(ref, head) for ref in refs)
+        ref_topic_match = any(
+            _figure_ref_matches_listing_target(ref, head) for ref in refs
+        )
         if not label_hit and not ref_topic_match:
             continue
         if not _answer_weak_consistency_gate(answer_blob, content):
@@ -3192,9 +3204,9 @@ def _span_keep_listing_targets(
         targets = _component_listing_span_targets(q, answer, pool, kept=kept_docs)
         if len(targets) >= 2:
             return targets
-    if _is_multi_machine_comparison_query(q) and not _is_component_listing_across_machines(
+    if _is_multi_machine_comparison_query(
         q
-    ):
+    ) and not _is_component_listing_across_machines(q):
         machines = _machine_spans_from_answer(answer)
         if len(machines) >= 2:
             return machines
@@ -3232,7 +3244,6 @@ def _listing_target_phrases(query: str, retrieved_text: str) -> list[str]:
     text = (retrieved_text or "").strip()
     if not text:
         return []
-    terms = _query_terms(query)
     phrases: list[str] = []
     seen: set[str] = set()
 
@@ -3261,7 +3272,11 @@ def _listing_target_phrases(query: str, retrieved_text: str) -> list[str]:
 
     for line in re.split(r"[\n\r]+", text):
         line = line.strip()
-        if len(line) < 4 or _is_image_metadata_line(line) or _is_toc_or_directory_line(line):
+        if (
+            len(line) < 4
+            or _is_image_metadata_line(line)
+            or _is_toc_or_directory_line(line)
+        ):
             continue
         short_terms = discriminative_terms(query, min_len=2)
         if short_terms and not any(term in line for term in short_terms):
@@ -3293,9 +3308,7 @@ def _listing_targets_anchored_in_text(
     return [
         t
         for t in targets
-        if any(
-            t in line or _label_matches_listing_target(line, t) for line in lines
-        )
+        if any(t in line or _label_matches_listing_target(line, t) for line in lines)
     ]
 
 
@@ -3319,11 +3332,7 @@ def _listing_targets_with_query_line_overlap(
     targets = _listing_targets_anchored_in_text(query, full_text, anchor_text=focus)
     if not targets:
         return []
-    lines = [
-        line.strip()
-        for line in re.split(r"[\n\r]+", normalize_context_for_image_parse(focus))
-        if line.strip()
-    ]
+    lines = [line.strip() for line in re.split(r"[\n\r]+", focus_norm) if line.strip()]
     return [
         t
         for t in targets
@@ -3504,9 +3513,7 @@ def _ref_passes_image_align_gate(
         return False
     text = (retrieved_text or "").strip()
     list_source = (listing_source_text or text).strip()
-    listing_targets = _listing_targets_with_query_line_overlap(
-        query, list_source, text
-    )
+    listing_targets = _listing_targets_with_query_line_overlap(query, list_source, text)
     if _trust_llm_chunk_images() and not _listing_mode_active(query, listing_targets):
         if text and _ref_inline_in_retrieved_context(ref, text):
             return _ref_matches_figure_focus(query, ref)
@@ -3523,10 +3530,14 @@ def _ref_passes_image_align_gate(
             return False
         ref_maint = _maintenance_content_spans(str(ref.get("context") or ""))
         anchor_maint = _anchor_maintenance_spans(list_source, anchor_sections)
-        if ref_maint and anchor_maint and not any(
-            text_term_alignment_symmetric(rm, am) >= 0.42
-            for rm in ref_maint
-            for am in anchor_maint
+        if (
+            ref_maint
+            and anchor_maint
+            and not any(
+                text_term_alignment_symmetric(rm, am) >= 0.42
+                for rm in ref_maint
+                for am in anchor_maint
+            )
         ):
             return False
     answer_for_images = _answer_text_for_listing()
@@ -3541,8 +3552,10 @@ def _ref_passes_image_align_gate(
             for target in listing_targets
         )
     )
-    if retrieved_text and not listing_label_ok and not _ref_anchored_in_retrieved_text(
-        ref, retrieved_text, query
+    if (
+        retrieved_text
+        and not listing_label_ok
+        and not _ref_anchored_in_retrieved_text(ref, retrieved_text, query)
     ):
         ctx = str(ref.get("context") or "").strip()
         if not (
@@ -3701,9 +3714,7 @@ def _is_cover_page_ref(ref: dict[str, Any]) -> bool:
         return False
 
 
-def _line_has_specific_query_overlap(
-    query: str, line: str, ref_text: str
-) -> bool:
+def _line_has_specific_query_overlap(query: str, line: str, ref_text: str) -> bool:
     """True when substantive query terms hit the answer line but not figure metadata."""
     blob = ref_text or ""
     long_hits = [
@@ -3743,7 +3754,11 @@ def _ranked_retrieval_lines(
             continue
         if _is_image_metadata_line(line) or _is_toc_or_directory_line(line):
             continue
-        if _PDF_NAME_RE.search(line) or ".jpg" in line.lower() or ".png" in line.lower():
+        if (
+            _PDF_NAME_RE.search(line)
+            or ".jpg" in line.lower()
+            or ".png" in line.lower()
+        ):
             continue
         cjk = "".join(re.findall(r"[\u4e00-\u9fff]", line))
         if len(cjk) < _min_substantive_term_len():
@@ -3752,9 +3767,7 @@ def _ranked_retrieval_lines(
         if overlap <= 0:
             continue
         cjk_only = "".join(re.findall(r"[\u4e00-\u9fff]", line))
-        is_short_title = (
-            not _SECTION_NUM_RE.match(line) and len(cjk_only) <= 10
-        )
+        is_short_title = not _SECTION_NUM_RE.match(line) and len(cjk_only) <= 10
         if not is_short_title:
             for needle in _query_subject_needles(query):
                 if len(needle) >= 4 and needle in line:
@@ -3816,20 +3829,14 @@ def _supplement_cross_manual_figure_chunks(
         if not content or not extract_image_refs_from_context(content):
             continue
         q_ov = _answer_chunk_term_overlap(q_blob, content) if q_blob else 0.0
-        cite = _chunk_citation_score(
-            _answer_body_for_citation_match(answer), content
-        )
+        cite = _chunk_citation_score(_answer_body_for_citation_match(answer), content)
         combined = max(q_ov, cite)
-        min_combined = (
-            0.04 if _is_multi_machine_comparison_query(query or "") else 0.08
-        )
+        min_combined = 0.04 if _is_multi_machine_comparison_query(query or "") else 0.08
         if combined < min_combined:
             continue
         if _is_multi_machine_comparison_query(query or ""):
             q_terms = [
-                t
-                for t in discriminative_terms(query or "", min_len=2)
-                if len(t) >= 2
+                t for t in discriminative_terms(query or "", min_len=2) if len(t) >= 2
             ]
             if q_terms and not any(term in content for term in q_terms):
                 continue
@@ -4014,8 +4021,10 @@ def _ref_context_subject_aligns(
         if overlap < 0.12:
             break
         sid = _section_id_from_line_or_context(rt, line)
-        if anchor_sections and sid and not any(
-            _sections_compatible(anchor, sid) for anchor in anchor_sections
+        if (
+            anchor_sections
+            and sid
+            and not any(_sections_compatible(anchor, sid) for anchor in anchor_sections)
         ):
             continue
         line_maint = _maintenance_content_spans(line)
@@ -4077,11 +4086,7 @@ def _answer_weak_consistency_gate(answer_blob: str, content: str) -> bool:
     """Answer terms overlap chunk body (not bold-span expansion)."""
     if not answer_blob.strip() or not (content or "").strip():
         return False
-    terms = [
-        t
-        for t in discriminative_terms(answer_blob, min_len=2)
-        if len(t) >= 2
-    ]
+    terms = [t for t in discriminative_terms(answer_blob, min_len=2) if len(t) >= 2]
     if not terms:
         return False
     body = _normalize_citation_blob(content)
@@ -4264,9 +4269,7 @@ def _anchor_chunks_by_query_section(
             if (
                 needles_required
                 and subject_needles
-                and not any(
-                    needle in content for needle in subject_needles
-                )
+                and not any(needle in content for needle in subject_needles)
             ):
                 continue
             score = _chunk_subject_score(q, content)
@@ -4439,9 +4442,9 @@ def _pick_anchor_sections(
         if not content or _chunk_is_toc_heavy(content):
             continue
         subject_score = _chunk_subject_score(query, content)
-        section_id = _best_section_id_from_content(query, content) or _primary_section_id(
-            content
-        )
+        section_id = _best_section_id_from_content(
+            query, content
+        ) or _primary_section_id(content)
         if not section_id:
             continue
         rerank = float(doc.get("rerank_score") or doc.get("score") or 0)
@@ -4570,9 +4573,9 @@ def _figure_context_from_answer_docs(
     cross_listing = _is_component_listing_across_machines(q)
     pair_components = _pair_component_spans_from_answer(answer)
     shared_component = pair_components[0] if len(pair_components) == 1 else ""
-    multi_machine = (
-        _is_multi_machine_comparison_query(q) and len(machines) >= 2
-    ) or (cross_listing and len(machines) >= 2 and topics and topics[0] in machine_names)
+    multi_machine = (_is_multi_machine_comparison_query(q) and len(machines) >= 2) or (
+        cross_listing and len(machines) >= 2 and topics and topics[0] in machine_names
+    )
     seen_parts: set[str] = set()
 
     def _topic_matches_chunk(topic: str, content: str, doc: dict[str, Any]) -> bool:
@@ -4632,13 +4635,10 @@ def _figure_context_from_answer_docs(
             _add_part(content)
 
     if multi_machine:
-        q_terms = [
-            t for t in discriminative_terms(q, min_len=2) if len(t) >= 2
-        ]
+        q_terms = [t for t in discriminative_terms(q, min_len=2) if len(t) >= 2]
         for topic in machines:
             if any(
-                topic in _doc_basename(doc)
-                and _doc_content(doc).strip() in seen_parts
+                topic in _doc_basename(doc) and _doc_content(doc).strip() in seen_parts
                 for doc in docs
             ):
                 continue
@@ -4659,11 +4659,7 @@ def _figure_context_from_answer_docs(
                     best_content = content
             _add_part(best_content)
     query_aligned = [p for p in parts if _chunk_figure_context_aligns_query(q, p)]
-    if (
-        not query_aligned
-        and not _is_listing_scope_query(q)
-        and not multi_machine
-    ):
+    if not query_aligned and not _is_listing_scope_query(q) and not multi_machine:
         replacement = ""
         for doc in docs:
             content = _doc_content(doc).strip()
@@ -4721,7 +4717,9 @@ def _chunk_figure_context_aligns_query(query: str, content: str) -> bool:
             if _figure_matches_query_object(query, blob):
                 return True
             continue
-        if short_label_bag_aligns(focus, label) or short_label_bag_aligns(focus, blob[:80]):
+        if short_label_bag_aligns(focus, label) or short_label_bag_aligns(
+            focus, blob[:80]
+        ):
             return True
         if any(
             len(term) >= 4 and term in blob
@@ -4810,9 +4808,7 @@ def _supplement_answer_topic_figure_chunks(
     query: str | None = None,
 ) -> list[dict[str, Any]]:
     """Add one inline-figure chunk per answer component topic from the search pool."""
-    topics = _span_keep_listing_targets(
-        query or "", answer, pool, kept=kept
-    )
+    topics = _span_keep_listing_targets(query or "", answer, pool, kept=kept)
     if len(topics) < 2:
         return kept
     answer_blob = _answer_body_for_citation_match(answer)
@@ -4849,9 +4845,7 @@ def _supplement_answer_topic_figure_chunks(
                 _answer_chunk_term_overlap(topic, content),
                 text_term_alignment_symmetric(topic, content),
             )
-            cite = (
-                _chunk_citation_score(answer_blob, content) if answer_blob else 0.0
-            )
+            cite = _chunk_citation_score(answer_blob, content) if answer_blob else 0.0
             label_hit = any(
                 _label_matches_listing_target(lab, topic)
                 or text_term_alignment_symmetric(topic, lab) >= 0.18
@@ -4907,7 +4901,9 @@ def _dedupe_doc_list(docs: list[dict[str, Any]]) -> list[dict[str, Any]]:
     return out
 
 
-def _dedupe_doc_list_by_chunk_identity(docs: list[dict[str, Any]]) -> list[dict[str, Any]]:
+def _dedupe_doc_list_by_chunk_identity(
+    docs: list[dict[str, Any]],
+) -> list[dict[str, Any]]:
     """Dedupe retrieval docs by chunk id / manual+content (not content alone)."""
     seen: set[str] = set()
     out: list[dict[str, Any]] = []
@@ -5181,9 +5177,9 @@ def merge_order_neighbors_into_llm_chunks(
         except ImportError:
             return _relabel_dc_chunks(out)
 
-        chunk_token_limit = getattr(
-            query_param, "max_total_tokens", None
-        ) or gconf.get("MAX_TOTAL_TOKENS", DEFAULT_MAX_TOTAL_TOKENS)
+        chunk_token_limit = getattr(query_param, "max_total_tokens", None) or gconf.get(
+            "MAX_TOTAL_TOKENS", DEFAULT_MAX_TOTAL_TOKENS
+        )
         out = truncate_list_by_token_size(
             out,
             key=lambda x: "\n".join(
@@ -5232,7 +5228,7 @@ def _context_for_image_scan(
 _ANSWER_REF_RE = re.compile(r"###\s*References\b.*", re.I | re.S)
 
 _CITATION_PUNCT_RE = re.compile(
-    r"[\s!！?？。.，,~、；;：:""''（）()\\[\\]【】\-/／·]+"
+    r"[\s!！?？。.，,~、；;：:" "''（）()\\[\\]【】\-/／·]+"
 )
 
 
@@ -5354,10 +5350,7 @@ def filter_docs_cited_by_answer(
         meta["mode"] = "no_answer"
         return list(docs or []), meta
 
-    search_pool = _dedupe_doc_list(list(pool or docs or []))
-    section_pool = _dedupe_doc_list(
-        list(anchor_pool or pool or docs or [])
-    )
+    section_pool = _dedupe_doc_list(list(anchor_pool or pool or docs or []))
     pool_for_spans = section_pool
     if _should_expand_cited_manual_kv_pool(query or "", answer):
         cited_early = _cited_manual_hints_from_answer(answer)
@@ -5367,9 +5360,7 @@ def filter_docs_cited_by_answer(
             if fp:
                 allowed.add(fp)
         if allowed:
-            kv_extra = _load_figure_chunks_for_manual_paths(
-                allowed, query or ""
-            )
+            kv_extra = _load_figure_chunks_for_manual_paths(allowed, query or "")
             if kv_extra:
                 pool_for_spans = _dedupe_doc_list(section_pool + kv_extra)
                 meta["cited_manual_kv_pool"] = len(kv_extra)
@@ -5377,11 +5368,7 @@ def filter_docs_cited_by_answer(
     scored: list[tuple[float, dict[str, Any]]] = []
     for doc in docs or []:
         content = _doc_content(doc).strip()
-        if (
-            not content
-            or _chunk_is_toc_heavy(content)
-            or _chunk_is_title_only(content)
-        ):
+        if not content or _chunk_is_toc_heavy(content) or _chunk_is_title_only(content):
             continue
         score = _chunk_citation_score(answer_blob, content)
         if score > 0:
@@ -5466,9 +5453,7 @@ def filter_docs_cited_by_answer(
                 else []
             )
             span_items: list[tuple[str, str]] = (
-                pair_targets
-                if pair_targets
-                else [( "", span) for span in answer_spans]
+                pair_targets if pair_targets else [("", span) for span in answer_spans]
             )
             for manual_hint, span in span_items:
                 if not manual_hint and _is_component_listing_across_machines(
@@ -5516,10 +5501,9 @@ def filter_docs_cited_by_answer(
                     )
                     if not matched:
                         continue
-                    if (
-                        _is_multi_machine_comparison_query(query or "")
-                        and not _is_component_listing_across_machines(query or "")
-                    ):
+                    if _is_multi_machine_comparison_query(
+                        query or ""
+                    ) and not _is_component_listing_across_machines(query or ""):
                         q_terms = [
                             t
                             for t in discriminative_terms(query or "", min_len=2)
@@ -5557,8 +5541,7 @@ def filter_docs_cited_by_answer(
         kept = query_aligned
     if not _is_listing_scope_query(query or ""):
         kept_has_figures = any(
-            extract_image_refs_from_context(_doc_content(doc).strip())
-            for doc in kept
+            extract_image_refs_from_context(_doc_content(doc).strip()) for doc in kept
         )
         if not kept or not kept_has_figures:
             anchored, qsec_meta = _anchor_chunks_by_query_section(
@@ -5599,9 +5582,7 @@ def _answer_text_for_placement(answer: str) -> str:
     return parts[0].strip()
 
 
-def _find_anchor_in_answer(
-    answer: str, anchor: str
-) -> tuple[int, int, float]:
+def _find_anchor_in_answer(answer: str, anchor: str) -> tuple[int, int, float]:
     """Return (start, end, score) in answer text for inserting a figure after anchor."""
     body = _answer_text_for_placement(answer)
     anchor = (anchor or "").strip()
@@ -6131,7 +6112,11 @@ def _cycle_caption_block_placement(
             lead = chunk.splitlines()[0].strip()
             if re.search(r"保养一次|每[天周月季年]", lead) and caption in lead:
                 tail = chunk[chunk.find(caption) + len(caption) :]
-                if not tail.strip() or tail.strip().startswith("）") or tail.strip().startswith(")"):
+                if (
+                    not tail.strip()
+                    or tail.strip().startswith("）")
+                    or tail.strip().startswith(")")
+                ):
                     continue
         return bstart, bend, chunk
 
@@ -6152,7 +6137,9 @@ def _build_caption_fallback_placements(
     placements: list[dict[str, Any]] = []
     used_ranges: list[tuple[int, int]] = []
     q = (query or "").strip()
-    procedure_steps = _procedure_step_spans(answer) if _is_procedure_steps_query(q) else []
+    procedure_steps = (
+        _procedure_step_spans(answer) if _is_procedure_steps_query(q) else []
+    )
     cycle_query = _is_maintenance_cycle_query(q)
 
     for image_index, img in enumerate(images):
@@ -6188,7 +6175,11 @@ def _build_caption_fallback_placements(
                 if needle not in anchors:
                     anchors.append(needle)
             for span in listing_spans:
-                if span and not _is_maintenance_cycle_value(span) and span not in anchors:
+                if (
+                    span
+                    and not _is_maintenance_cycle_value(span)
+                    and span not in anchors
+                ):
                     anchors.append(span)
         else:
             for span in listing_spans:
@@ -6237,9 +6228,10 @@ def _build_caption_fallback_placements(
                 effective -= 0.6
             elif cycle_query and caption:
                 for needle in _query_subject_needles(q):
-                    if needle in anchor and text_term_alignment_symmetric(
-                        needle, caption
-                    ) >= 0.35:
+                    if (
+                        needle in anchor
+                        and text_term_alignment_symmetric(needle, caption) >= 0.35
+                    ):
                         effective += 0.15
                         break
             if procedure_steps and anchor not in procedure_steps:
@@ -6450,14 +6442,9 @@ def build_inline_placements(
     keep_unplaced = (
         len(placements) >= 2
         or multi_machine
-        or bool(
-            query
-            and _should_use_unified_figure_targets(query, answer)
-        )
+        or bool(query and _should_use_unified_figure_targets(query, answer))
     )
-    return _apply_placement_reindex(
-        images, placements, keep_unplaced=keep_unplaced
-    )
+    return _apply_placement_reindex(images, placements, keep_unplaced=keep_unplaced)
 
 
 def _image_retrieval_focus_min_overlap() -> float:
@@ -6670,9 +6657,7 @@ def _figure_matches_query_object(query: str, text: str) -> bool:
     return False
 
 
-def _action_focus_bigrams(
-    query: str, retrieved_text: str | None = None
-) -> set[str]:
+def _action_focus_bigrams(query: str, retrieved_text: str | None = None) -> set[str]:
     """Bigrams for the query's concrete subject/action (not the device name echo)."""
     focus: set[str] = set()
     for clause in _subject_action_clauses(query):
@@ -6691,9 +6676,9 @@ def _action_focus_bigrams(
             if overlap < 0.04:
                 break
             action = _best_query_run_in_line(query, line)
-            if len(action) >= _min_substantive_term_len() and not _is_toc_or_directory_line(
-                line
-            ):
+            if len(
+                action
+            ) >= _min_substantive_term_len() and not _is_toc_or_directory_line(line):
                 candidate = _suffix_focus_bigrams(action)
                 if candidate:
                     return candidate
@@ -6903,14 +6888,18 @@ def _ref_aligns_with_query_label(
     if len(label) < _min_substantive_term_len():
         return False
 
-    core_label = _strip_section_prefix(label) if _is_section_number_heading(label) else label
+    core_label = (
+        _strip_section_prefix(label) if _is_section_number_heading(label) else label
+    )
     if _is_generic_cycle_only_label(core_label) and not _ref_matches_figure_focus(
         query, ref
     ):
         return False
     label_ok = _figure_label_matches_query(query, core_label)
-    if not label_ok and _text_alignment(query, core_label) >= threshold and any(
-        len(term) >= 4 and term in core_label for term in _query_terms(query)
+    if (
+        not label_ok
+        and _text_alignment(query, core_label) >= threshold
+        and any(len(term) >= 4 and term in core_label for term in _query_terms(query))
     ):
         label_ok = True
 
@@ -7058,7 +7047,10 @@ def retrieval_supports_images(
             anchor_meta.get("reason") or "empty",
         )
         return False
-    if anchor_meta.get("mode") not in ("off", "answer_topics") and not figure_context.strip():
+    if (
+        anchor_meta.get("mode") not in ("off", "answer_topics")
+        and not figure_context.strip()
+    ):
         logger.info(
             "Skip related images: anchor mode (%s) found no same-section context",
             anchor_meta.get("reason") or "empty",
@@ -7074,10 +7066,7 @@ def retrieval_supports_images(
     ):
         return True
 
-    if (
-        _is_component_listing_across_machines(q)
-        and (answer or "").strip()
-    ):
+    if _is_component_listing_across_machines(q) and (answer or "").strip():
         pairs = _machine_component_targets_from_answer(answer or "", query=q)
         machines = {
             m.strip()
@@ -7116,7 +7105,9 @@ def retrieval_supports_images(
                             continue
                         if comp and _pair_component_ref_align(comp, ref) >= 0.38:
                             return True
-                        for shared in _pair_component_spans_from_answer(answer or "", query=q):
+                        for shared in _pair_component_spans_from_answer(
+                            answer or "", query=q
+                        ):
                             if _pair_component_ref_align(shared, ref) >= 0.38:
                                 return True
                 if eligible:
@@ -7172,11 +7163,16 @@ def retrieval_supports_images(
     )
     cross_ok = _is_multi_source_retrieval(retrieved_docs)
     near_miss = overlap + 0.051 >= min_overlap
-    if overlap < min_overlap and not listing_ok and not cross_ok and not (
-        near_miss
-        and any(
-            _figure_label_matches_query(q, _ref_effective_label(ref))
-            for ref in eligible
+    if (
+        overlap < min_overlap
+        and not listing_ok
+        and not cross_ok
+        and not (
+            near_miss
+            and any(
+                _figure_label_matches_query(q, _ref_effective_label(ref))
+                for ref in eligible
+            )
         )
     ):
         logger.info(
@@ -7478,7 +7474,9 @@ def explain_retrieval_supports_images(
     )
     if ok:
         overlap = _term_overlap_ratio(q, primary)
-        reason = "rerank_score_ok" if max_score is not None else "aligned_figures_in_primary"
+        reason = (
+            "rerank_score_ok" if max_score is not None else "aligned_figures_in_primary"
+        )
         payload: dict[str, Any] = {
             "ok": True,
             "reason": reason,
@@ -7711,7 +7709,9 @@ def resolve_query_images(
 
 
 @lru_cache(maxsize=64)
-def _load_content_list_items_cached(path_str: str, mtime_ns: int) -> tuple[Any, ...] | None:
+def _load_content_list_items_cached(
+    path_str: str, mtime_ns: int
+) -> tuple[Any, ...] | None:
     del mtime_ns
     path = Path(path_str)
     try:
@@ -7747,5 +7747,3 @@ def _ref_matches_manual_hint(ref: dict[str, Any], manual_hint: str) -> bool:
         if _doc_matches_manual_hint({"file_path": val}, hint):
             return True
     return False
-
-

@@ -57,7 +57,9 @@ def ensure_hf_home_from_repo_fallback(repo_root: str | os.PathLike[str] | None) 
 
 
 def _resolve_embedding_device() -> str:
-    explicit = (os.getenv("HF_EMBED_DEVICE") or os.getenv("EMBEDDING_DEVICE") or "").strip()
+    explicit = (
+        os.getenv("HF_EMBED_DEVICE") or os.getenv("EMBEDDING_DEVICE") or ""
+    ).strip()
     if explicit:
         return explicit.lower()
     try:
@@ -72,7 +74,9 @@ def _resolve_embedding_device() -> str:
     return "cpu"
 
 
-def make_local_hf_embedding_func(embedding_dim: int, embedding_model: str | None = None):
+def make_local_hf_embedding_func(
+    embedding_dim: int, embedding_model: str | None = None
+):
     """Build a LightRAG-compatible EmbeddingFunc for a local HF sentence-transformers model."""
     offline = (os.getenv("HF_EMBED_OFFLINE") or "").strip().lower() in (
         "1",

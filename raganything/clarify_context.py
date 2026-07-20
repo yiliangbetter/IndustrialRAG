@@ -14,7 +14,9 @@ from lightrag.prompt import PROMPTS
 def split_source_ids(source_id: str | None) -> set[str]:
     if not source_id:
         return set()
-    return {part.strip() for part in str(source_id).split(GRAPH_FIELD_SEP) if part.strip()}
+    return {
+        part.strip() for part in str(source_id).split(GRAPH_FIELD_SEP) if part.strip()
+    }
 
 
 def filter_kg_by_chunk_ids(
@@ -67,7 +69,9 @@ def scope_kg_to_llm_chunks(
         return context_str, raw_data
 
     chunks = [row for row in (data.get("chunks") or []) if isinstance(row, dict)]
-    references = [row for row in (data.get("references") or []) if isinstance(row, dict)]
+    references = [
+        row for row in (data.get("references") or []) if isinstance(row, dict)
+    ]
     entities = [row for row in (data.get("entities") or []) if isinstance(row, dict)]
     relationships = [
         row for row in (data.get("relationships") or []) if isinstance(row, dict)
@@ -201,9 +205,7 @@ def build_cached_bundle(
     if not isinstance(data, dict):
         return None
 
-    chunks = [
-        chunk for chunk in (data.get("chunks") or []) if isinstance(chunk, dict)
-    ]
+    chunks = [chunk for chunk in (data.get("chunks") or []) if isinstance(chunk, dict)]
     references = [
         ref for ref in (data.get("references") or []) if isinstance(ref, dict)
     ]
