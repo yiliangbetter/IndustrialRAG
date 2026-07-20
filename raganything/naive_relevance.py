@@ -79,6 +79,19 @@ def _preview_hit(hit: dict[str, Any], *, limit: int = 80) -> str | None:
     return None
 
 
+def _vdb_copy_with_threshold(chunks_vdb: Any, threshold: float) -> Any:
+    """Return a shallow copy of *chunks_vdb* with an isolated threshold.
+
+    Avoids mutating the shared instance's ``cosine_better_than_threshold``
+    across async suspension points.
+    """
+    cls = type(chunks_vdb)
+    copy = object.__new__(cls)
+    copy.__dict__.update(chunks_vdb.__dict__)
+    copy.cosine_better_than_threshold = threshold
+    return copy
+
+
 async def probe_chunk_vector_score(
     chunks_vdb: Any,
     query_text: str,
@@ -103,45 +116,47 @@ async def probe_chunk_vector_score(
     if cosine_threshold is None:
         cosine_threshold = cosine_threshold_from_env()
 
-    old_threshold = getattr(chunks_vdb, "cosine_better_than_threshold", cosine_threshold)
-    try:
-        chunks_vdb.cosine_better_than_threshold = 0.0
-        probe_hits = await chunks_vdb.query(text, top_k=top_k)
-        probe_scores: list[float] = []
-        top_rows: list[dict[str, Any]] = []
-        for idx, hit in enumerate(probe_hits or []):
-            if not isinstance(hit, dict):
-                continue
-            cosine = _cosine_from_hit(hit)
+    probe_vdb = _vdb_copy_with_threshold(chunks_vdb, 0.0)
+    probe_hits = await probe_vdb.query(text, top_k=top_k)
+
+    probe_scores: list[float] = []
+    top_rows: list[dict[str, Any]] = []
+    for idx, hit in enumerate(probe_hits or []):
+        if not isinstance(hit, dict):
+            continue
+        cosine = _cosine_from_hit(hit)
+        if cosine is not None:
+            probe_scores.append(cosine)
+        if idx < preview_limit:
+            row: dict[str, Any] = {"rank": idx + 1}
             if cosine is not None:
-                probe_scores.append(cosine)
-            if idx < preview_limit:
-                row: dict[str, Any] = {"rank": idx + 1}
-                if cosine is not None:
-                    row["cosine_similarity"] = round(cosine, 4)
-                fp = hit.get("file_path")
-                if isinstance(fp, str) and fp.strip():
-                    row["file_path"] = fp.strip()
-                preview = _preview_hit(hit)
-                if preview:
-                    row["preview"] = preview
-                top_rows.append(row)
+                row["cosine_similarity"] = round(cosine, 4)
+            fp = hit.get("file_path")
+            if isinstance(fp, str) and fp.strip():
+                row["file_path"] = fp.strip()
+            preview = _preview_hit(hit)
+            if preview:
+                row["preview"] = preview
+            top_rows.append(row)
 
-        chunks_vdb.cosine_better_than_threshold = cosine_threshold
-        filtered = await chunks_vdb.query(text, top_k=top_k)
+    hits_above_threshold = 0
+    for hit in probe_hits or []:
+        if not isinstance(hit, dict):
+            continue
+        cosine = _cosine_from_hit(hit)
+        if cosine is not None and cosine >= cosine_threshold:
+            hits_above_threshold += 1
 
-        max_cosine = max(probe_scores) if probe_scores else None
-        return {
-            "text": text,
-            "max_cosine_similarity": round(max_cosine, 4) if max_cosine is not None else None,
-            "probe_top_k": top_k,
-            "probe_hit_count": len(probe_hits or []),
-            "hits_above_threshold": len(filtered or []),
-            "configured_cosine_threshold": cosine_threshold,
-            "top_hits": top_rows,
-        }
-    finally:
-        chunks_vdb.cosine_better_than_threshold = old_threshold
+    max_cosine = max(probe_scores) if probe_scores else None
+    return {
+        "text": text,
+        "max_cosine_similarity": round(max_cosine, 4) if max_cosine is not None else None,
+        "probe_top_k": top_k,
+        "probe_hit_count": len(probe_hits or []),
+        "hits_above_threshold": hits_above_threshold,
+        "configured_cosine_threshold": cosine_threshold,
+        "top_hits": top_rows,
+    }
 
 
 def _global_config(lightrag: Any) -> dict[str, Any]:

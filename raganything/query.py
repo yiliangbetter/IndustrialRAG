@@ -104,6 +104,8 @@ class QueryMixin:
         query: str,
         *,
         mode: str = "mix",
+        top_k: int | None = None,
+        cosine_threshold: float | None = None,
         **kwargs: Any,
     ) -> dict[str, Any]:
         """Coarse chunk-vector relevance for query / high_level / low_level keywords.
@@ -119,7 +121,13 @@ class QueryMixin:
         from raganything.naive_relevance import score_naive_relevance
 
         param = QueryParam(mode=mode, **kwargs)
-        return await score_naive_relevance(self.lightrag, query, query_param=param)
+        return await score_naive_relevance(
+            self.lightrag,
+            query,
+            query_param=param,
+            top_k=top_k,
+            cosine_threshold=cosine_threshold,
+        )
 
     async def aquery(
         self, query: str, mode: str = "mix", system_prompt: str | None = None, **kwargs

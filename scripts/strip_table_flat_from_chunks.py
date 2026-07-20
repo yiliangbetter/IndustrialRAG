@@ -28,8 +28,9 @@ from raganything.table_matrix import strip_table_flat_from_content  # noqa: E402
 spec = importlib.util.spec_from_file_location(
     "rag_pipeline_parse_graph_chat", _ROOT / "scripts" / "rag_pipeline_parse_graph_chat.py"
 )
+if spec is None or spec.loader is None:
+    raise SystemExit("Failed to load scripts/rag_pipeline_parse_graph_chat.py")
 rpc = importlib.util.module_from_spec(spec)
-assert spec.loader is not None
 spec.loader.exec_module(rpc)
 
 
