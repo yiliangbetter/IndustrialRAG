@@ -448,9 +448,15 @@ async def _build_rag(
     scripts_dir = Path(__file__).resolve().parent
     if str(scripts_dir) not in sys.path:
         sys.path.insert(0, str(scripts_dir))
-    from query_doc_steering import install_query_steering_hooks  # noqa: WPS433
-
-    install_query_steering_hooks()
+    try:
+        from query_doc_steering import install_query_steering_hooks  # noqa: WPS433
+    except ImportError:
+        logger.warning(
+            "query_doc_steering not available; skipping query steering hooks "
+            "(expected until web/tooling PR lands)"
+        )
+    else:
+        install_query_steering_hooks()
 
     rag = RAGAnything(
         config=config,
@@ -676,9 +682,12 @@ def _query_extras_from_env(query: str | None = None) -> dict:
         scripts_dir = Path(__file__).resolve().parent
         if str(scripts_dir) not in sys.path:
             sys.path.insert(0, str(scripts_dir))
-        from query_doc_steering import build_user_prompt_for_query  # noqa: WPS433
-
-        steer = build_user_prompt_for_query(query)
+        try:
+            from query_doc_steering import build_user_prompt_for_query  # noqa: WPS433
+        except ImportError:
+            steer = ""
+        else:
+            steer = build_user_prompt_for_query(query) or ""
         if steer:
             up = f"{up}\n{steer}".strip() if up else steer
     if up:

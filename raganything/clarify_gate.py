@@ -12,6 +12,7 @@ See ``docs/澄清门控设计方案_v4.md``.
 from __future__ import annotations
 
 import asyncio
+import logging
 import os
 import re
 import threading
@@ -44,6 +45,8 @@ CLARIFY_CANNOT_FILL_MESSAGE = (
 )
 
 GATE_VERSION = "v4"
+
+logger = logging.getLogger(__name__)
 
 
 class ClarifyGateError(Exception):
@@ -253,8 +256,11 @@ async def probe_llm_retrieval_full(
 
     param = _probe_query_param(mode)
     chunks: list[dict[str, Any]] = []
+    stats: dict[str, Any] = {}
     context_str: str | None = None
     raw_data: dict[str, Any] | None = None
+
+    hooks_mod: Any | None = None
     try:
         import sys
         from pathlib import Path
@@ -263,64 +269,82 @@ async def probe_llm_retrieval_full(
         scripts = root / "scripts"
         if str(scripts) not in sys.path:
             sys.path.insert(0, str(scripts))
-        from query_progress_hooks import (  # noqa: WPS433
-            gate_probe_scope,
-            get_last_probe_raw_data,
-            get_llm_input_chunks,
-            get_rerank_pool_chunks,
-            get_rerank_pool_chunks_raw,
-            get_retrieval_context,
-            progress_hooks_active,
-            query_progress_hooks,
+        import query_progress_hooks as hooks_mod  # noqa: WPS433
+    except ImportError:
+        logger.warning(
+            "query_progress_hooks not available; "
+            "clarify probe uses aquery_data fallback"
         )
+        hooks_mod = None
 
-        def _probe_chunks_and_stats() -> tuple[list[dict[str, Any]], dict[str, Any]]:
-            def _pick_best(
-                *candidates: tuple[list[dict[str, Any]], dict[str, Any]],
-            ) -> tuple[list[dict[str, Any]], dict[str, Any]]:
-                best_chunks, best_stats = candidates[0]
-                best_final = best_stats.get("final_score")
-                for chunks, stats in candidates[1:]:
-                    cand_final = stats.get("final_score")
-                    if cand_final is None:
-                        continue
-                    if best_final is None or float(cand_final) > float(best_final):
-                        best_chunks, best_stats = chunks, stats
-                        best_final = cand_final
-                return best_chunks, best_stats
-
-            chunks = get_llm_input_chunks()
-            pool = get_rerank_pool_chunks()
-            raw_pool = get_rerank_pool_chunks_raw()
-            candidates: list[tuple[list[dict[str, Any]], dict[str, Any]]] = [
-                (chunks, _summarize_llm_chunks(chunks, min_thr=min_thr)),
-            ]
-            if pool:
-                candidates.append((pool, _summarize_llm_chunks(pool, min_thr=min_thr)))
-            if raw_pool and raw_pool is not pool:
-                candidates.append(
-                    (raw_pool, _summarize_llm_chunks(raw_pool, min_thr=min_thr))
-                )
-            return _pick_best(*candidates)
-
-        async def _run_probe() -> None:
-            with gate_probe_scope():
-                await lightrag.aquery_data(q, param)
-
-        if progress_hooks_active():
-            await _run_probe()
-            chunks, stats = _probe_chunks_and_stats()
-            context_str = get_retrieval_context()
-            raw_data = get_last_probe_raw_data()
+    try:
+        if hooks_mod is None:
+            raw = await lightrag.aquery_data(q, param)
+            raw_data = raw if isinstance(raw, dict) else None
         else:
-            async with query_progress_hooks():
+            gate_probe_scope = hooks_mod.gate_probe_scope
+            get_last_probe_raw_data = hooks_mod.get_last_probe_raw_data
+            get_llm_input_chunks = hooks_mod.get_llm_input_chunks
+            get_rerank_pool_chunks = hooks_mod.get_rerank_pool_chunks
+            get_rerank_pool_chunks_raw = hooks_mod.get_rerank_pool_chunks_raw
+            get_retrieval_context = hooks_mod.get_retrieval_context
+            progress_hooks_active = hooks_mod.progress_hooks_active
+            query_progress_hooks = hooks_mod.query_progress_hooks
+
+            def _probe_chunks_and_stats() -> (
+                tuple[list[dict[str, Any]], dict[str, Any]]
+            ):
+                def _pick_best(
+                    *candidates: tuple[list[dict[str, Any]], dict[str, Any]],
+                ) -> tuple[list[dict[str, Any]], dict[str, Any]]:
+                    best_chunks, best_stats = candidates[0]
+                    best_final = best_stats.get("final_score")
+                    for cand_chunks, cand_stats in candidates[1:]:
+                        cand_final = cand_stats.get("final_score")
+                        if cand_final is None:
+                            continue
+                        if best_final is None or float(cand_final) > float(best_final):
+                            best_chunks, best_stats = cand_chunks, cand_stats
+                            best_final = cand_final
+                    return best_chunks, best_stats
+
+                llm_chunks = get_llm_input_chunks()
+                pool = get_rerank_pool_chunks()
+                raw_pool = get_rerank_pool_chunks_raw()
+                candidates: list[tuple[list[dict[str, Any]], dict[str, Any]]] = [
+                    (llm_chunks, _summarize_llm_chunks(llm_chunks, min_thr=min_thr)),
+                ]
+                if pool:
+                    candidates.append(
+                        (pool, _summarize_llm_chunks(pool, min_thr=min_thr))
+                    )
+                if raw_pool and raw_pool is not pool:
+                    candidates.append(
+                        (raw_pool, _summarize_llm_chunks(raw_pool, min_thr=min_thr))
+                    )
+                return _pick_best(*candidates)
+
+            async def _run_probe() -> None:
+                with gate_probe_scope():
+                    await lightrag.aquery_data(q, param)
+
+            if progress_hooks_active():
                 await _run_probe()
                 chunks, stats = _probe_chunks_and_stats()
                 context_str = get_retrieval_context()
                 raw_data = get_last_probe_raw_data()
-    except Exception:
+            else:
+                async with query_progress_hooks():
+                    await _run_probe()
+                    chunks, stats = _probe_chunks_and_stats()
+                    context_str = get_retrieval_context()
+                    raw_data = get_last_probe_raw_data()
+    except Exception as exc:
+        logger.warning("clarify retrieval probe failed: %s", exc, exc_info=True)
         chunks = []
         stats = {}
+        context_str = None
+        raw_data = None
 
     if not stats:
         stats = _summarize_llm_chunks(chunks, min_thr=min_thr)
@@ -694,8 +718,10 @@ async def _collect_high_confidence_candidates(
         from query_progress_hooks import PHASE_CLARIFY, emit_query_phase  # noqa: WPS433
 
         await emit_query_phase(PHASE_CLARIFY)
-    except Exception:
+    except ImportError:
         pass
+    except Exception as exc:
+        logger.debug("clarify phase emit skipped: %s", exc)
     seen: set[str] = {query.strip()}
     answerable: list[dict[str, Any]] = []
     option_entries: dict[str, dict[str, Any]] = {}
