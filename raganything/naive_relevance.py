@@ -150,7 +150,9 @@ async def probe_chunk_vector_score(
     max_cosine = max(probe_scores) if probe_scores else None
     return {
         "text": text,
-        "max_cosine_similarity": round(max_cosine, 4) if max_cosine is not None else None,
+        "max_cosine_similarity": round(max_cosine, 4)
+        if max_cosine is not None
+        else None,
         "probe_top_k": top_k,
         "probe_hit_count": len(probe_hits or []),
         "hits_above_threshold": hits_above_threshold,

@@ -26,7 +26,8 @@ load_dotenv(_ROOT / ".env", override=False)
 from raganything.table_matrix import strip_table_flat_from_content  # noqa: E402
 
 spec = importlib.util.spec_from_file_location(
-    "rag_pipeline_parse_graph_chat", _ROOT / "scripts" / "rag_pipeline_parse_graph_chat.py"
+    "rag_pipeline_parse_graph_chat",
+    _ROOT / "scripts" / "rag_pipeline_parse_graph_chat.py",
 )
 if spec is None or spec.loader is None:
     raise SystemExit("Failed to load scripts/rag_pipeline_parse_graph_chat.py")
