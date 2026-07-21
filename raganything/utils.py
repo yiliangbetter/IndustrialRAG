@@ -2038,6 +2038,10 @@ async def insert_doc_scoped_text_content(
     from lightrag.kg.shared_storage import get_namespace_data, get_pipeline_status_lock
     from lightrag.operate import merge_nodes_and_edges
 
+    # Fail loud when LightRAG internals/storages are missing. Do NOT silently
+    # fall back to ``ainsert`` here: callers chose doc-scoped ids for image
+    # locality / order_index / table linking; a content-only ainsert would look
+    # successful while producing the wrong chunk shape for later query PRs.
     required = (
         "apipeline_enqueue_documents",
         "_process_extract_entities",
@@ -2059,8 +2063,8 @@ async def insert_doc_scoped_text_content(
     if missing:
         raise RuntimeError(
             "Doc-scoped ingest requires LightRAG APIs that are missing on this "
-            f"build: {', '.join(missing)}. Upgrade `lightrag-hku`, or disable "
-            "doc-scoped ingest and use standard `ainsert`."
+            f"build: {', '.join(missing)}. Upgrade `lightrag-hku`, or call "
+            "standard `ainsert` from the non-doc-scoped path instead."
         )
 
     pipeline_status = await get_namespace_data("pipeline_status")
@@ -2202,6 +2206,17 @@ async def insert_text_content(
         file_paths = None
 
     if isinstance(input, str) and ids is not None:
+        if isinstance(ids, list) and len(ids) != 1:
+            raise ValueError(
+                "Doc-scoped ingest for a single input string requires "
+                f"ids to be a str or a one-element list, got len={len(ids)}"
+            )
+        if isinstance(file_paths, list) and len(file_paths) != 1:
+            raise ValueError(
+                "Doc-scoped ingest for a single input string requires "
+                "file_paths to be a str, None, or a one-element list, "
+                f"got len={len(file_paths)}"
+            )
         doc_id = ids if isinstance(ids, str) else ids[0]
         file_path = ""
         if file_paths:
