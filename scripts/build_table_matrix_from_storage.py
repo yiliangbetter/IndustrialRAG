@@ -45,9 +45,16 @@ def main() -> None:
         print(f"Missing {chunk_path}")
         sys.exit(1)
 
-    chunks = json.loads(chunk_path.read_text(encoding="utf-8"))
+    try:
+        chunks = json.loads(chunk_path.read_text(encoding="utf-8"))
+    except OSError as exc:
+        print(f"Failed to read {chunk_path}: {exc}")
+        sys.exit(1)
+    except json.JSONDecodeError as exc:
+        print(f"Corrupt or incomplete JSON in {chunk_path}: {exc}")
+        sys.exit(1)
     if not isinstance(chunks, dict):
-        print("Unexpected kv_store_text_chunks.json")
+        print(f"Unexpected payload in {chunk_path}: expected a JSON object")
         sys.exit(1)
 
     store = build_matrix_from_text_chunks(chunks)
