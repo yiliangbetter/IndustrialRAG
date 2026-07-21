@@ -60,9 +60,16 @@ async def _async_main() -> None:
         print(f"Missing {path}")
         sys.exit(1)
 
-    raw = json.loads(path.read_text(encoding="utf-8"))
+    try:
+        raw = json.loads(path.read_text(encoding="utf-8"))
+    except OSError as exc:
+        print(f"Failed to read {path}: {exc}")
+        sys.exit(1)
+    except json.JSONDecodeError as exc:
+        print(f"Corrupt or incomplete JSON in {path}: {exc}")
+        sys.exit(1)
     if not isinstance(raw, dict):
-        print("Unexpected kv_store_text_chunks.json")
+        print(f"Unexpected payload in {path}: expected a JSON object")
         sys.exit(1)
 
     updates: dict[str, dict] = {}

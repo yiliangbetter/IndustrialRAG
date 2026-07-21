@@ -2038,6 +2038,31 @@ async def insert_doc_scoped_text_content(
     from lightrag.kg.shared_storage import get_namespace_data, get_pipeline_status_lock
     from lightrag.operate import merge_nodes_and_edges
 
+    required = (
+        "apipeline_enqueue_documents",
+        "_process_extract_entities",
+        "_insert_done",
+        "doc_status",
+        "chunks_vdb",
+        "text_chunks",
+        "tokenizer",
+        "chunk_entity_relation_graph",
+        "entities_vdb",
+        "relationships_vdb",
+        "full_entities",
+        "full_relations",
+        "llm_response_cache",
+        "entity_chunks",
+        "relation_chunks",
+    )
+    missing = [name for name in required if not hasattr(lightrag, name)]
+    if missing:
+        raise RuntimeError(
+            "Doc-scoped ingest requires LightRAG APIs that are missing on this "
+            f"build: {', '.join(missing)}. Upgrade `lightrag-hku`, or disable "
+            "doc-scoped ingest and use standard `ainsert`."
+        )
+
     pipeline_status = await get_namespace_data("pipeline_status")
     pipeline_status_lock = get_pipeline_status_lock()
 
