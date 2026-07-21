@@ -6,7 +6,7 @@
 
 - 灌库 / 问答：[`scripts/rag_pipeline_parse_graph_chat.py`](../scripts/rag_pipeline_parse_graph_chat.py)
 - 机型过滤：[`scripts/query_doc_steering.py`](../scripts/query_doc_steering.py)（Web/工具链合入后可用）
-- 检索自检：主脚本 `--query-only`（可选本地调试脚本 `dump_query_context.py`，未必在核心包中）
+- 检索调试：[`scripts/dump_query_context.py`](../scripts/dump_query_context.py)（完整工程 / tooling PR；缺失时用 `--query-only`）
 - Web 灌库 / 问答：[`scripts/rag_web_server.py`](../scripts/rag_web_server.py)（Web PR 合入后可用）
 - 环境变量示例：[`env.example`](../env.example)
 
@@ -57,12 +57,22 @@ uv run python scripts/rag_pipeline_parse_graph_chat.py `
 
 ### 4. 验证是否入库成功
 
+优先用检索调试脚本（完整工程 / tooling 中提供）：
+
+```powershell
+uv run python scripts/dump_query_context.py -w rag_storage_run `
+  --markers "你关心的关键词" `
+  "针对新手册内容的一个测试问题"
+```
+
+查看输出文件 `docs/query_context_dump.txt`（或终端提示路径）中是否出现新 PDF 的 `file_path` 及预期片段。
+
+若当前检出没有 `dump_query_context.py`，可用主脚本兜底：
+
 ```powershell
 uv run python scripts/rag_pipeline_parse_graph_chat.py --query-only -w rag_storage_run `
   --query "针对新手册内容的一个测试问题"
 ```
-
-确认答案能引用新 PDF，或在 Web「检索范围」中看到对应手册路径。
 
 ### 5. 重启 Web 服务（若使用浏览器问答）
 
@@ -157,7 +167,7 @@ uv run python scripts/rag_pipeline_parse_graph_chat.py --query-only -w rag_stora
 
 ## 五、加 PDF 后的自检清单
 
-1. `--query-only`（或 Web 问答）能召回到新 PDF 的内容。
+1. `dump_query_context.py`（或 `--query-only` / Web）能召回到新 PDF 的内容。
 2. 使用**带机型**的问题提问 → Web 界面应出现「检索范围：xxx」及参考/已排除列表。
 3. 确认不会错误引用应排除的手册（例：问高速智能时不应出现《自动封边机…》中的「每天长城导轨油 68#」）。
 4. 答案末尾 References 仅列出实际引用的手册。
@@ -172,14 +182,14 @@ uv run python scripts/rag_pipeline_parse_graph_chat.py --query-only -w rag_stora
    uv run python scripts/clear_query_llm_cache.py -w rag_storage_run
    ```
    然后**重启 Web 服务**再提问。
-3. 用 `--query-only` / Web 确认答案与检索范围是否仍含 `长城导轨油`；若检索已干净而答案仍有，即属 KG 或缓存问题。
+3. 用 `dump_query_context.py`（或 `--query-only` / Web）确认 final chunks / 检索范围是否仍含 `长城导轨油`；若检索已干净而答案仍有，即属 KG 或缓存问题。
 
 ---
 
 ## 七、常见问题
 
 **Q：只加了 PDF，问答变差了？**
-A：检查 embedding 是否与灌库时一致；用 `--query-only` 看新文档是否进入答案/检索范围；适当调整 `CHUNK_TOP_K`、`MIN_RERANK_SCORE`（见 `env.example`）。
+A：检查 embedding 是否与灌库时一致；用 `dump_query_context.py`（或 `--query-only`）看新文档是否进入 final chunks / 检索范围；适当调整 `CHUNK_TOP_K`、`MIN_RERANK_SCORE`（见 `env.example`）。
 
 **Q：新 PDF 灌了但检索不到？**
 A：确认 `-w` 与 Web `RAG_WEB_WORKING_DIR` 一致；解析是否成功（查看 `parser_output_dir`）；cosine 阈值是否过高。
