@@ -1,0 +1,306 @@
+[
+  {
+    "id": 1,
+    "query": "高速智能封边机维护保养手册适用于哪些产品型号？",
+    "expect_images": false,
+    "expect_labels": [],
+    "got_images": false,
+    "image_count": 0,
+    "captions": [],
+    "labels_aligned": [],
+    "pass": true,
+    "gate": null,
+    "selected_paths": [],
+    "scored_top": [],
+    "dropped": [],
+    "docs_synced": 0,
+    "hook_images": 0
+  },
+  {
+    "id": 2,
+    "query": "高速智能封边机开机前我要如何检查电源开关？",
+    "expect_images": false,
+    "expect_labels": [],
+    "got_images": false,
+    "image_count": 0,
+    "captions": [],
+    "labels_aligned": [],
+    "pass": true,
+    "gate": null,
+    "selected_paths": [],
+    "scored_top": [],
+    "dropped": [],
+    "docs_synced": 0,
+    "hook_images": 0
+  },
+  {
+    "id": 3,
+    "query": "高速智能封边机机床床身清洁，要多长时间做一次？",
+    "expect_images": true,
+    "expect_labels": [
+      "清洁机器床身",
+      "机床外部清洁",
+      "机床床身清洁"
+    ],
+    "got_images": true,
+    "image_count": 2,
+    "captions": [
+      "机床外部清洁",
+      "清洁机床内部"
+    ],
+    "labels_aligned": [],
+    "pass": true,
+    "gate": null,
+    "selected_paths": [],
+    "scored_top": [],
+    "dropped": [],
+    "docs_synced": 0,
+    "hook_images": 0
+  },
+  {
+    "id": 4,
+    "query": "高速智能封边机机床内部进行清洁，请问步骤是什么？",
+    "expect_images": true,
+    "expect_labels": [
+      "清洁机床内部"
+    ],
+    "got_images": true,
+    "image_count": 2,
+    "captions": [
+      "清洁机床内部",
+      "机床外部清洁"
+    ],
+    "labels_aligned": [],
+    "pass": true,
+    "gate": null,
+    "selected_paths": [],
+    "scored_top": [],
+    "dropped": [],
+    "docs_synced": 0,
+    "hook_images": 0
+  },
+  {
+    "id": 5,
+    "query": "高速智能封边机清理压带轮残胶应该使用什么工具？",
+    "expect_images": true,
+    "expect_labels": [
+      "压带轮残胶清理"
+    ],
+    "got_images": true,
+    "image_count": 2,
+    "captions": [
+      "压带轮残胶清理",
+      "仿形靠板上残胶清理"
+    ],
+    "labels_aligned": [],
+    "pass": true,
+    "gate": null,
+    "selected_paths": [],
+    "scored_top": [],
+    "dropped": [],
+    "docs_synced": 0,
+    "hook_images": 0
+  },
+  {
+    "id": 6,
+    "query": "高速智能封边机的输送链条进行保养我要加注什么？",
+    "expect_images": true,
+    "expect_labels": [
+      "输送链条加润滑脂 2#"
+    ],
+    "got_images": true,
+    "image_count": 1,
+    "captions": [
+      "输送链条加润滑脂 2#"
+    ],
+    "labels_aligned": [],
+    "pass": true,
+    "gate": null,
+    "selected_paths": [],
+    "scored_top": [],
+    "dropped": [],
+    "docs_synced": 0,
+    "hook_images": 0
+  },
+  {
+    "id": 7,
+    "query": "对高速智能封边机的进料部分保养时，需要使用什么表？表针读数需要小于多少？",
+    "expect_images": true,
+    "expect_labels": [
+      "进料部分保养"
+    ],
+    "got_images": true,
+    "image_count": 1,
+    "captions": [
+      "进料部分保养"
+    ],
+    "labels_aligned": [],
+    "pass": true,
+    "gate": null,
+    "selected_paths": [],
+    "scored_top": [],
+    "dropped": [],
+    "docs_synced": 0,
+    "hook_images": 0
+  },
+  {
+    "id": 8,
+    "query": "高速智能封边机更换预铣刀时，刀刃的装配方向应该如何？",
+    "expect_images": true,
+    "expect_labels": [
+      "检查预铣刀磨损情况"
+    ],
+    "got_images": true,
+    "image_count": 1,
+    "captions": [
+      "检查预铣刀磨损情况"
+    ],
+    "labels_aligned": [],
+    "pass": true,
+    "gate": null,
+    "selected_paths": [],
+    "scored_top": [],
+    "dropped": [],
+    "docs_synced": 0,
+    "hook_images": 0
+  },
+  {
+    "id": 9,
+    "query": "检查高速智能封边机的注油泵时，如果油位过低，需要注入哪个品牌的哪种液压油产品？",
+    "expect_images": true,
+    "expect_labels": [
+      "检查注油泵油量"
+    ],
+    "got_images": true,
+    "image_count": 1,
+    "captions": [
+      "检查注油泵油量"
+    ],
+    "labels_aligned": [],
+    "pass": true,
+    "gate": null,
+    "selected_paths": [],
+    "scored_top": [],
+    "dropped": [],
+    "docs_synced": 0,
+    "hook_images": 0
+  },
+  {
+    "id": 10,
+    "query": "高速智能封边机的保养中，哪些部件需要使用美孚长效液压油？",
+    "expect_images": false,
+    "expect_labels": [],
+    "got_images": false,
+    "image_count": 0,
+    "captions": [],
+    "labels_aligned": [],
+    "pass": true,
+    "gate": null,
+    "selected_paths": [],
+    "scored_top": [],
+    "dropped": [],
+    "docs_synced": 0,
+    "hook_images": 0
+  },
+  {
+    "id": 11,
+    "query": "高速智能封边机的保养中，哪些部件需要清理残胶",
+    "expect_images": true,
+    "expect_labels": [
+      "仿形靠板上残胶清理",
+      "压带轮残胶清理",
+      "清理胶轴老化胶水"
+    ],
+    "got_images": true,
+    "image_count": 2,
+    "captions": [
+      "仿形靠板上残胶清理",
+      "压带轮残胶清理"
+    ],
+    "labels_aligned": [],
+    "pass": true,
+    "gate": null,
+    "selected_paths": [],
+    "scored_top": [],
+    "dropped": [],
+    "docs_synced": 0,
+    "hook_images": 0
+  },
+  {
+    "id": 12,
+    "query": "高速智能封边机的保养中，需要清理粉尘，碎屑的部件有哪些？",
+    "expect_images": false,
+    "expect_labels": [],
+    "got_images": false,
+    "image_count": 0,
+    "captions": [],
+    "labels_aligned": [],
+    "pass": true,
+    "gate": null,
+    "selected_paths": [],
+    "scored_top": [],
+    "dropped": [],
+    "docs_synced": 0,
+    "hook_images": 0
+  },
+  {
+    "id": 13,
+    "query": "我将为高速智能封边机进行季度保养，请问我需要准备哪几种润滑脂？",
+    "expect_images": true,
+    "expect_labels": [],
+    "got_images": true,
+    "image_count": 3,
+    "captions": [
+      "输送链条加润滑脂 2#",
+      "导杆打润滑脂",
+      "齿条、齿轮打润滑脂"
+    ],
+    "labels_aligned": [],
+    "pass": true,
+    "gate": null,
+    "selected_paths": [],
+    "scored_top": [],
+    "dropped": [],
+    "docs_synced": 0,
+    "hook_images": 0
+  },
+  {
+    "id": 14,
+    "query": "南兴的封边机一共有多少产品型号？",
+    "expect_images": false,
+    "expect_labels": [],
+    "got_images": false,
+    "image_count": 0,
+    "captions": [],
+    "labels_aligned": [],
+    "pass": true,
+    "gate": null,
+    "selected_paths": [],
+    "scored_top": [],
+    "dropped": [],
+    "docs_synced": 0,
+    "hook_images": 0
+  },
+  {
+    "id": 15,
+    "query": "这四种封边机的电控板的保养周期分别是多久",
+    "expect_images": true,
+    "expect_labels": [],
+    "got_images": true,
+    "image_count": 4,
+    "captions": [
+      "检查电控板设备",
+      "电控板",
+      "电控板",
+      "电控板"
+    ],
+    "labels_aligned": [],
+    "pass": true,
+    "gate": null,
+    "selected_paths": [],
+    "scored_top": [],
+    "dropped": [],
+    "docs_synced": 0,
+    "hook_images": 0
+  }
+]

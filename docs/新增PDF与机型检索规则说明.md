@@ -179,13 +179,13 @@ uv run python scripts/dump_query_context.py -w rag_storage_run `
 
 ## 七、常见问题
 
-**Q：只加了 PDF，问答变差了？**  
+**Q：只加了 PDF，问答变差了？**
 A：检查 embedding 是否与灌库时一致；用 `dump_query_context.py` 看新文档是否进入 final chunks；适当调整 `CHUNK_TOP_K`、`MIN_RERANK_SCORE`（见 `env.example`）。
 
-**Q：新 PDF 灌了但检索不到？**  
+**Q：新 PDF 灌了但检索不到？**
 A：确认 `-w` 与 Web `RAG_WEB_WORKING_DIR` 一致；解析是否成功（查看 `parser_output_dir`）；cosine 阈值是否过高。
 
-**Q：过滤太狠，上下文为空？**  
+**Q：过滤太狠，上下文为空？**
 A：实现上若过滤后无 chunk 会回退到过滤前结果；若仍异常，检查 `deny_path_substrings` 是否误伤了应保留的手册（例如「封边机连线」手册内含高速智能章节，不应被高速智能 profile 排除）。
 
 ---

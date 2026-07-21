@@ -159,9 +159,9 @@ uv run python .\scripts\rag_pipeline_parse_graph_chat.py `
 
 **`.env` 中与多模态相关的开关**（在 **`--no-skip-multimodal`** 时由 **`_build_rag`** 读取；未写时默认视为 **true**）：
 
-- **`ENABLE_TABLE_PROCESSING`**：表格处理器  
-- **`ENABLE_IMAGE_PROCESSING`**：图片（可能使用 **`VISION_MODEL`**）  
-- **`ENABLE_EQUATION_PROCESSING`**：公式  
+- **`ENABLE_TABLE_PROCESSING`**：表格处理器
+- **`ENABLE_IMAGE_PROCESSING`**：图片（可能使用 **`VISION_MODEL`**）
+- **`ENABLE_EQUATION_PROCESSING`**：公式
 
 **仅表格、关闭图片与公式** 示例：
 

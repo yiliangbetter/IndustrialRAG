@@ -1,0 +1,212 @@
+query: 高速智能封边机的涂胶轴怎么保养
+status: success
+message: Query processed successfully
+
+=== metadata ===
+  query_mode: mix
+  keywords: {'high_level': ['保养', '封边机'], 'low_level': ['高速智能封边机', '涂胶轴']}
+  processing_info: {'total_entities_found': 41, 'total_relations_found': 347, 'entities_after_truncation': 13, 'relations_after_truncation': 117, 'merged_chunks_count': 117, 'final_chunks_count': 23}
+
+=== counts: entities=13 relations=117 chunks=23 ===
+
+=== marker hits (skipped; pass --markers 'a,b,c' to scan substrings) ===
+
+=== chunk previews (query_mode='mix') ===
+
+--- chunk 1/23 | file_path='高速智能封边机维护保养手册.pdf' | chunk_id='chunk-b0759e736174714e52774e631b6817e9' | len=349 ---
+保养步骤：在涂胶轴轴承位置添加高温润滑脂（手动添加）禁止用普通润滑油脂代替高温润滑油脂，否则会导致涂胶轴轴承位置堵死。
+
+[图片]
+图片路径：D:\dev\RAGdemo\RAG-Anything\data\pipeline_parse\高速智能封边机维护保养手册_97eeb986\高速智能封边机维护保养手册\auto\images\d2386222ce26171a5c4f7a3a7be207e487e22304739999eb30ffb8b08c99acf4.jpg
+页码：15
+图注：涂胶轴轴承加润滑油脂
+关联正文：保养内容：涂胶轴轴承加润滑油脂 保养步骤：在涂胶轴轴承位置添加高温润滑脂（手动添加）禁止用普通润滑油脂代替高温润滑油脂，否则会导致涂胶轴轴承位置堵死。 3.3.4 涂胶轴保养
+
+--- chunk 2/23 | file_path='高速智能封边机维护保养手册.pdf' | chunk_id='chunk-62742dce44217ae13ddbe49398f66268' | len=282 ---
+保养步骤：检查涂胶轴周围的胶水情况，用刮刀清理老化胶水。
+
+[图片]
+图片路径：D:\dev\RAGdemo\RAG-Anything\data\pipeline_parse\高速智能封边机维护保养手册_97eeb986\高速智能封边机维护保养手册\auto\images\d4eefc635fbbc50b1f84ce22d5af42f59c49f76e08ecb330cb4180d4fe9c68f0.jpg
+页码：14
+脚注：清理胶轴老化胶水
+关联正文：保养步骤：检查涂胶轴周围的胶水情况，用刮刀清理老化胶水。 保养内容：涂胶轴检查清理 3.3.2 涂胶轴保养
+
+--- chunk 3/23 | file_path='高速智能封边机维护保养手册.pdf' | chunk_id='chunk-a21c4c239c2f058713e93ba2743c3d14' | len=360 ---
+保养步骤：清理电机灰尘、涂胶轴掉下的残胶，检查电机是否氧化、烧糊气味等。拆下电机尾部罩盖，清除散热风扇上附着的粉尘，尾部罩盖再装回原位。
+
+[图片]
+图片路径：D:\dev\RAGdemo\RAG-Anything\data\pipeline_parse\高速智能封边机维护保养手册_97eeb986\高速智能封边机维护保养手册\auto\images\bde00cb51113f04584a9e20f3d86c9c811b228173ad8de49fca2df76817d2052.jpg
+页码：15
+脚注：电机检查清理
+关联正文：保养内容：电机检查清理 保养步骤：清理电机灰尘、涂胶轴掉下的残胶，检查电机是否氧化、烧糊气味等。拆下电机尾部罩盖，清除散热风扇上附着的粉尘，尾部罩盖再装回原位。 3.3.5 涂胶电机保养
+
+--- chunk 4/23 | file_path='高速智能封边机维护保养手册.pdf' | chunk_id='chunk-11ae52e2f9ede8678b3420703652ad2f' | len=336 ---
+保养步骤：开始工作前需把胶粒储备箱加满，并检查胶粒型号是否与封边带对应，如加错胶料可能导致封边质量问题。
+
+[图片]
+图片路径：D:\dev\RAGdemo\RAG-Anything\data\pipeline_parse\高速智能封边机维护保养手册_97eeb986\高速智能封边机维护保养手册\auto\images\d8f3046fb5178a738871c15521597465df2526250f7443caa30957ea0fc63a12.jpg
+页码：12
+脚注：胶粒充足、型号正确
+关联正文：保养内容：胶粒充足且型号正确 保养步骤：开始工作前需把胶粒储备箱加满，并检查胶粒型号是否与封边带对应，如加错胶料可能导致封边质量问题。 3.1.9 检查胶粒是否充足
+
+--- chunk 5/23 | file_path='高速智能封边机维护保养手册.pdf' | chunk_id='chunk-64d6e212807159ba54bbc35619f04381' | len=737 ---
+保养步骤：先用手先接住仿形刀头，再按下气锁开关，取下仿形刀头，清理仿形靠板上的残胶，以防残胶粘在仿形靠板上，影响封边质量。残胶清理完后再按住气锁开关，仿形刀装回原位置后松开气锁开关，气锁装置自动锁紧仿形刀。
+
+[图片]
+图片路径：D:\dev\RAGdemo\RAG-Anything\data\pipeline_parse\高速智能封边机维护保养手册_97eeb986\高速智能封边机维护保养手册\auto\images\24e3e20150d3b0686c1790741cd1eb52ecf08d15a84be178f60b004c38ba62b2.jpg
+页码：6
+脚注：按下气锁开关
+关联正文：保养步骤：先用手先接住仿形刀头，再按下气锁开关，取下仿形刀头，清理仿形靠板上的残胶，以防残胶粘在仿形靠板上，影响封边质量。残胶清理完后再按住气锁开关，仿形刀装回原位置后松开气锁开关，气锁装置自动锁紧仿形刀。
+
+[图片]
+图片路径：D:\dev\RAGdemo\RAG-Anything\data\pipeline_parse\高速智能封边机维护保养手册_97eeb986\高速智能封边机维护保养手册\auto\images\2bddfbb4393fe3f2d3962ee08e4715719ea471256e80a50bb84b3c8438dc639e.jpg
+页码：6
+脚注：仿形靠板上残胶清理
+关联正文：保养步骤：先用手先接住仿形刀头，再按下气锁开关，取下仿形刀头，清理仿形靠板上的残胶，以防残胶粘在仿形靠板上，影响封边质量。残胶清理完后再按住气锁开关，仿形刀装回原位置后松开气锁开关，气锁装置自动锁紧仿形刀。 保养内容：仿形靠模残胶清理 2.1.4 清理仿形靠模残胶
+
+--- chunk 6/23 | file_path='高速智能封边机维护保养手册.pdf' | chunk_id='chunk-6b3a101cecfc98c80b0e3e3936c73ad1' | len=482 ---
+保养步骤：用3.6米标准胶木板从前端贴紧进料靠板，百分表吸在机架上，指针对准胶板侧面，启动履带走板，观察表针读数，表针跳动如超过0.15mm，需松开进料靠板固定螺丝，调整靠板位置，直至表针跳动＜0.15mm。进料靠板底下丝杆手动添加（润滑脂2#）。
+
+[图片]
+图片路径：D:\dev\RAGdemo\RAG-Anything\data\pipeline_parse\高速智能封边机维护保养手册_97eeb986\高速智能封边机维护保养手册\auto\images\0ec4ef8f2cd5c6d352f3276f0bd435b79a43c2b9619c3ed6d0101199da19c4b8.jpg
+页码：9
+脚注：进料部分保养
+关联正文：3.1.3 进料部分保养 保养步骤：用3.6米标准胶木板从前端贴紧进料靠板，百分表吸在机架上，指针对准胶板侧面，启动履带走板，观察表针读数，表针跳动如超过0.15mm，需松开进料靠板固定螺丝，调整靠板位置，直至表针跳动＜0.15mm。进料靠板底下丝杆手动添加（润滑脂2#）。 保养内容：进料靠板无倾斜，进料丝杆加润滑脂。
+
+--- chunk 7/23 | file_path='高速智能封边机维护保养手册.pdf' | chunk_id='chunk-6be137117c8a9aba277cdd2a80b9a0b6' | len=311 ---
+保养步骤：每班次结束关机后，要及时关闭胶门（红色球头挡杆），防止胶水流出、防止灰尘进入胶盒污染胶水。
+
+[图片]
+图片路径：D:\dev\RAGdemo\RAG-Anything\data\pipeline_parse\高速智能封边机维护保养手册_97eeb986\高速智能封边机维护保养手册\auto\images\f17acdfa3840b6cde0ccff39fc76f53604fecb4f172766e0c2b0ca26326b9a64.jpg
+页码：14
+关联正文：保养步骤：每班次结束关机后，要及时关闭胶门（红色球头挡杆），防止胶水流出、防止灰尘进入胶盒污染胶水。 保养内容：胶水保护 保养周期：每日保养一次
+
+--- chunk 8/23 | file_path='高速智能封边机维护保养手册.pdf' | chunk_id='chunk-940c5a4fb33ef43c51ae700be54c99c5' | len=332 ---
+保养步骤：清理圆形导杆上的灰尘，检查是否有刮伤、凹坑等，以免影响开槽精度，圆形导轨上需手动均匀涂抺润滑脂（润滑脂2#）。
+
+[图片]
+图片路径：D:\dev\RAGdemo\RAG-Anything\data\pipeline_parse\高速智能封边机维护保养手册_97eeb986\高速智能封边机维护保养手册\auto\images\3c66b269becac032c82437d9f8567a30f8c986e77767970662b1b330634f989b.jpg
+页码：27
+关联正文：保养步骤：清理圆形导杆上的灰尘，检查是否有刮伤、凹坑等，以免影响开槽精度，圆形导轨上需手动均匀涂抺润滑脂（润滑脂2#）。 保养内容：导杆打润滑脂 保养周期：每季度一次
+
+--- chunk 9/23 | file_path='高速智能封边机维护保养手册.pdf' | chunk_id='chunk-1872fbc011b15cfefb70edf25d25ca41' | len=352 ---
+保养步骤：工作结束后，需用吸尘机或碎布清洁封边机内外各功能单元储藏的刮削、灰尘等杂物，擦拭干净表面的油污。
+
+[图片]
+图片路径：D:\dev\RAGdemo\RAG-Anything\data\pipeline_parse\高速智能封边机维护保养手册_97eeb986\高速智能封边机维护保养手册\auto\images\7911b906bfaa9ee5d0eb4733c7fb60a872ccffd20be68f61a964877a0d650494.jpg
+页码：5
+脚注：清洁机床内部
+关联正文：保养内容：机床内部清洁 2.1.2 机床内部清洁 保养步骤：工作结束后需用吸尘器或风枪清洁机床表面灰尘等脏物，注意勿划伤有机玻璃窗。然后用干净的碎布及清洁剂抺干净输送台、各光电感应器上的顽固灰尘或油污。
+
+--- chunk 10/23 | file_path='高速智能封边机维护保养手册.pdf' | chunk_id='chunk-16fc8df14e766487067faa29c34775c3' | len=347 ---
+保养步骤：清理圆形导杆上的灰尘，检查是否有刮伤、凹坑等，以免影响精修精度，圆形导轨上需手动均匀涂抺润滑脂（润滑脂2#）。
+
+[图片]
+图片路径：D:\dev\RAGdemo\RAG-Anything\data\pipeline_parse\高速智能封边机维护保养手册_97eeb986\高速智能封边机维护保养手册\auto\images\e9045fb1341427c2c7ad9aa3dcf3e258b1d9a794e0d08cd761bda8cfccf67541.jpg
+页码：22
+脚注：导杆打润滑脂
+关联正文：保养内容：导杆打润滑脂 保养步骤：清理圆形导杆上的灰尘，检查是否有刮伤、凹坑等，以免影响精修精度，圆形导轨上需手动均匀涂抺润滑脂（润滑脂2#）。 3.8.1 精修导杆、轴承保养
+
+--- chunk 11/23 | file_path='高速智能封边机维护保养手册.pdf' | chunk_id='chunk-55c9e69050dc8d529d3197f6a5fd715d' | len=415 ---
+保养步骤：清洁表面粉尘，检查油压缓冲器无损坏，压力是否正常。调节缓冲器后端旋扭可调节压力大小，扭动缓冲器上的螺母可调节缓冲器位置，确保平切刀跑到两端时缓冲器能起到缓冲作用，撞击声音正常，无剧裂震动。
+
+[图片]
+图片路径：D:\dev\RAGdemo\RAG-Anything\data\pipeline_parse\高速智能封边机维护保养手册_97eeb986\高速智能封边机维护保养手册\auto\images\b45ecf09cdc2d6947f91dad858d9b5d63f254488074c2387341d183915a906c2.jpg
+页码：20
+关联正文：保养步骤：清洁表面粉尘，检查油压缓冲器无损坏，压力是否正常。调节缓冲器后端旋扭可调节压力大小，扭动缓冲器上的螺母可调节缓冲器位置，确保平切刀跑到两端时缓冲器能起到缓冲作用，撞击声音正常，无剧裂震动。 保养内容：缓冲器无损坏、压力正常 保养周期：每季度一次
+
+--- chunk 12/23 | file_path='高速智能封边机维护保养手册.pdf' | chunk_id='chunk-2295e71196be1fc4f14e691d3823fb51' | len=364 ---
+保养步骤：工作结束后需用吸尘器或风枪清洁机床表面灰尘等脏物，注意勿划伤有机玻璃窗。然后用干净的碎布及清洁剂抺干净输送台、各光电感应器上的顽固灰尘或油污。
+
+[图片]
+图片路径：D:\dev\RAGdemo\RAG-Anything\data\pipeline_parse\高速智能封边机维护保养手册_97eeb986\高速智能封边机维护保养手册\auto\images\b7c54355f53b0e102b55c63cd547a25d449460972d10dd43f1388116df27abe1.jpg
+页码：5
+关联正文：保养步骤：工作结束后需用吸尘器或风枪清洁机床表面灰尘等脏物，注意勿划伤有机玻璃窗。然后用干净的碎布及清洁剂抺干净输送台、各光电感应器上的顽固灰尘或油污。 保养内容：机床外部清洁 保养周期：每天保养一次
+
+--- chunk 13/23 | file_path='高速智能封边机维护保养手册.pdf' | chunk_id='chunk-87a7865c1afa917bae23e3692e93eaa1' | len=368 ---
+保养步骤：在机器停机状态下检查平切刀片的锋利度，刀片如有破损或磨损严重时，需拆开刀片固定螺母，更换新的平切刀片。刀片装配时注意刀刃方向与电机转动方向相同。
+
+[图片]
+图片路径：D:\dev\RAGdemo\RAG-Anything\data\pipeline_parse\高速智能封边机维护保养手册_97eeb986\高速智能封边机维护保养手册\auto\images\dd15f8b1a4f093a01faee35c258f0f828e92e4f82df5258933be540389cf3a1e.jpg
+页码：18
+关联正文：保养步骤：在机器停机状态下检查平切刀片的锋利度，刀片如有破损或磨损严重时，需拆开刀片固定螺母，更换新的平切刀片。刀片装配时注意刀刃方向与电机转动方向相同。 保养内容：检查平切刀片锋利度 保养周期：每月一次
+
+--- chunk 14/23 | file_path='高速智能封边机维护保养手册.pdf' | chunk_id='chunk-0b493f7df06c83bfd8330c4a7efbd9c3' | len=419 ---
+保养步骤：检查电机是否有氧化、温度过高、烧糊气味等异常，拆下电机罩盖清除散热风扇附着的粉尘，电机罩盖再装回原处，电机如有烧糊现象需及时报维修工人维修。
+
+[图片]
+图片路径：D:\dev\RAGdemo\RAG-Anything\data\pipeline_parse\高速智能封边机维护保养手册_97eeb986\高速智能封边机维护保养手册\auto\images\0f10a592eff363a956f610b959729775e39144d325af2a5f88405df542cfe76e.jpg
+页码：31
+脚注：电机检查清理
+关联正文：保养内容：电机检查清理 保养步骤：检查电机是否有氧化、温度过高、烧糊气味等异常，拆下电机罩盖清除散热风扇附着的粉尘，电机罩盖再装回原处，电机如有烧糊现象需及时报维修工人维修。 保养步骤：清理圆形导杆上的灰尘，检查导杆上是否有润滑脂，各个圆形导轨及直线轴承上手动均匀涂抺润滑脂（润滑脂2#）。
+
+--- chunk 15/23 | file_path='高速智能封边机维护保养手册.pdf' | chunk_id='chunk-edd41ae2aa2c94430620ac2dfe4d1995' | len=338 ---
+保养步骤：压轮机构工作时间长了，压带轮表面会粘上一些胶水，需用刮刀把胶水清理干净，注意刮刀勿划伤压带轮表面涂层。
+
+[图片]
+图片路径：D:\dev\RAGdemo\RAG-Anything\data\pipeline_parse\高速智能封边机维护保养手册_97eeb986\高速智能封边机维护保养手册\auto\images\c3376a53534f81e3cb320054ed880ce51cd39049398d3fe259d713e2e0a85314.jpg
+页码：7
+脚注：压带轮残胶清理
+关联正文：保养内容：压带轮残胶清理 2.1.5 清理压带轮残胶 保养步骤：压轮机构工作时间长了，压带轮表面会粘上一些胶水，需用刮刀把胶水清理干净，注意刮刀勿划伤压带轮表面涂层。
+
+--- chunk 16/23 | file_path='高速智能封边机维护保养手册.pdf' | chunk_id='chunk-b746fa2ba2b4fdc34b983ffd6acbb6ee' | len=891 ---
+保养步骤：清理底座及立柱上齿轮、齿条上的粉尘、碎屑。检查齿轮、齿条是否有破损，齿条上均匀涂抺润滑脂（润滑脂2#）。
+
+[图片]
+图片路径：D:\dev\RAGdemo\RAG-Anything\data\pipeline_parse\高速智能封边机维护保养手册_97eeb986\高速智能封边机维护保养手册\auto\images\313b0b111c749bea77a9dec44212a8bfb559bacc0b0f2851c055ceae2cf6e4df.jpg
+页码：23
+脚注：齿条、齿轮打润滑脂
+关联正文：保养内容：齿条、齿轮打润滑脂 保养步骤：清理底座及立柱上齿轮、齿条上的粉尘、碎屑。检查齿轮、齿条是否有破损，齿条上均匀涂抺润滑脂（润滑脂2#）。 3.9.1 仿形齿条、齿轮保养
+
+[图片]
+图片路径：D:\dev\RAGdemo\RAG-Anything\data\pipeline_parse\高速智能封边机维护保养手册_97eeb986\高速智能封边机维护保养手册\auto\images\b21b4a927e2618b355655c0970bc248d05cccad995f70abc86d84313e0a38455.jpg
+页码：23
+关联正文：保养步骤：清理底座及立柱上齿轮、齿条上的粉尘、碎屑。检查齿轮、齿条是否有破损，齿条上均匀涂抺润滑脂（润滑脂2#）。 保养内容：齿条、齿轮打润滑脂 保养周期：每季度一次
+
+[图片]
+图片路径：D:\dev\RAGdemo\RAG-Anything\data\pipeline_parse\高速智能封边机维护保养手册_97eeb986\高速智能封边机维护保养手册\auto\images\4f859e5544669fe2565610e738a399e73f4ce880e065516a58c963f4d8f95b21.jpg
+页码：23
+关联正文：保养步骤：清理底座及立柱上齿轮、齿条上的粉尘、碎屑。检查齿轮、齿条是否有破损，齿条上均匀涂抺润滑脂（润滑脂2#）。 保养内容：齿条、齿轮打润滑脂 保养周期：每季度一次
+
+--- chunk 17/23 | file_path='高速智能封边机维护保养手册.pdf' | chunk_id='chunk-3cfab6ac19a2f6b411b14ea99bc16eb9' | len=571 ---
+保养步骤：清理圆形导杆上的灰尘，检查导杆上是否有润滑脂，各个圆形导轨及直线轴承上手动均匀涂抺润滑脂（润滑脂2#）。
+
+[图片]
+图片路径：D:\dev\RAGdemo\RAG-Anything\data\pipeline_parse\高速智能封边机维护保养手册_97eeb986\高速智能封边机维护保养手册\auto\images\d1d9997a8af61aead948cb0ce9e311dba69da0905a0afd806100dac28aab1aae.jpg
+页码：31
+脚注：导杆润滑清理
+关联正文：保养内容：导杆润滑清理 保养周期：每季度一次 3.13.3 抛光导杆保养
+
+[图片]
+图片路径：D:\dev\RAGdemo\RAG-Anything\data\pipeline_parse\高速智能封边机维护保养手册_97eeb986\高速智能封边机维护保养手册\auto\images\0128cf29ee2209c0633fe7a2ac2e8664160e560975468c3d39755f554893726e.jpg
+页码：31
+脚注：导杆润滑清理
+关联正文：保养步骤：清理圆形导杆上的灰尘，检查导杆上是否有润滑脂，各个圆形导轨及直线轴承上手动均匀涂抺润滑脂（润滑脂2#）。 保养内容：导杆润滑清理 保养周期：每季度一次
+
+--- chunk 18/23 | file_path='高速智能封边机维护保养手册.pdf' | chunk_id='chunk-005f118485fd766ceaaae19942b0c879' | len=319 ---
+保养步骤：清理固定板上方齿轮、齿条上的粉尘、碎屑，齿条上均匀涂抺润滑脂（润滑脂2#）。
+
+[图片]
+图片路径：D:\dev\RAGdemo\RAG-Anything\data\pipeline_parse\高速智能封边机维护保养手册_97eeb986\高速智能封边机维护保养手册\auto\images\144cef5f260166317795e73a2e52dfd5a3859083f70bf89d68bbfe8975bdc7ed.jpg
+页码：18
+脚注：齿条打润滑脂 2#
+关联正文：保养内容：齿条、齿轮打润滑脂 保养步骤：清理固定板上方齿轮、齿条上的粉尘、碎屑，齿条上均匀涂抺润滑脂（润滑脂2#）。 3.6.2 平切齿条、齿轮保养
+
+--- chunk 19/23 | file_path='高速智能封边机维护保养手册.pdf' | chunk_id='' | len=2743 ---
+[Table]
+<tr><td colspan="1" rowspan="1">序号</td><td colspan="1" rowspan="1">保养部位</td><td colspan="1" rowspan="1">保养项目</td><td colspan="1" rowspan="1">保养内容</td><td colspan="1" rowspan="1">保养周期</td></tr><tr><td colspan="1" rowspan="1">１</td><td colspan="1" rowspan="8">封边机整机床身</td><td colspan="1" rowspan="1">滤尘箱内刮丝</td><td colspan="1" rowspan="1">检查/清理</td><td colspan="1" rowspan="1">每天保养一次</td></tr><tr><td colspan="1" rowspan="1">2</td><td colspan="1" rowspan="1">清洗剂补充</td><td colspan="1" rowspan="1">检查/添加</td><td colspan="1" rowspan="1">缺少时添加</td></tr><tr><td colspan="1" rowspan="1">3</td><td colspan="1" rowspan="1">前挡料机构</td><td colspan="1" rowspan="1">检查润滑/清理</td><td colspan="1" rowspan="1">每季度保养一次</td></tr><tr><td colspan="1" rowspan="1">4</td><td colspan="1" rowspan="1">输送链条</td><td colspan="1" rowspan="1">检查润滑/清理</td><td colspan="1" rowspan="1">每季度保养一次</td></tr><tr><td colspan="1" rowspan="1">5</td><td colspan="1" rowspan="1">压梁电机</td><td colspan="1" rowspan="1">检查/清理</td><td colspan="1" rowspan="1">每年保养一次</td></tr><tr><td colspan="1" rowspan="1">6</td><td colspan="1" rowspan="1">辅助进料机构链条</td><td colspan="1" rowspan="1">检查润滑/清理</td><td colspan="1" rowspan="1">每季度保养一次</td></tr><tr><td colspan="1" rowspan="1">7</td><td colspan="1" rowspan="1">压梁丝杆</td><td colspan="1" rowspan="1">检查润滑/清理</td><td colspan="1" rowspan="1">每季度保养一次</td></tr><tr><td colspan="1" rowspan="1">8</td><td colspan="1" rowspan="1">进料靠板</td><td colspan="1" rowspan="1">检查润滑/清理</td><td colspan="1" rowspan="1">每半年保养一次</td></tr><tr><td colspan="1" rowspan="1">9</td><td colspan="1" rowspan="2">预铣部分</td><td colspan="1" rowspan="1">预铣刀</td><td colspan="1" rowspan="1">检查润滑/清理</td><td colspan="1" rowspan="1">每季度保养一次</td></tr><tr><td colspan="1" rowspan="1">10</td><td colspan="1" rowspan="1">预铣气缸</td><td colspan="1" rowspan="1">检查漏气/清理</td><td colspan="1" rowspan="1">每月保养一次</td></tr><tr><td colspan="1" rowspan="1">11</td><td colspan="1" rowspan="4">涂胶部分</td><td colspan="1" rowspan="1">涂胶轴清理</td><td colspan="1" rowspan="1">检查/清理</td><td colspan="1" rowspan="1">每周保养一次</td></tr><tr><td colspan="1" rowspan="1">12</td><td colspan="1" rowspan="1">胶水保护</td><td colspan="1" rowspan="1">检查/关胶门</td><td colspan="1" rowspan="1">每天保养一次</td></tr><tr><td colspan="1" rowspan="1">13</td><td colspan="1" rowspan="1">涂胶链条</td><td colspan="1" rowspan="1">检查润滑/清理</td><td colspan="1" rowspan="1">每月保养一次</td></tr><tr><td colspan="1" rowspan="1">14</td><td colspan="1" rowspan="1">涂胶电机</td><td colspan="1" rowspan="1">检查/清理</
+... [243 more chars]
+
+--- chunk 20/23 | file_path='高速智能封边机维护保养手册.pdf' | chunk_id='chunk-3c758a54e0bd678af9db861974aebc72' | len=2743 ---
+[Table]
+<tr><td colspan="1" rowspan="1">序号</td><td colspan="1" rowspan="1">保养部位</td><td colspan="1" rowspan="1">保养项目</td><td colspan="1" rowspan="1">保养内容</td><td colspan="1" rowspan="1">保养周期</td></tr><tr><td colspan="1" rowspan="1">１</td><td colspan="1" rowspan="8">封边机整机床身</td><td colspan="1" rowspan="1">滤尘箱内刮丝</td><td colspan="1" rowspan="1">检查/清理</td><td colspan="1" rowspan="1">每天保养一次</td></tr><tr><td colspan="1" rowspan="1">2</td><td colspan="1" rowspan="1">清洗剂补充</td><td colspan="1" rowspan="1">检查/添加</td><td colspan="1" rowspan="1">缺少时添加</td></tr><tr><td colspan="1" rowspan="1">3</td><td colspan="1" rowspan="1">前挡料机构</td><td colspan="1" rowspan="1">检查润滑/清理</td><td colspan="1" rowspan="1">每季度保养一次</td></tr><tr><td colspan="1" rowspan="1">4</td><td colspan="1" rowspan="1">输送链条</td><td colspan="1" rowspan="1">检查润滑/清理</td><td colspan="1" rowspan="1">每季度保养一次</td></tr><tr><td colspan="1" rowspan="1">5</td><td colspan="1" rowspan="1">压梁电机</td><td colspan="1" rowspan="1">检查/清理</td><td colspan="1" rowspan="1">每年保养一次</td></tr><tr><td colspan="1" rowspan="1">6</td><td colspan="1" rowspan="1">辅助进料机构链条</td><td colspan="1" rowspan="1">检查润滑/清理</td><td colspan="1" rowspan="1">每季度保养一次</td></tr><tr><td colspan="1" rowspan="1">7</td><td colspan="1" rowspan="1">压梁丝杆</td><td colspan="1" rowspan="1">检查润滑/清理</td><td colspan="1" rowspan="1">每季度保养一次</td></tr><tr><td colspan="1" rowspan="1">8</td><td colspan="1" rowspan="1">进料靠板</td><td colspan="1" rowspan="1">检查润滑/清理</td><td colspan="1" rowspan="1">每半年保养一次</td></tr><tr><td colspan="1" rowspan="1">9</td><td colspan="1" rowspan="2">预铣部分</td><td colspan="1" rowspan="1">预铣刀</td><td colspan="1" rowspan="1">检查润滑/清理</td><td colspan="1" rowspan="1">每季度保养一次</td></tr><tr><td colspan="1" rowspan="1">10</td><td colspan="1" rowspan="1">预铣气缸</td><td colspan="1" rowspan="1">检查漏气/清理</td><td colspan="1" rowspan="1">每月保养一次</td></tr><tr><td colspan="1" rowspan="1">11</td><td colspan="1" rowspan="4">涂胶部分</td><td colspan="1" rowspan="1">涂胶轴清理</td><td colspan="1" rowspan="1">检查/清理</td><td colspan="1" rowspan="1">每周保养一次</td></tr><tr><td colspan="1" rowspan="1">12</td><td colspan="1" rowspan="1">胶水保护</td><td colspan="1" rowspan="1">检查/关胶门</td><td colspan="1" rowspan="1">每天保养一次</td></tr><tr><td colspan="1" rowspan="1">13</td><td colspan="1" rowspan="1">涂胶链条</td><td colspan="1" rowspan="1">检查润滑/清理</td><td colspan="1" rowspan="1">每月保养一次</td></tr><tr><td colspan="1" rowspan="1">14</td><td colspan="1" rowspan="1">涂胶电机</td><td colspan="1" rowspan="1">检查/清理</
+... [243 more chars]
+
+--- chunk 21/23 | file_path='高速智能封边机维护保养手册.pdf' | chunk_id='chunk-e7966784e9f27c77e16bfb1b344e2d21' | len=11 ---
+3.3.2 涂胶轴保养
+
+--- chunk 22/23 | file_path='高速智能封边机维护保养手册.pdf' | chunk_id='chunk-dca7e44ce12c9cc2258b6535d06d0acf' | len=12 ---
+保养内容：涂胶轴检查清理
+
+--- chunk 23/23 | file_path='高速智能封边机维护保养手册.pdf' | chunk_id='chunk-b877c991230381a210badbeca7c52cd5' | len=11 ---
+3.3.4 涂胶轴保养

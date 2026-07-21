@@ -1,0 +1,20 @@
+query: 高速智能封边机维护保养手册适用于哪些产品型号？
+status: success
+message: Query processed successfully
+
+=== metadata ===
+  query_mode: mix
+  keywords: {'high_level': ['封边机维护保养', '手册适用范围', '智能设备保养'], 'low_level': ['高速智能封边机', '维护保养手册', '产品型号']}
+  processing_info: {'total_entities_found': 38, 'total_relations_found': 191, 'entities_after_truncation': 38, 'relations_after_truncation': 120, 'merged_chunks_count': 95, 'final_chunks_count': 1}
+
+=== counts: entities=38 relations=120 chunks=1 ===
+
+=== marker hits in merged chunk text (any chunk) ===
+  '本手册适用产品型号': True
+  'NB9-Smart': True
+  'NB10-Smart': True
+
+=== chunk previews (query_mode='mix') ===
+
+--- chunk 1/1 | file_path='高速智能封边机维护保养手册.pdf' | chunk_id='' | markers_in_chunk=['本手册适用产品型号', 'NB9-Smart', 'NB10-Smart'] | len=36 ---
+本手册适用产品型号: NB9-Smart NB10-Smart 等系列。
