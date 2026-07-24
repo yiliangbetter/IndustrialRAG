@@ -114,6 +114,10 @@ class TestRAGAnythingConfig:
             config.mineru_parse_method = "txt"
         assert config.parse_method == "txt"
 
+    def test_allow_embedding_only_ingestion_explicit(self):
+        config = RAGAnythingConfig(allow_embedding_only_ingestion=True)
+        assert config.allow_embedding_only_ingestion is True
+
 
 # ── Content Separation Tests ─────────────────────────────────────
 
