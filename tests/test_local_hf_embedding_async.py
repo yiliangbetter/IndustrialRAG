@@ -1,10 +1,47 @@
 import asyncio
+import os
 import time
 import types
 
 import pytest
 
-from raganything.local_hf_embedding import make_local_hf_embedding_func
+from raganything.local_hf_embedding import (
+    ensure_hf_home_from_repo_fallback,
+    make_local_hf_embedding_func,
+)
+
+
+def test_ensure_hf_home_from_repo_fallback_sets_existing_cache(tmp_path, monkeypatch):
+    monkeypatch.delenv("HF_HOME", raising=False)
+    cache = tmp_path / ".hf_cache"
+    cache.mkdir()
+
+    ensure_hf_home_from_repo_fallback(tmp_path)
+
+    assert os.environ["HF_HOME"] == str(cache)
+
+
+def test_ensure_hf_home_from_repo_fallback_preserves_existing_env(
+    tmp_path, monkeypatch
+):
+    monkeypatch.setenv("HF_HOME", "/already/set")
+    cache = tmp_path / ".hf_cache"
+    cache.mkdir()
+
+    ensure_hf_home_from_repo_fallback(tmp_path)
+
+    assert os.environ["HF_HOME"] == "/already/set"
+
+
+def test_ensure_hf_home_from_repo_fallback_noop_without_cache_dir(
+    tmp_path, monkeypatch
+):
+    monkeypatch.delenv("HF_HOME", raising=False)
+
+    ensure_hf_home_from_repo_fallback(tmp_path)
+    ensure_hf_home_from_repo_fallback(None)
+
+    assert "HF_HOME" not in os.environ
 
 
 @pytest.mark.asyncio
