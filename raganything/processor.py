@@ -1718,6 +1718,11 @@ class ProcessorMixin:
 
             # Step 2: Separate text and multimodal content
             text_content, multimodal_items = separate_content(content_list)
+            # MinerU v2 stores prose in title/paragraph/list blocks; separate_content
+            # only keeps legacy type=text, so recover plaintext before embedding-only
+            # insert to avoid marking the doc processed with zero chunks.
+            if self.config.allow_embedding_only_ingestion and not text_content.strip():
+                text_content = self._plaintext_from_mineru_blocks(content_list)
 
             if self.config.allow_embedding_only_ingestion:
                 if file_name is None:
@@ -2008,6 +2013,8 @@ class ProcessorMixin:
 
             # Step 2: Separate text and multimodal content
             text_content, multimodal_items = separate_content(content_list)
+            if not text_content.strip():
+                text_content = self._plaintext_from_mineru_blocks(content_list)
 
             # Step 2.5: Set content source for context extraction in multimodal processing
             if hasattr(self, "set_content_source_for_context") and multimodal_items:

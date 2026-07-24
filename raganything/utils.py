@@ -221,6 +221,9 @@ async def insert_text_content_with_multimodal_content(
         logger.info(
             "If the error is caused by the ainsert function not having a multimodal content parameter, please update the raganything branch of lightrag"
         )
+        # Propagate so callers can mark DocStatus.FAILED instead of reporting success
+        # after a failed insert left the document unindexed.
+        raise
 
     logger.info("Text content insertion complete")
 
