@@ -1,4 +1,5 @@
 import asyncio
+import threading
 import time
 import types
 
@@ -63,3 +64,57 @@ async def test_hf_embed_does_not_block_event_loop(monkeypatch):
     # and ticker does not advance during embedding.
     assert tick_count >= 5
     assert result.shape == (2, 3)
+
+
+@pytest.mark.asyncio
+async def test_hf_embed_serializes_model_initialization_and_encode(monkeypatch):
+    state = {"constructed": 0, "active_encodes": 0, "max_active_encodes": 0}
+    state_lock = threading.Lock()
+
+    class FakeSentenceTransformer:
+        def __init__(self, model_id, **kwargs):
+            with state_lock:
+                state["constructed"] += 1
+            time.sleep(0.05)
+
+        def encode(self, texts, normalize_embeddings=True, convert_to_numpy=True):
+            with state_lock:
+                state["active_encodes"] += 1
+                state["max_active_encodes"] = max(
+                    state["max_active_encodes"], state["active_encodes"]
+                )
+            time.sleep(0.05)
+            with state_lock:
+                state["active_encodes"] -= 1
+            return [[1.0, 2.0, 3.0] for _ in texts]
+
+    class FakeEmbeddingFunc:
+        def __init__(self, embedding_dim, max_token_size, func):
+            self.embedding_dim = embedding_dim
+            self.max_token_size = max_token_size
+            self.func = func
+
+    fake_sentence_transformers = types.ModuleType("sentence_transformers")
+    fake_sentence_transformers.SentenceTransformer = FakeSentenceTransformer
+    monkeypatch.setitem(
+        __import__("sys").modules, "sentence_transformers", fake_sentence_transformers
+    )
+
+    fake_lightrag = types.ModuleType("lightrag")
+    fake_lightrag_utils = types.ModuleType("lightrag.utils")
+    fake_lightrag_utils.EmbeddingFunc = FakeEmbeddingFunc
+    monkeypatch.setitem(__import__("sys").modules, "lightrag", fake_lightrag)
+    monkeypatch.setitem(
+        __import__("sys").modules, "lightrag.utils", fake_lightrag_utils
+    )
+
+    embedding = make_local_hf_embedding_func(
+        embedding_dim=3, embedding_model="fake/model"
+    )
+    results = await asyncio.gather(
+        *(embedding.func([str(index)]) for index in range(4))
+    )
+
+    assert state["constructed"] == 1
+    assert state["max_active_encodes"] == 1
+    assert all(result.shape == (1, 3) for result in results)
