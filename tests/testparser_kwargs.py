@@ -64,6 +64,53 @@ def test_mineru_env_propagation(
     assert kwargs["env"]["PATH"] == os.environ["PATH"]
 
 
+def test_mineru_merges_loopback_hosts_into_no_proxy(mineru_parser, dummy_path):
+    """Nested mineru-api binds to loopback; proxies must not intercept /health."""
+    mock_process = MagicMock()
+    mock_process.poll.return_value = 0
+    mock_process.wait.return_value = 0
+    mock_process.stdout.readline.return_value = ""
+    mock_process.stderr.readline.return_value = ""
+
+    custom_env = {
+        "NO_PROXY": "example.com, localhost",
+        "no_proxy": "internal.test,example.com",
+    }
+
+    with (
+        patch.dict(os.environ, {"PATH": "/test/bin"}, clear=True),
+        patch("subprocess.Popen", return_value=mock_process) as mock_popen,
+    ):
+        mineru_parser._run_mineru_command(dummy_path, "out", env=custom_env)
+
+    subprocess_env = mock_popen.call_args.kwargs["env"]
+    expected = "example.com,localhost,internal.test,127.0.0.1,::1"
+    assert subprocess_env["NO_PROXY"] == expected
+    assert subprocess_env["no_proxy"] == expected
+
+
+def test_mineru_timeout_kills_process_and_raises(mineru_parser, dummy_path):
+    """Hung MinerU downloads must kill the subprocess instead of hanging forever."""
+    mock_process = MagicMock()
+    mock_process.poll.return_value = None
+    stdout_thread = MagicMock()
+    stderr_thread = MagicMock()
+
+    with (
+        patch("subprocess.Popen", return_value=mock_process),
+        patch("threading.Thread", side_effect=[stdout_thread, stderr_thread]),
+        patch("raganything.parser.time.monotonic", side_effect=[10.0, 12.0]),
+        pytest.raises(RuntimeError, match="did not finish within 1s") as exc_info,
+    ):
+        mineru_parser._run_mineru_command(dummy_path, "out", timeout=1)
+
+    assert isinstance(exc_info.value.__cause__, TimeoutError)
+    mock_process.kill.assert_called_once_with()
+    mock_process.wait.assert_called_once_with()
+    stdout_thread.join.assert_called_once_with(timeout=1)
+    stderr_thread.join.assert_called_once_with(timeout=1)
+
+
 @patch("subprocess.run")
 def test_docling_env_propagation(mock_run, docling_parser, dummy_path):
     mock_run.return_value = MagicMock(returncode=0, stdout="")
