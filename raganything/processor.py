@@ -1745,6 +1745,11 @@ class ProcessorMixin:
 
             # Step 2: Separate text and multimodal content
             text_content, multimodal_items = separate_content(content_list)
+            # MinerU v2 stores prose in title/paragraph/list blocks; separate_content
+            # only keeps legacy type=text, so recover plaintext before insert to avoid
+            # empty indexing or fail-closed rejection of otherwise valid documents.
+            if not text_content.strip():
+                text_content = self._plaintext_from_mineru_blocks(content_list)
 
             if self.config.allow_embedding_only_ingestion:
                 if file_name is None:
@@ -2037,6 +2042,8 @@ class ProcessorMixin:
 
             # Step 2: Separate text and multimodal content
             text_content, multimodal_items = separate_content(content_list)
+            if not text_content.strip():
+                text_content = self._plaintext_from_mineru_blocks(content_list)
 
             if not text_content.strip() and not multimodal_items:
                 error_message = (

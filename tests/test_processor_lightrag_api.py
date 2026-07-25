@@ -217,3 +217,44 @@ async def test_insert_text_content_with_multimodal_content_reraises():
             file_paths="a.pdf",
             ids="doc-1",
         )
+
+
+@pytest.mark.asyncio
+async def test_lightrag_api_recovers_mineru_v2_plaintext_when_no_type_text(
+    monkeypatch,
+):
+    processor = _make_lightrag_api_processor(monkeypatch, [])
+
+    async def fake_parse_document(*args, **kwargs):
+        # MinerU v2: prose lives in paragraph/title, not type=text.
+        return (
+            [
+                {
+                    "type": "title",
+                    "content": {
+                        "title_content": [{"type": "text", "content": "Safety"}]
+                    },
+                },
+                {
+                    "type": "paragraph",
+                    "content": {
+                        "paragraph_content": [
+                            {"type": "text", "content": "Wear protective gloves."}
+                        ]
+                    },
+                },
+            ],
+            "doc-content-v2",
+        )
+
+    processor.parse_document = fake_parse_document
+
+    result = await processor.process_document_complete_lightrag_api("sample.pdf")
+
+    assert result is True
+    assert len(processor.lightrag.ainsert_calls) == 1
+    inserted = processor.lightrag.ainsert_calls[0].get("input")
+    assert "Safety" in inserted
+    assert "Wear protective gloves." in inserted
+    doc_status = processor.lightrag.doc_status.records["doc-pre-sample.pdf"]
+    assert doc_status["status"] == DocStatus.PROCESSED
