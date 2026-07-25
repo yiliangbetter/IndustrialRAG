@@ -51,13 +51,17 @@ class QueryMixin:
                 if isinstance(item, dict):
                     normalized_item = {}
                     for key, value in item.items():
-                        # For file paths, use basename to make cache more portable
+                        # Use resolved absolute paths so distinct files that share a
+                        # basename do not collide in the multimodal query cache.
                         if key in [
                             "img_path",
                             "image_path",
                             "file_path",
                         ] and isinstance(value, str):
-                            normalized_item[key] = Path(value).name
+                            try:
+                                normalized_item[key] = str(Path(value).resolve())
+                            except Exception:
+                                normalized_item[key] = value
                         # For large content, create a hash instead of storing directly
                         elif (
                             key in ["table_data", "table_body"]

@@ -189,6 +189,19 @@ class Parser:
         return Path(base_dir) / f"{stem}_{path_hash}"
 
     @classmethod
+    def _conversion_output_dir(
+        cls,
+        input_path: Union[str, Path],
+        output_dir: Optional[str],
+        default_dir_name: str,
+    ) -> Path:
+        """Choose a collision-free directory for parser conversion intermediates."""
+        input_path = Path(input_path)
+        if output_dir:
+            return cls._unique_output_dir(output_dir, input_path)
+        return input_path.parent / default_dir_name
+
+    @classmethod
     def convert_office_to_pdf(
         cls, doc_path: Union[str, Path], output_dir: Optional[str] = None
     ) -> Path:
@@ -211,12 +224,10 @@ class Parser:
 
             name_without_suff = doc_path.stem
 
-            # Prepare output directory
-            if output_dir:
-                base_output_dir = Path(output_dir)
-            else:
-                base_output_dir = doc_path.parent / "libreoffice_output"
-
+            # Prepare output directory (path-hashed when shared output_dir is set)
+            base_output_dir = cls._conversion_output_dir(
+                doc_path, output_dir, "libreoffice_output"
+            )
             base_output_dir.mkdir(parents=True, exist_ok=True)
 
             # Create temporary directory for PDF conversion
@@ -389,12 +400,10 @@ class Parser:
                         f"Could not decode text file {text_path.name} with any supported encoding"
                     )
 
-            # Prepare output directory
-            if output_dir:
-                base_output_dir = Path(output_dir)
-            else:
-                base_output_dir = text_path.parent / "reportlab_output"
-
+            # Prepare output directory (path-hashed when shared output_dir is set)
+            base_output_dir = cls._conversion_output_dir(
+                text_path, output_dir, "reportlab_output"
+            )
             base_output_dir.mkdir(parents=True, exist_ok=True)
             pdf_path = base_output_dir / f"{text_path.stem}.pdf"
 

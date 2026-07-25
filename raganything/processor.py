@@ -221,8 +221,9 @@ class ProcessorMixin:
     ) -> None:
         """Insert text chunks directly into vector/text storages without LLM extraction."""
         if not text_content.strip():
-            await self._mark_multimodal_processing_complete(doc_id)
-            return
+            raise ValueError(
+                f"No text content extracted for embedding-only ingestion: {file_ref}"
+            )
 
         raw_chunks = [
             chunk.strip() for chunk in text_content.split("\n\n") if chunk.strip()
@@ -555,16 +556,30 @@ class ProcessorMixin:
                 self.logger.info(
                     "Detected Office or HTML document, using parser for Office/HTML..."
                 )
-                office_parse_kwargs = {k: v for k, v in kwargs.items() if k != "method"}
-                effective_method = parse_method or self.config.parse_method
-                if effective_method is not None:
-                    office_parse_kwargs["method"] = effective_method
-                content_list = await asyncio.to_thread(
-                    doc_parser.parse_office_doc,
-                    doc_path=file_path,
-                    output_dir=output_dir,
-                    **office_parse_kwargs,
-                )
+                html_exts = {".html", ".htm", ".xhtml"}
+                if ext in html_exts and hasattr(doc_parser, "parse_html"):
+                    html_parse_kwargs = {
+                        k: v for k, v in kwargs.items() if k != "method"
+                    }
+                    content_list = await asyncio.to_thread(
+                        doc_parser.parse_html,
+                        html_path=file_path,
+                        output_dir=output_dir,
+                        **html_parse_kwargs,
+                    )
+                else:
+                    office_parse_kwargs = {
+                        k: v for k, v in kwargs.items() if k != "method"
+                    }
+                    effective_method = parse_method or self.config.parse_method
+                    if effective_method is not None:
+                        office_parse_kwargs["method"] = effective_method
+                    content_list = await asyncio.to_thread(
+                        doc_parser.parse_office_doc,
+                        doc_path=file_path,
+                        output_dir=output_dir,
+                        **office_parse_kwargs,
+                    )
             else:
                 # For other or unknown formats, use generic parser
                 self.logger.info(
@@ -601,28 +616,40 @@ class ProcessorMixin:
                 )
             raise
 
-        msg = f"Parsing {file_path} complete! Extracted {len(content_list)} content blocks"
+        normalized_content_list = self._normalize_nested_content_list(content_list)
+        msg = (
+            f"Parsing {file_path} complete! Extracted "
+            f"{len(normalized_content_list)} content blocks"
+        )
         self.logger.info(msg)
 
-        if len(content_list) == 0:
+        if len(normalized_content_list) == 0:
             raise ValueError("Parsing failed: No content was extracted")
 
-        # Generate doc_id based on content
-        doc_id = self._generate_content_based_doc_id(content_list)
+        # Generate doc_id from normalized blocks so nested MinerU wrappers
+        # do not collapse unrelated documents onto the empty-content hash.
+        doc_id = self._generate_content_based_doc_id(normalized_content_list)
 
         # Store result in cache
         await self._store_cached_result(
-            cache_key, content_list, doc_id, file_path, parse_method, **kwargs
+            cache_key,
+            normalized_content_list,
+            doc_id,
+            file_path,
+            parse_method,
+            **kwargs,
         )
 
         # Display content statistics if requested
         if display_stats:
             self.logger.info("\nContent Information:")
-            self.logger.info(f"* Total blocks in content_list: {len(content_list)}")
+            self.logger.info(
+                f"* Total blocks in content_list: {len(normalized_content_list)}"
+            )
 
             # Count elements by type
             block_types: Dict[str, int] = {}
-            for block in content_list:
+            for block in normalized_content_list:
                 if isinstance(block, dict):
                     block_type = block.get("type", "unknown")
                     if isinstance(block_type, str):
@@ -637,12 +664,12 @@ class ProcessorMixin:
             callback_manager.dispatch(
                 "on_parse_complete",
                 file_path=callback_file,
-                content_blocks=len(content_list),
+                content_blocks=len(normalized_content_list),
                 doc_id=doc_id,
                 duration_seconds=duration,
             )
 
-        return content_list, doc_id
+        return normalized_content_list, doc_id
 
     async def _process_multimodal_content(
         self,
@@ -1985,6 +2012,7 @@ class ProcessorMixin:
                         }
                     }
                 )
+                await self.lightrag.doc_status.index_done_callback()
                 self.logger.info(
                     f"Error processing document {file_path}: MineruExecutionError"
                 )
@@ -1999,6 +2027,7 @@ class ProcessorMixin:
                         }
                     }
                 )
+                await self.lightrag.doc_status.index_done_callback()
                 self.logger.info(f"Error processing document {file_path}: {str(e)}")
                 return False
 
@@ -2009,6 +2038,25 @@ class ProcessorMixin:
             # Step 2: Separate text and multimodal content
             text_content, multimodal_items = separate_content(content_list)
 
+            if not text_content.strip() and not multimodal_items:
+                error_message = (
+                    f"No text or multimodal content extracted from {file_path}"
+                )
+                await self.lightrag.doc_status.upsert(
+                    {
+                        doc_pre_id: {
+                            **current_doc_status,
+                            "status": DocStatus.FAILED,
+                            "error_msg": error_message,
+                        }
+                    }
+                )
+                await self.lightrag.doc_status.index_done_callback()
+                self.logger.info(
+                    f"Error processing document {file_path}: {error_message}"
+                )
+                return False
+
             # Step 2.5: Set content source for context extraction in multimodal processing
             if hasattr(self, "set_content_source_for_context") and multimodal_items:
                 self.logger.info(
@@ -2018,18 +2066,55 @@ class ProcessorMixin:
                     content_list, self.config.content_format
                 )
 
-            # Step 3: Insert pure text content and multimodal content with all parameters
-            if text_content.strip():
-                await insert_text_content_with_multimodal_content(
-                    self.lightrag,
-                    input=text_content,
-                    multimodal_content=multimodal_items,
-                    file_paths=file_name,
-                    split_by_character=split_by_character,
-                    split_by_character_only=split_by_character_only,
-                    ids=doc_id,
-                    scheme_name=scheme_name,
+            # Step 3: Insert pure text content and multimodal content with all parameters.
+            # Require non-empty text for ainsert; multimodal-only docs are not silently
+            # acknowledged as success (LightRAG ainsert is text-primary).
+            if not text_content.strip():
+                error_message = (
+                    f"No text content extracted from {file_path} "
+                    f"({len(multimodal_items)} multimodal item(s) present but not inserted)"
                 )
+                await self.lightrag.doc_status.upsert(
+                    {
+                        doc_pre_id: {
+                            **current_doc_status,
+                            "status": DocStatus.FAILED,
+                            "error_msg": error_message,
+                        }
+                    }
+                )
+                await self.lightrag.doc_status.index_done_callback()
+                self.logger.info(
+                    f"Error processing document {file_path}: {error_message}"
+                )
+                return False
+
+            await insert_text_content_with_multimodal_content(
+                self.lightrag,
+                input=text_content,
+                multimodal_content=multimodal_items,
+                file_paths=file_name,
+                split_by_character=split_by_character,
+                split_by_character_only=split_by_character_only,
+                ids=doc_id,
+                scheme_name=scheme_name,
+            )
+
+            await self.lightrag.doc_status.upsert(
+                {
+                    doc_pre_id: {
+                        **current_doc_status,
+                        "status": DocStatus.PROCESSED,
+                        "content": text_content[:2000],
+                        "error_msg": "",
+                        "content_summary": text_content[:500],
+                        "content_length": len(text_content),
+                        "updated_at": time.strftime("%Y-%m-%dT%H:%M:%S+00:00"),
+                        "file_path": file_name,
+                    }
+                }
+            )
+            await self.lightrag.doc_status.index_done_callback()
 
             self.logger.info(f"Document {file_path} processing completed successfully")
             return True
@@ -2185,6 +2270,11 @@ class ProcessorMixin:
                 if isinstance(candidate, str) and candidate.strip():
                     text_parts.append(candidate.strip())
             text_content = "\n\n".join(text_parts)
+
+        if not text_content.strip() and not multimodal_items:
+            raise ValueError(
+                f"No text or multimodal content to ingest for: {file_path}"
+            )
 
         # Step 1.5: Set content source for context extraction in multimodal processing
         if hasattr(self, "set_content_source_for_context") and multimodal_items:
