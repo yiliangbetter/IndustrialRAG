@@ -81,4 +81,8 @@ memory-bank/
 # AI
 .claude/
 .cursor/
+# Keep PR-split working guide rule tracked (agents must follow docs/PR拆分合入主线操作说明.md)
+!.cursor/rules/
+.cursor/rules/*
+!.cursor/rules/pr-split-merge-guide.mdc
 CLAUDE.md

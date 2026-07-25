@@ -1,0 +1,27 @@
+---
+description: PR 拆分合入主线工作指导 — 开 PR / 改分支前必读
+alwaysApply: true
+---
+
+# PR 拆分合入（工作指导）
+
+合入 `main`、开/改 PR、从 `lhq-rag-dev` 拣文件前，**先读并遵循**：
+
+[`docs/PR拆分合入主线操作说明.md`](docs/PR拆分合入主线操作说明.md)
+
+## 硬性边界（摘要）
+
+| PR | 分支 | 内容 | 顺序 |
+|----|------|------|------|
+| PR-A | `pr-a-core-engine` | 核心引擎（`raganything/`、pipeline、配图核心、env 模板） | 先合 |
+| PR-B | `pr-b-web-ui` | Web、澄清接线、**客户端打包**（`client_*`、`pack_client*`、`web/`） | 依赖 A |
+| PR-C | `pr-c-docs` | 文档 | 可与 A 并行 |
+| PR-D | `pr-d-dev-tooling` | bench/replay/eval 等工具脚本 | 依赖 B |
+
+## 禁止
+
+- 不要把 PR-B 的打包/Web 脚本塞进 PR-A（#47）
+- 不要删除或在「清理误暂存 docs」时丢掉 `docs/PR拆分合入主线操作说明.md`
+- 改某个 GitHub PR 时必须在**对应分支**上改并 push，不要只改 `lhq-rag-dev` 却期望 PR 更新
+
+详细文件清单与 Git 步骤以文档正文为准。
