@@ -729,11 +729,13 @@ class BaseModalProcessor:
             logger.error(f"Chunk {chunk_id} not found")
             return
 
-        # Create text chunk for vector database
+        # Re-upsert for retrieval using the same document id already stored on
+        # the chunk. Using chunk_id here would overwrite the correct full_doc_id
+        # written by _create_entity_and_chunk and break doc association.
         chunk_vdb_data = {
             chunk_id: {
                 "content": chunk_data["content"],
-                "full_doc_id": chunk_id,
+                "full_doc_id": chunk_data.get("full_doc_id", chunk_id),
                 "tokens": chunk_data["tokens"],
                 "chunk_order_index": chunk_data["chunk_order_index"],
                 "file_path": chunk_data["file_path"],
@@ -1010,15 +1012,11 @@ class ImageModalProcessor(BaseModalProcessor):
 
         except Exception as e:
             logger.error(f"Error processing image content: {e}")
-            # Fallback processing
-            fallback_entity = {
-                "entity_name": entity_name
-                if entity_name
-                else f"image_{compute_mdhash_id(str(modal_content))}",
-                "entity_type": "image",
-                "summary": f"Image content: {str(modal_content)[:100]}",
-            }
-            return str(modal_content), fallback_entity
+            # Must not return a 2-tuple: callers unpack
+            # (caption, entity_info, chunk_results). A short-tuple fallback
+            # raised ValueError, skipped the item, and previously let the
+            # document be marked multimodal_processed anyway.
+            raise
 
     def _parse_response(
         self, response: str, entity_name: str = None
@@ -1205,15 +1203,8 @@ class TableModalProcessor(BaseModalProcessor):
 
         except Exception as e:
             logger.error(f"Error processing table content: {e}")
-            # Fallback processing
-            fallback_entity = {
-                "entity_name": entity_name
-                if entity_name
-                else f"table_{compute_mdhash_id(str(modal_content))}",
-                "entity_type": "table",
-                "summary": f"Table content: {str(modal_content)[:100]}",
-            }
-            return str(modal_content), fallback_entity
+            # Must not return a 2-tuple: callers unpack three values.
+            raise
 
     def _parse_table_response(
         self, response: str, entity_name: str = None
@@ -1390,15 +1381,8 @@ class EquationModalProcessor(BaseModalProcessor):
 
         except Exception as e:
             logger.error(f"Error processing equation content: {e}")
-            # Fallback processing
-            fallback_entity = {
-                "entity_name": entity_name
-                if entity_name
-                else f"equation_{compute_mdhash_id(str(modal_content))}",
-                "entity_type": "equation",
-                "summary": f"Equation content: {str(modal_content)[:100]}",
-            }
-            return str(modal_content), fallback_entity
+            # Must not return a 2-tuple: callers unpack three values.
+            raise
 
     def _parse_equation_response(
         self, response: str, entity_name: str = None
@@ -1553,15 +1537,8 @@ class GenericModalProcessor(BaseModalProcessor):
 
         except Exception as e:
             logger.error(f"Error processing {content_type} content: {e}")
-            # Fallback processing
-            fallback_entity = {
-                "entity_name": entity_name
-                if entity_name
-                else f"{content_type}_{compute_mdhash_id(str(modal_content))}",
-                "entity_type": content_type,
-                "summary": f"{content_type} content: {str(modal_content)[:100]}",
-            }
-            return str(modal_content), fallback_entity
+            # Must not return a 2-tuple: callers unpack three values.
+            raise
 
     def _parse_generic_response(
         self, response: str, entity_name: str = None, content_type: str = "content"

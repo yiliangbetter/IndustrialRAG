@@ -6,8 +6,12 @@ with progress reporting and error handling.
 """
 
 import asyncio
+import functools
+import hashlib
 import logging
-from concurrent.futures import ThreadPoolExecutor, as_completed
+import math
+from concurrent.futures import ThreadPoolExecutor, TimeoutError as FuturesTimeoutError
+from concurrent.futures import as_completed
 from pathlib import Path
 from typing import Dict, List, Optional, Tuple
 from dataclasses import dataclass
@@ -173,9 +177,11 @@ class BatchParser:
         try:
             start_time = time.time()
 
-            # Create file-specific output directory
-            file_name = Path(file_path).stem
-            file_output_dir = Path(output_dir) / file_name
+            # Unique per absolute path so same-stem files (a/manual.pdf,
+            # b/manual.pdf) cannot clobber each other under one output_dir.
+            resolved = Path(file_path).resolve()
+            path_hash = hashlib.md5(str(resolved).encode()).hexdigest()[:8]
+            file_output_dir = Path(output_dir) / f"{resolved.stem}_{path_hash}"
             file_output_dir.mkdir(parents=True, exist_ok=True)
 
             # Parse the document
@@ -274,6 +280,16 @@ class BatchParser:
                 unit="file",
             )
 
+        future_to_file = {}
+        accounted: set[str] = set()
+        # as_completed(timeout=) is wall-clock for the whole iterator, not per
+        # file. Scale by waves of workers so timeout_per_file stays meaningful
+        # for multi-file batches without silently truncating completed work.
+        worker_count = max(1, self.max_workers)
+        batch_timeout = self.timeout_per_file * max(
+            1, math.ceil(len(supported_files) / worker_count)
+        )
+
         try:
             with ThreadPoolExecutor(max_workers=self.max_workers) as executor:
                 # Submit all tasks
@@ -289,10 +305,9 @@ class BatchParser:
                 }
 
                 # Process completed tasks
-                for future in as_completed(
-                    future_to_file, timeout=self.timeout_per_file
-                ):
+                for future in as_completed(future_to_file, timeout=batch_timeout):
                     success, file_path, error_msg = future.result()
+                    accounted.add(file_path)
 
                     if success:
                         successful_files.append(file_path)
@@ -304,15 +319,37 @@ class BatchParser:
                         pbar.update(1)
 
         except Exception as e:
+            timeout_hit = isinstance(e, (TimeoutError, FuturesTimeoutError))
             self.logger.error(f"Batch processing failed: {str(e)}")
-            # Mark remaining files as failed
-            for future in future_to_file:
-                if not future.done():
-                    file_path = future_to_file[future]
+            # Harvest futures that finished but were not yet consumed, then
+            # mark only still-running work as failed. Previously completed
+            # results were dropped from both success and fail lists.
+            for future, file_path in future_to_file.items():
+                if file_path in accounted:
+                    continue
+                if future.done():
+                    try:
+                        success, done_path, error_msg = future.result()
+                        accounted.add(done_path)
+                        if success:
+                            successful_files.append(done_path)
+                        else:
+                            failed_files.append(done_path)
+                            errors[done_path] = error_msg
+                    except Exception as result_err:
+                        accounted.add(file_path)
+                        failed_files.append(file_path)
+                        errors[file_path] = str(result_err)
+                else:
+                    accounted.add(file_path)
                     failed_files.append(file_path)
-                    errors[file_path] = f"Processing interrupted: {str(e)}"
-                    if pbar:
-                        pbar.update(1)
+                    errors[file_path] = (
+                        f"Timed out after {batch_timeout}s batch budget"
+                        if timeout_hit
+                        else f"Processing interrupted: {str(e)}"
+                    )
+                if pbar:
+                    pbar.update(1)
 
         finally:
             if pbar:
@@ -359,17 +396,20 @@ class BatchParser:
         Returns:
             BatchProcessingResult with processing statistics
         """
-        # Run the sync version in a thread pool
+        # run_in_executor only accepts *args positional callables; kwargs must
+        # be bound (otherwise TypeError: unexpected keyword argument ...).
         loop = asyncio.get_event_loop()
         return await loop.run_in_executor(
             None,
-            self.process_batch,
-            file_paths,
-            output_dir,
-            parse_method,
-            recursive,
-            dry_run,
-            **kwargs,
+            functools.partial(
+                self.process_batch,
+                file_paths,
+                output_dir,
+                parse_method,
+                recursive,
+                dry_run,
+                **kwargs,
+            ),
         )
 
 

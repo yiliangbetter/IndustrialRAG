@@ -414,7 +414,7 @@ async def async_main() -> None:
     )
     parse_extra = _mineru_parse_kwargs(config.parser)
 
-    await _ingest_folder(
+    ok, fail = await _ingest_folder(
         rag,
         config,
         logger,
@@ -427,6 +427,10 @@ async def async_main() -> None:
         skip_multimodal=args.skip_multimodal,
     )
     await rag.finalize_storages()
+
+    if fail:
+        # Fail closed so CI / automation cannot treat partial ingest as success.
+        raise SystemExit(1)
 
     if args.ingest_only:
         return
