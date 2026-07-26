@@ -996,23 +996,47 @@ class MineruParser(Parser):
 
         file_stem_subdir = output_dir / file_stem
         if file_stem_subdir.is_dir():
-            # Scan for actual output subdirectory instead of assuming method name
+            # Prefer the requested method/backend subdirectory when present.
+            # Blind iterdir() first-match is unsafe: re-parsing the same file with a
+            # different method leaves prior outputs (auto/, ocr/, vlm/, ...) and can
+            # silently return stale content from the wrong run.
             found = False
-            for subdir in file_stem_subdir.iterdir():
-                if not subdir.is_dir():
-                    continue
-                # Check if this subdirectory contains the expected JSON output file
-                candidate_json = subdir / f"{file_stem}_content_list.json"
-                if candidate_json.exists():
-                    # Found the actual output directory
+            preferred_subdir = file_stem_subdir / method
+            preferred_json = preferred_subdir / f"{file_stem}_content_list.json"
+            if preferred_json.exists():
+                md_file = preferred_subdir / f"{file_stem}.md"
+                json_file = preferred_json
+                images_base_dir = preferred_subdir
+                found = True
+                cls.logger.info(
+                    f"Found MinerU output in requested subdirectory: {method}"
+                )
+            else:
+                # Fall back to newest matching subdirectory by mtime when the
+                # requested method dir is missing (backend name remaps, etc.).
+                candidates = []
+                for subdir in file_stem_subdir.iterdir():
+                    if not subdir.is_dir():
+                        continue
+                    candidate_json = subdir / f"{file_stem}_content_list.json"
+                    if candidate_json.exists():
+                        try:
+                            mtime = candidate_json.stat().st_mtime
+                        except OSError:
+                            mtime = 0
+                        candidates.append((mtime, subdir, candidate_json))
+
+                if candidates:
+                    candidates.sort(key=lambda item: item[0], reverse=True)
+                    _, subdir, candidate_json = candidates[0]
                     md_file = subdir / f"{file_stem}.md"
                     json_file = candidate_json
                     images_base_dir = subdir
                     found = True
                     cls.logger.info(
-                        f"Found MinerU output in subdirectory: {subdir.name}"
+                        f"Found MinerU output in subdirectory: {subdir.name} "
+                        f"(requested method={method!r} missing; using newest by mtime)"
                     )
-                    break
 
             # Fallback to method-based path if scanning didn't find output
             if not found:
