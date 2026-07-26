@@ -15,10 +15,14 @@ Usage:
     pytest tests/testparser_kwargs.py
 """
 
-import pytest
-from unittest.mock import patch, MagicMock
+import hashlib
 import os
-from raganything.parser import MineruParser, DoclingParser
+from pathlib import Path
+from unittest.mock import MagicMock, patch
+
+import pytest
+
+from raganything.parser import DoclingParser, MineruParser
 
 
 @pytest.fixture
@@ -77,6 +81,60 @@ def test_docling_env_propagation(mock_run, docling_parser, dummy_path):
     assert "env" in kwargs
     assert kwargs["env"]["DOCLING_VAR"] == "docling_value"
     assert kwargs["env"]["PATH"] == os.environ["PATH"]
+
+
+def test_unique_output_dir_isolates_same_named_files(tmp_path):
+    """Same basename under different parents must not share parser output dirs (#51)."""
+    file_a = tmp_path / "dir1" / "paper.pdf"
+    file_b = tmp_path / "dir2" / "paper.pdf"
+    file_a.parent.mkdir()
+    file_b.parent.mkdir()
+    file_a.write_bytes(b"%PDF")
+    file_b.write_bytes(b"%PDF")
+    base = tmp_path / "out"
+
+    out_a = MineruParser._unique_output_dir(base, file_a)
+    out_b = MineruParser._unique_output_dir(base, file_b)
+
+    assert out_a != out_b
+    assert out_a.parent == base
+    assert out_b.parent == base
+    hash_a = hashlib.md5(str(file_a.resolve()).encode()).hexdigest()[:8]
+    hash_b = hashlib.md5(str(file_b.resolve()).encode()).hexdigest()[:8]
+    assert out_a.name == f"paper_{hash_a}"
+    assert out_b.name == f"paper_{hash_b}"
+
+
+def test_macos_libreoffice_app_is_preferred(monkeypatch, tmp_path):
+    doc_path = tmp_path / "sample.docx"
+    doc_path.write_text("office content")
+    output_dir = tmp_path / "output"
+    mac_soffice = "/Applications/LibreOffice.app/Contents/MacOS/soffice"
+    original_is_file = Path.is_file
+
+    monkeypatch.setattr("raganything.parser.sys.platform", "darwin")
+    monkeypatch.setattr(
+        Path,
+        "is_file",
+        lambda path: str(path) == mac_soffice or original_is_file(path),
+    )
+
+    commands = []
+
+    def fake_run(command, **kwargs):
+        commands.append(command)
+        generated_pdf = Path(command[command.index("--outdir") + 1]) / "sample.pdf"
+        generated_pdf.write_bytes(b"%PDF-1.4\n" + b"0" * 128)
+        return MagicMock(returncode=0, stderr="")
+
+    monkeypatch.setattr("raganything.parser.subprocess.run", fake_run)
+
+    result = MineruParser.convert_office_to_pdf(doc_path, str(output_dir))
+
+    assert commands[0][0] == mac_soffice
+    assert len(commands) == 1
+    assert result == output_dir / "sample.pdf"
+    assert result.stat().st_size > 100
 
 
 def test_mineru_unknown_kwargs(mineru_parser, dummy_path):
