@@ -1,14 +1,8 @@
 from .raganything import RAGAnything as RAGAnything
 from .config import RAGAnythingConfig as RAGAnythingConfig
-from .naive_relevance import (
-    is_naive_relevance_enabled as is_naive_relevance_enabled,
-    score_naive_relevance as score_naive_relevance,
-    probe_chunk_vector_score as probe_chunk_vector_score,
-    primary_relevance_score as primary_relevance_score,
-    format_relevance_report as format_relevance_report,
-)
 from .clarify_gate import (
     evaluate_clarify_gate as evaluate_clarify_gate,
+    finalize_clarify_bypass_consumption as finalize_clarify_bypass_consumption,
     is_clarify_gate_enabled as is_clarify_gate_enabled,
     probe_llm_retrieval as probe_llm_retrieval,
     ClarifyBypass as ClarifyBypass,
@@ -79,12 +73,8 @@ __all__ = [
     "RAGAnything",
     "RAGAnythingConfig",
     "Parser",
-    "is_naive_relevance_enabled",
-    "score_naive_relevance",
-    "probe_chunk_vector_score",
-    "primary_relevance_score",
-    "format_relevance_report",
     "evaluate_clarify_gate",
+    "finalize_clarify_bypass_consumption",
     "is_clarify_gate_enabled",
     "probe_llm_retrieval",
     "ClarifyBypass",
