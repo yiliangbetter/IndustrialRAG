@@ -710,6 +710,8 @@ def _query_extras_from_env(query: str | None = None) -> dict:
 async def _interactive_loop(rag, query_mode: str) -> None:
     from lightrag.utils import logger
 
+    from raganything.pipeline_rerank import release_rerank_after_query_if_enabled
+
     print(
         "Ready. Ask a question after the Q> prompt.\n"
         "  Empty line: new Q> line only (like a terminal).\n"
@@ -739,6 +741,9 @@ async def _interactive_loop(rag, query_mode: str) -> None:
         except Exception as e:
             logger.error(f"Query failed: {e}")
             print(f"[error] {e}", flush=True)
+        finally:
+            # Same per-query release policy as the Web path (RERANK_RELEASE_AFTER_QUERY).
+            release_rerank_after_query_if_enabled()
 
 
 async def async_main() -> None:

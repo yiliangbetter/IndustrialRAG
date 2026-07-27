@@ -29,10 +29,6 @@ from raganything.clarify_context import (
     build_cached_bundle,
     format_chunk_previews,
 )
-from raganything.pipeline_rerank import (
-    release_cross_encoder,
-    rerank_release_after_gate,
-)
 
 CLARIFY_UNRELATED_MESSAGE = (
     "您的问题与当前知识库内容关联度较低，暂无法基于知识库作答。"
@@ -878,15 +874,11 @@ async def evaluate_clarify_gate(
     if not is_clarify_gate_enabled(mode):
         return ClarifyBypass("disabled")
 
-    try:
-        return await _evaluate_clarify_gate_probed(
-            lightrag,
-            q,
-            mode=mode,
-        )
-    finally:
-        if rerank_release_after_gate():
-            release_cross_encoder()
+    return await _evaluate_clarify_gate_probed(
+        lightrag,
+        q,
+        mode=mode,
+    )
 
 
 async def _evaluate_clarify_gate_probed(

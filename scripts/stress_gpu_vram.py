@@ -142,7 +142,6 @@ async def scenario_rerank_cycle(*, iterations: int, pairs: int) -> list[dict[str
 async def scenario_rerank_resident(*, iterations: int, pairs: int) -> list[dict[str, Any]]:
     from raganything.pipeline_rerank import hf_cross_encoder_rerank, release_cross_encoder
 
-    os.environ["RERANK_RELEASE_AFTER_PREDICT"] = "0"
     docs = _sample_docs(pairs)
     query = "封边机维护保养手册适用哪些型号"
     rows: list[dict[str, Any]] = []
@@ -277,8 +276,7 @@ async def main_async(args: argparse.Namespace) -> int:
     env_snapshot = {
         "HF_EMBED_DEVICE": os.getenv("HF_EMBED_DEVICE"),
         "RERANK_HF_DEVICE": os.getenv("RERANK_HF_DEVICE"),
-        "RERANK_RELEASE_AFTER_PREDICT": os.getenv("RERANK_RELEASE_AFTER_PREDICT"),
-        "RERANK_RELEASE_AFTER_GATE": os.getenv("RERANK_RELEASE_AFTER_GATE"),
+        "RERANK_RELEASE_AFTER_QUERY": os.getenv("RERANK_RELEASE_AFTER_QUERY"),
         "RERANK_TORCH_DTYPE": os.getenv("RERANK_TORCH_DTYPE"),
         "RERANK_BATCH_SIZE": os.getenv("RERANK_BATCH_SIZE"),
         "RERANK_MODEL": os.getenv("RERANK_MODEL"),

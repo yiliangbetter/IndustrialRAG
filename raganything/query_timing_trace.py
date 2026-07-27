@@ -72,8 +72,6 @@ def _env_snapshot() -> dict[str, str | None]:
         "RERANK_MODEL",
         "RERANK_HF_DEVICE",
         "HF_EMBED_DEVICE",
-        "RERANK_RELEASE_AFTER_PREDICT",
-        "RERANK_RELEASE_AFTER_GATE",
         "RERANK_RELEASE_AFTER_QUERY",
         "RERANK_BY_DEFAULT",
         "RAG_QUERY_MODE",

@@ -21,8 +21,6 @@ __all__ = [
     "hf_cross_encoder_rerank",
     "release_cross_encoder",
     "release_rerank_after_query_if_enabled",
-    "rerank_release_after_gate",
-    "rerank_release_after_predict",
     "rerank_release_after_query",
 ]
 
@@ -56,18 +54,31 @@ def _env_flag(name: str) -> bool:
     return (os.getenv(name) or "").strip().lower() in ("1", "true", "yes")
 
 
-def rerank_release_after_predict() -> bool:
-    """When true, drop CrossEncoder singleton after each ``hf_cross_encoder_rerank`` predict."""
-    return _env_flag("RERANK_RELEASE_AFTER_PREDICT")
+_DEPRECATED_RELEASE_ENVS = (
+    "RERANK_RELEASE_AFTER_PREDICT",
+    "RERANK_RELEASE_AFTER_GATE",
+)
 
 
-def rerank_release_after_gate() -> bool:
-    """When true, drop CrossEncoder singleton when ``evaluate_clarify_gate`` finishes."""
-    return _env_flag("RERANK_RELEASE_AFTER_GATE")
+def _warn_deprecated_release_envs() -> None:
+    """Warn once per process when removed release switches are still configured.
+
+    Releasing per predict or per clarify-gate never lowers peak VRAM (the model
+    must be resident while predicting) and only adds a ~1.4s reload before the
+    next predict of the same query. ``RERANK_RELEASE_AFTER_QUERY`` is the single
+    supported strategy.
+    """
+    for name in _DEPRECATED_RELEASE_ENVS:
+        if _env_flag(name):
+            logger.warning(
+                "%s is removed and ignored; use RERANK_RELEASE_AFTER_QUERY=1 "
+                "to free the CrossEncoder between queries",
+                name,
+            )
 
 
 def rerank_release_after_query() -> bool:
-    """When true, Web server releases CrossEncoder once per HTTP query (see ``rag_web_server``)."""
+    """When true, callers release CrossEncoder once per full query (Web request / CLI turn)."""
     return _env_flag("RERANK_RELEASE_AFTER_QUERY")
 
 
@@ -304,48 +315,45 @@ async def hf_cross_encoder_rerank(
     """Rerank with a local ``sentence_transformers.CrossEncoder`` (no HTTP API)."""
     if not documents:
         return []
+    ce = _get_cross_encoder(model)
+    pairs = [(query, d) for d in documents]
     try:
-        ce = _get_cross_encoder(model)
-        pairs = [(query, d) for d in documents]
-        try:
-            from raganything.query_timing_trace import trace_event
+        from raganything.query_timing_trace import trace_event
 
-            trace_event("rerank_predict_start", model=model, pairs=len(pairs))
-        except ImportError:
-            pass
-        t_predict = time.perf_counter()
-        scores = await asyncio.to_thread(_cross_encoder_predict, ce, pairs)
-        predict_s = round(time.perf_counter() - t_predict, 2)
-        try:
-            from raganything.query_timing_trace import trace_event
+        trace_event("rerank_predict_start", model=model, pairs=len(pairs))
+    except ImportError:
+        pass
+    t_predict = time.perf_counter()
+    scores = await asyncio.to_thread(_cross_encoder_predict, ce, pairs)
+    predict_s = round(time.perf_counter() - t_predict, 2)
+    try:
+        from raganything.query_timing_trace import trace_event
 
-            trace_event(
-                "rerank_predict_done",
-                model=model,
-                pairs=len(pairs),
-                predict_s=predict_s,
-            )
-        except ImportError:
-            pass
-        try:
-            scores_list = scores.tolist()  # type: ignore[union-attr]
-        except Exception:
-            scores_list = [float(s) for s in scores]
-        order = sorted(
-            range(len(scores_list)),
-            key=lambda i: float(scores_list[i]),
-            reverse=True,
+        trace_event(
+            "rerank_predict_done",
+            model=model,
+            pairs=len(pairs),
+            predict_s=predict_s,
         )
-        if top_n is not None and top_n > 0:
-            order = order[:top_n]
-        return [{"index": i, "relevance_score": float(scores_list[i])} for i in order]
-    finally:
-        if rerank_release_after_predict():
-            release_cross_encoder()
+    except ImportError:
+        pass
+    try:
+        scores_list = scores.tolist()  # type: ignore[union-attr]
+    except Exception:
+        scores_list = [float(s) for s in scores]
+    order = sorted(
+        range(len(scores_list)),
+        key=lambda i: float(scores_list[i]),
+        reverse=True,
+    )
+    if top_n is not None and top_n > 0:
+        order = order[:top_n]
+    return [{"index": i, "relevance_score": float(scores_list[i])} for i in order]
 
 
 def build_rerank_model_func_from_env() -> Callable[..., Any] | None:
     """Return a partial rerank coroutine, or ``None`` if reranking is disabled."""
+    _warn_deprecated_release_envs()
     binding = (os.getenv("RERANK_BINDING") or "").strip().lower()
     if binding in ("", "none", "off", "false", "0", "disabled"):
         return None
