@@ -186,6 +186,11 @@ class BatchParser:
                 **kwargs,
             )
 
+            if not content_list:
+                error_msg = f"No content extracted from {file_path}"
+                self.logger.error(error_msg)
+                return False, file_path, error_msg
+
             processing_time = time.time() - start_time
 
             self.logger.info(

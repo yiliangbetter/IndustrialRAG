@@ -1893,6 +1893,11 @@ class ProcessorMixin:
                 )
 
         if parser:
+            # Recreate the parser instance when the override changes; otherwise
+            # parse_document keeps a stale self.doc_parser while config.parser
+            # (and cache keys) claim the new backend.
+            if getattr(self.config, "parser", None) != parser:
+                self.doc_parser = get_parser(parser)
             self.config.parser = parser
 
         try:

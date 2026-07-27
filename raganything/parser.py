@@ -1272,7 +1272,9 @@ class MineruParser(Parser):
                         f"Failed to convert image {image_path.name}: {str(e)}"
                     )
 
-            name_without_suff = image_path.stem
+            # MinerU names output dirs from the *input* file stem. After
+            # conversion that stem is e.g. "photo_converted", not "photo".
+            name_without_suff = Path(actual_image_path).stem
 
             # Prepare output directory — use unique subdirectory to prevent
             # same-name file collisions when output_dir is shared (#51)

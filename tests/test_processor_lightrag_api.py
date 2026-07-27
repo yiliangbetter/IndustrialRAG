@@ -67,3 +67,52 @@ async def test_lightrag_api_init_failure_persists_failed_doc_status():
     assert doc_status["error_msg"] == "missing llm_model_func"
     assert doc_status["file_path"] == "sample.pdf"
     assert processor.lightrag.doc_status.index_done_calls == 1
+
+
+@pytest.mark.asyncio
+async def test_lightrag_api_parser_override_recreates_doc_parser(monkeypatch):
+    """Passing parser= must rebuild self.doc_parser, not only mutate config.parser."""
+
+    class DummyProcessor(ProcessorMixin):
+        pass
+
+    processor = DummyProcessor()
+    processor.logger = FakeLogger()
+    processor.config = type(
+        "Config",
+        (),
+        {
+            "use_full_path": False,
+            "parser": "mineru",
+        },
+    )()
+    stale_parser = object()
+    processor.doc_parser = stale_parser
+    processor.lightrag = type(
+        "FakeLightRAG",
+        (),
+        {"doc_status": FakeDocStatusStorage()},
+    )()
+
+    created = {}
+
+    def fake_get_parser(name):
+        created["name"] = name
+        return f"parser:{name}"
+
+    monkeypatch.setattr("raganything.processor.get_parser", fake_get_parser)
+
+    async def fake_ensure_lightrag_initialized():
+        return {"success": False, "error": "stop-after-parser-swap"}
+
+    processor._ensure_lightrag_initialized = fake_ensure_lightrag_initialized
+
+    result = await processor.process_document_complete_lightrag_api(
+        "sample.pdf", parser="docling"
+    )
+
+    assert result is False
+    assert created["name"] == "docling"
+    assert processor.doc_parser == "parser:docling"
+    assert processor.doc_parser is not stale_parser
+    assert processor.config.parser == "docling"
