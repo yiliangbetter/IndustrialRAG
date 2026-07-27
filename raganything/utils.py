@@ -86,9 +86,9 @@ def image_label_for_item(items: List[Dict[str, Any]], item: Dict[str, Any]) -> s
     """Caption/footnote for an image block, including layout-inferred labels."""
     if not isinstance(item, dict) or item.get("type") != "image":
         return ""
-    try:
-        idx = items.index(item)
-    except ValueError:
+    # Identity match: equal image dicts must not steal another item's index.
+    idx = next((i for i, it in enumerate(items) if it is item), None)
+    if idx is None:
         return image_label_text(item)
     caption = resolve_image_caption(items, idx)
     footnote = resolve_image_footnote(items, idx)
@@ -377,9 +377,7 @@ def resolve_image_caption(items: List[Dict[str, Any]], image_index: int) -> str:
     if image_index < 0 or image_index >= len(items):
         return ""
     item = items[image_index]
-    return _join_caption_field(
-        item.get("image_caption", item.get("img_caption", ""))
-    )
+    return _join_caption_field(item.get("image_caption", item.get("img_caption", "")))
 
 
 def build_image_ref_block(
@@ -404,9 +402,7 @@ def build_image_ref_block(
 
 
 _IMAGE_REF_MARKER = "[图片]"
-_INGEST_IMAGE_PATH_RE = re.compile(
-    r"图片路径[：:]\s*(.+?)(?:\n|$)", re.MULTILINE
-)
+_INGEST_IMAGE_PATH_RE = re.compile(r"图片路径[：:]\s*(.+?)(?:\n|$)", re.MULTILINE)
 _TABLE_INGEST_MARKER = "[Table]"
 _INGEST_SEGMENT_DELIMITER = "\n<<<RAG_SEG_BOUNDARY>>>\n"
 _SECTION_HEADING_LINE_RE = re.compile(r"^(?:\d+\.){1,3}\d+\s+\S")
@@ -481,7 +477,8 @@ def _is_orphan_maintenance_metadata_only_segment(segment: str) -> bool:
         prefix = _maintenance_field_prefix(lines[0])
         return prefix in ("保养周期：", "保养内容：")
     return all(
-        _maintenance_field_prefix(line) in ("保养周期：", "保养内容：") for line in lines
+        _maintenance_field_prefix(line) in ("保养周期：", "保养内容：")
+        for line in lines
     )
 
 
@@ -559,11 +556,19 @@ def _split_overmerged_maintenance_segment(segment: str) -> List[str]:
             continue
         prefix = _maintenance_field_prefix(first_line)
         joined = "\n\n".join(current)
-        if prefix == "保养周期：" and current and _segment_has_maintenance_cycle(joined):
+        if (
+            prefix == "保养周期："
+            and current
+            and _segment_has_maintenance_cycle(joined)
+        ):
             sections.append(current)
             current = [block]
             continue
-        if prefix == "保养内容：" and current and _maintenance_section_step_closed(joined):
+        if (
+            prefix == "保养内容："
+            and current
+            and _maintenance_section_step_closed(joined)
+        ):
             sections.append(current)
             current = [block]
             continue
@@ -572,7 +577,9 @@ def _split_overmerged_maintenance_segment(segment: str) -> List[str]:
         sections.append(current)
     if len(sections) <= 1:
         return [seg]
-    return ["\n\n".join(part for part in section if part) for section in sections if section]
+    return [
+        "\n\n".join(part for part in section if part) for section in sections if section
+    ]
 
 
 def _explode_overmerged_segments(segments: List[str]) -> List[str]:
@@ -619,9 +626,9 @@ def _has_backward_procedure_for_heading(segments: List[str], index: int) -> bool
 
 
 def _should_collect_maintenance_subsection(segments: List[str], index: int) -> bool:
-    return _follows_maintenance_subsection(segments, index) and not _has_backward_procedure_for_heading(
+    return _follows_maintenance_subsection(
         segments, index
-    )
+    ) and not _has_backward_procedure_for_heading(segments, index)
 
 
 def _collect_maintenance_section_parts(
@@ -638,7 +645,9 @@ def _collect_maintenance_section_parts(
             continue
         if _is_orphan_heading_segment(nxt):
             break
-        if _segment_starts_new_section(nxt) and not _is_orphan_maintenance_field_segment(nxt):
+        if _segment_starts_new_section(
+            nxt
+        ) and not _is_orphan_maintenance_field_segment(nxt):
             break
         if _is_orphan_maintenance_field_segment(nxt):
             joined = "\n\n".join(parts)
@@ -666,7 +675,9 @@ def _collect_maintenance_section_parts(
 
 def _assemble_maintenance_section_segments(segments: List[str]) -> List[str]:
     """Group numbered headings with following 保养内容/周期/步骤 fields before the figure."""
-    working = [(segment or "").strip() for segment in segments if (segment or "").strip()]
+    working = [
+        (segment or "").strip() for segment in segments if (segment or "").strip()
+    ]
     out: List[str] = []
     i = 0
     while i < len(working):
@@ -714,7 +725,9 @@ def _preceding_section_accepts_trailing_fields(segment: str) -> bool:
 
 def _merge_trailing_procedure_into_preceding(segments: List[str]) -> List[str]:
     """Attach trailing 保养周期/内容/步骤 field blocks to the preceding section (Q7)."""
-    working = [(segment or "").strip() for segment in segments if (segment or "").strip()]
+    working = [
+        (segment or "").strip() for segment in segments if (segment or "").strip()
+    ]
     max_passes = max(len(working) * 2, 8)
     for _ in range(max_passes):
         changed = False
@@ -751,7 +764,9 @@ def _merge_trailing_procedure_into_preceding(segments: List[str]) -> List[str]:
 
 def _merge_unheaded_fields_with_heading_sections(segments: List[str]) -> List[str]:
     """Merge anonymous 保养内容/步骤 blocks into a later thin heading section (Q7)."""
-    working = [(segment or "").strip() for segment in segments if (segment or "").strip()]
+    working = [
+        (segment or "").strip() for segment in segments if (segment or "").strip()
+    ]
     skip: set[int] = set()
     for i in range(len(working)):
         if i in skip:
@@ -785,7 +800,9 @@ def _merge_unheaded_fields_with_heading_sections(segments: List[str]) -> List[st
 
 def _merge_orphan_maintenance_metadata_segments(segments: List[str]) -> List[str]:
     """Forward-merge orphan field lines into the next body block within a short window."""
-    working = [(segment or "").strip() for segment in segments if (segment or "").strip()]
+    working = [
+        (segment or "").strip() for segment in segments if (segment or "").strip()
+    ]
     max_passes = max(len(working) * 2, 8)
     for _ in range(max_passes):
         changed = False
@@ -810,9 +827,9 @@ def _merge_orphan_maintenance_metadata_segments(segments: List[str]) -> List[str
                 cand = working[k]
                 if _is_orphan_heading_segment(cand) or _is_image_ref_segment(cand):
                     continue
-                if _segment_starts_new_section(cand) and not _is_orphan_maintenance_field_segment(
+                if _segment_starts_new_section(
                     cand
-                ):
+                ) and not _is_orphan_maintenance_field_segment(cand):
                     continue
                 anchor = " ".join(meta_parts)
                 score = text_term_alignment_symmetric(anchor, cand)
@@ -877,7 +894,9 @@ def _is_thin_section_lead_segment(segment: str) -> bool:
 
 def _merge_thin_section_with_following_figure(segments: List[str]) -> List[str]:
     """Merge thin ``N.N 标题`` blocks with the immediate next figure-bearing segment."""
-    working = [(segment or "").strip() for segment in segments if (segment or "").strip()]
+    working = [
+        (segment or "").strip() for segment in segments if (segment or "").strip()
+    ]
     out: List[str] = []
     i = 0
     n = len(working)
@@ -959,7 +978,10 @@ def _split_image_blocks_in_segment(segment: str) -> List[str]:
     emitted_leading = False
     for img_part in image_parts:
         match_text = _image_match_text_from_ref_segment(img_part)
-        if leading_text and text_term_alignment_symmetric(leading_text, match_text) >= 0.28:
+        if (
+            leading_text
+            and text_term_alignment_symmetric(leading_text, match_text) >= 0.28
+        ):
             out.append(f"{leading_text}\n\n{img_part}")
             emitted_leading = True
         else:
@@ -1105,7 +1127,9 @@ def _merge_trailing_orphan_headings_backward(working: List[str]) -> List[str]:
 
 def _merge_orphan_heading_segments(segments: List[str]) -> List[str]:
     """Attach orphan section headings (e.g. ``2.1.1 …``) to the best-aligned body block."""
-    working = [(segment or "").strip() for segment in segments if (segment or "").strip()]
+    working = [
+        (segment or "").strip() for segment in segments if (segment or "").strip()
+    ]
     max_passes = max(len(working) * 2, 8)
     for _pass in range(max_passes):
         changed = False
@@ -1117,7 +1141,9 @@ def _merge_orphan_heading_segments(segments: List[str]) -> List[str]:
             heading = working[i]
             best_j = -1
             best_score = 0.12
-            for j in range(i + 1, min(i + _COALESCE_HEADING_LOOKAHEAD + 1, len(working))):
+            for j in range(
+                i + 1, min(i + _COALESCE_HEADING_LOOKAHEAD + 1, len(working))
+            ):
                 cand = working[j]
                 if _is_orphan_heading_segment(cand):
                     break
@@ -1128,15 +1154,18 @@ def _merge_orphan_heading_segments(segments: List[str]) -> List[str]:
                     best_score = score
                     best_j = j
             backward_best = _best_heading_body_score_before(heading, working, i)
-            if best_j >= 0 and backward_best >= 0.12 and backward_best >= best_score * 0.38:
+            if (
+                best_j >= 0
+                and backward_best >= 0.12
+                and backward_best >= best_score * 0.38
+            ):
                 i += 1
                 continue
             if best_j < 0:
                 i += 1
                 continue
-            absorb_image = (
-                best_j + 1 < len(working)
-                and _is_image_ref_segment(working[best_j + 1])
+            absorb_image = best_j + 1 < len(working) and _is_image_ref_segment(
+                working[best_j + 1]
             )
             merged = f"{heading}\n\n{working[best_j]}"
             if absorb_image:
@@ -1175,8 +1204,6 @@ def _coalesce_immediate_text_image_segments(segments: List[str]) -> List[str]:
         while j < n:
             nxt = (segments[j] or "").strip()
             if not nxt or not _is_image_ref_segment(nxt):
-                break
-            if j > i + 1:
                 break
             match_text = _image_match_text_from_ref_segment(nxt)
             if match_text and text_term_alignment_symmetric(seg, match_text) < 0.2:
@@ -1284,9 +1311,7 @@ def plan_text_image_assignments(
             if page_idx is not None and img.get("page_idx") != page_idx:
                 break
             label = image_label_for_item(items, img)
-            label_score = (
-                text_term_alignment_symmetric(anchor, label) if label else 0.0
-            )
+            label_score = text_term_alignment_symmetric(anchor, label) if label else 0.0
             context = context_text_for_image(items, ii, max_chars=400)
             context_score = (
                 text_term_alignment_symmetric(anchor, context) if context else 0.0
@@ -1468,7 +1493,9 @@ def _part_starts_section_heading(part: str) -> bool:
     return _is_section_heading_line(_segment_first_line(part))
 
 
-def _split_sub_parts_at_section_heading_boundaries(sub_parts: List[str]) -> List[List[str]]:
+def _split_sub_parts_at_section_heading_boundaries(
+    sub_parts: List[str],
+) -> List[List[str]]:
     """Split ingest sub-parts so coalesce never crosses numbered section headings."""
     groups: List[List[str]] = []
     current: List[str] = []
@@ -1556,7 +1583,9 @@ def prepare_table_aware_ingest_segments(
     return out
 
 
-def compute_table_aware_ingest_segments(lightrag, document_parts: List[str]) -> List[str]:
+def compute_table_aware_ingest_segments(
+    lightrag, document_parts: List[str]
+) -> List[str]:
     """Prepared ingest segments (table-aware split; no flatten when matrix ingest is on)."""
     if not table_aware_ingest_enabled() or not document_parts:
         return list(document_parts or [])
@@ -1571,7 +1600,12 @@ def _bbox_center(bbox: Any) -> tuple[float, float] | None:
     if not isinstance(bbox, (list, tuple)) or len(bbox) < 4:
         return None
     try:
-        x0, y0, x1, y1 = (float(bbox[0]), float(bbox[1]), float(bbox[2]), float(bbox[3]))
+        x0, y0, x1, y1 = (
+            float(bbox[0]),
+            float(bbox[1]),
+            float(bbox[2]),
+            float(bbox[3]),
+        )
     except (TypeError, ValueError):
         return None
     return ((x0 + x1) / 2.0, (y0 + y1) / 2.0)
@@ -1603,7 +1637,9 @@ _BBOX_MATCH_MAX_DIST = 900.0
 _LABEL_ALIGN_MIN = 0.35
 
 
-def neighbor_context_text(items: List[Dict[str, Any]], index: int, window: int = 3) -> str:
+def neighbor_context_text(
+    items: List[Dict[str, Any]], index: int, window: int = 3
+) -> str:
     """Collect nearby text blocks around an image for semantic association."""
     parts: List[str] = []
     lo = max(0, index - window)
@@ -1642,7 +1678,12 @@ def _layout_distance_for_text_image_pair(
     max_dist: float = _BBOX_MATCH_MAX_DIST,
 ) -> float | None:
     """Score how well an image pairs with anchor text (lower is better)."""
-    if text_index < 0 or image_index < 0 or text_index >= len(items) or image_index >= len(items):
+    if (
+        text_index < 0
+        or image_index < 0
+        or text_index >= len(items)
+        or image_index >= len(items)
+    ):
         return None
     text_item = items[text_index]
     image_item = items[image_index]
@@ -1714,8 +1755,10 @@ def best_image_for_text_item(
         if label and anchor_body:
             align = text_term_alignment_symmetric(anchor_body, label)
             if align >= label_align_min:
-                if best_labeled is None or align > best_labeled[0] or (
-                    align == best_labeled[0] and j < best_labeled[1]
+                if (
+                    best_labeled is None
+                    or align > best_labeled[0]
+                    or (align == best_labeled[0] and j < best_labeled[1])
                 ):
                     best_labeled = (align, j, item)
         elif first_unlabeled_after is None:
@@ -1996,6 +2039,35 @@ async def insert_doc_scoped_text_content(
     from lightrag.kg.shared_storage import get_namespace_data, get_pipeline_status_lock
     from lightrag.operate import merge_nodes_and_edges
 
+    # Fail loud when LightRAG internals/storages are missing. Do NOT silently
+    # fall back to ``ainsert`` here: callers chose doc-scoped ids for image
+    # locality / order_index / table linking; a content-only ainsert would look
+    # successful while producing the wrong chunk shape for later query PRs.
+    required = (
+        "apipeline_enqueue_documents",
+        "_process_extract_entities",
+        "_insert_done",
+        "doc_status",
+        "chunks_vdb",
+        "text_chunks",
+        "tokenizer",
+        "chunk_entity_relation_graph",
+        "entities_vdb",
+        "relationships_vdb",
+        "full_entities",
+        "full_relations",
+        "llm_response_cache",
+        "entity_chunks",
+        "relation_chunks",
+    )
+    missing = [name for name in required if not hasattr(lightrag, name)]
+    if missing:
+        raise RuntimeError(
+            "Doc-scoped ingest requires LightRAG APIs that are missing on this "
+            f"build: {', '.join(missing)}. Upgrade `lightrag-hku`, or call "
+            "standard `ainsert` from the non-doc-scoped path instead."
+        )
+
     pipeline_status = await get_namespace_data("pipeline_status")
     pipeline_status_lock = get_pipeline_status_lock()
 
@@ -2125,7 +2197,27 @@ async def insert_text_content(
     """
     logger.info("Starting text content insertion into LightRAG...")
 
+    if isinstance(ids, list) and not ids:
+        ids = None
+    if isinstance(file_paths, list) and not file_paths:
+        file_paths = None
+    if isinstance(ids, str) and not ids.strip():
+        ids = None
+    if isinstance(file_paths, str) and not file_paths.strip():
+        file_paths = None
+
     if isinstance(input, str) and ids is not None:
+        if isinstance(ids, list) and len(ids) != 1:
+            raise ValueError(
+                "Doc-scoped ingest for a single input string requires "
+                f"ids to be a str or a one-element list, got len={len(ids)}"
+            )
+        if isinstance(file_paths, list) and len(file_paths) != 1:
+            raise ValueError(
+                "Doc-scoped ingest for a single input string requires "
+                "file_paths to be a str, None, or a one-element list, "
+                f"got len={len(file_paths)}"
+            )
         doc_id = ids if isinstance(ids, str) else ids[0]
         file_path = ""
         if file_paths:

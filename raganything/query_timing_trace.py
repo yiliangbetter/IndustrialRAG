@@ -7,11 +7,17 @@ import time
 from contextvars import ContextVar
 from typing import Any
 
-_TRACE_ENABLED: ContextVar[bool] = ContextVar("query_timing_trace_enabled", default=False)
-_TRACE_START: ContextVar[float | None] = ContextVar("query_timing_trace_start", default=None)
-_TRACE_META: ContextVar[dict[str, Any]] = ContextVar("query_timing_trace_meta", default={})
-_TRACE_EVENTS: ContextVar[list[dict[str, Any]]] = ContextVar(
-    "query_timing_trace_events", default=[]
+_TRACE_ENABLED: ContextVar[bool] = ContextVar(
+    "query_timing_trace_enabled", default=False
+)
+_TRACE_START: ContextVar[float | None] = ContextVar(
+    "query_timing_trace_start", default=None
+)
+_TRACE_META: ContextVar[dict[str, Any] | None] = ContextVar(
+    "query_timing_trace_meta", default=None
+)
+_TRACE_EVENTS: ContextVar[list[dict[str, Any]] | None] = ContextVar(
+    "query_timing_trace_events", default=None
 )
 
 
@@ -26,8 +32,8 @@ def is_query_timing_enabled() -> bool:
 def clear_query_trace() -> None:
     _TRACE_ENABLED.set(False)
     _TRACE_START.set(None)
-    _TRACE_META.set({})
-    _TRACE_EVENTS.set([])
+    _TRACE_META.set(None)
+    _TRACE_EVENTS.set(None)
 
 
 def begin_query_trace(**meta: Any) -> None:

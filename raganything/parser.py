@@ -868,9 +868,15 @@ class MineruParser(Parser):
                 register_ingest_subprocess(process)
             except ImportError:
                 IngestCancelledError = None  # type: ignore[misc, assignment]
-                ingest_cancel_requested = lambda: False  # type: ignore[misc, assignment]
-                register_ingest_subprocess = lambda _p: None  # type: ignore[misc, assignment]
-                clear_ingest_subprocess = lambda: None  # type: ignore[misc, assignment]
+
+                def ingest_cancel_requested() -> bool:
+                    return False
+
+                def register_ingest_subprocess(_p: object) -> None:
+                    return None
+
+                def clear_ingest_subprocess() -> None:
+                    return None
 
             # Create queues for stdout and stderr
             stdout_queue = Queue()
@@ -903,7 +909,9 @@ class MineruParser(Parser):
                             raise IngestCancelledError(
                                 "MinerU parse aborted after ingest stop request"
                             )
-                        raise RuntimeError("MinerU parse aborted after ingest stop request")
+                        raise RuntimeError(
+                            "MinerU parse aborted after ingest stop request"
+                        )
                     # Check stdout queue
                     try:
                         while True:
@@ -931,7 +939,10 @@ class MineruParser(Parser):
                         pass
 
                     # Enforce timeout — kill the process and raise if exceeded
-                    if timeout is not None and (time.monotonic() - start_time) > timeout:
+                    if (
+                        timeout is not None
+                        and (time.monotonic() - start_time) > timeout
+                    ):
                         process.kill()
                         process.wait()
                         # Give reader threads a moment to drain before raising

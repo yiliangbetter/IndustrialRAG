@@ -5,6 +5,7 @@ from __future__ import annotations
 
 import json
 import sys
+from collections import Counter
 from pathlib import Path
 
 _ROOT = Path(__file__).resolve().parent.parent
@@ -35,7 +36,8 @@ def summarize(label: str, wd: Path) -> list[str]:
     ch = wd / "vdb_chunks.json"
     rows = list_from_full_docs(fd)
     names = [r["name"] for r in rows]
-    uniq = sorted(set(names))
+    counts = Counter(names)
+    uniq = sorted(counts)
     lines.append(f"=== {label} ===")
     lines.append(f"path: {wd.resolve()}")
     lines.append(f"full_docs records: {len(rows)} | unique filenames: {len(uniq)}")
@@ -50,7 +52,7 @@ def summarize(label: str, wd: Path) -> list[str]:
             lines.append(f"chunk read err: {exc}")
     lines.append("--- unique PDFs / docs ---")
     for i, name in enumerate(uniq, 1):
-        cnt = names.count(name)
+        cnt = counts[name]
         suffix = f"  (indexed {cnt}x)" if cnt > 1 else ""
         lines.append(f"{i:2}. {name}{suffix}")
     lines.append("")
@@ -65,7 +67,9 @@ def main() -> None:
     lines: list[str] = []
     for wd in roots:
         if wd.is_dir():
-            lines.extend(summarize(wd.name if wd.name != "rag_storage" else str(wd), wd))
+            lines.extend(
+                summarize(wd.name if wd.name != "rag_storage" else str(wd), wd)
+            )
 
     pp = _ROOT / "data" / "pipeline_parse"
     if pp.is_dir():

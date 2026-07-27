@@ -24,7 +24,6 @@ from raganything.utils import (
     insert_text_content_with_multimodal_content,
     get_processor_for_type,
     compute_ingest_chunk_id,
-    _join_caption_field,
     resolve_image_caption,
     resolve_image_footnote,
 )
@@ -273,7 +272,9 @@ class ProcessorMixin:
                 return html
         return ""
 
-    def _build_document_parts_for_ingest(self, items: List[Dict[str, Any]]) -> List[str]:
+    def _build_document_parts_for_ingest(
+        self, items: List[Dict[str, Any]]
+    ) -> List[str]:
         """Document-order blocks for ingest; each ``[Table]`` block is one part."""
         text_image_assignments = plan_text_image_assignments(items)
         claimed_image_indices = set(text_image_assignments.values())
@@ -343,15 +344,12 @@ class ProcessorMixin:
                     context = anchor_context_for_image(
                         items, image_idx, anchor_text_index=idx
                     )
-                    block = (
-                        f"{block}\n\n"
-                        + build_image_ref_block(
-                            img_path=img_path,
-                            page_idx=page_idx if isinstance(page_idx, int) else None,
-                            caption=caption,
-                            footnote=footnote,
-                            context=context,
-                        )
+                    block = f"{block}\n\n" + build_image_ref_block(
+                        img_path=img_path,
+                        page_idx=page_idx if isinstance(page_idx, int) else None,
+                        caption=caption,
+                        footnote=footnote,
+                        context=context,
                     )
             parts.append(block)
 
@@ -2358,7 +2356,9 @@ class ProcessorMixin:
         document_parts: List[str] | None = None
 
         if skip_multimodal_processing:
-            document_parts = self._build_document_parts_for_ingest(normalized_content_list)
+            document_parts = self._build_document_parts_for_ingest(
+                normalized_content_list
+            )
             inline_text = "\n\n".join(document_parts)
             if inline_text.strip():
                 text_content = inline_text
@@ -2403,7 +2403,9 @@ class ProcessorMixin:
                 ]
         else:
             if not text_content.strip():
-                text_content = self._plaintext_from_mineru_blocks(normalized_content_list)
+                text_content = self._plaintext_from_mineru_blocks(
+                    normalized_content_list
+                )
             if not text_content.strip():
                 text_parts = []
                 for item in normalized_content_list:

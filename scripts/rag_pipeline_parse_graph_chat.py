@@ -26,6 +26,7 @@ from __future__ import annotations
 
 import argparse
 import asyncio
+import logging
 import os
 import subprocess
 import sys
@@ -139,9 +140,13 @@ async def _lookup_doc_status_meta(rag, rel: str, doc_id: str) -> Any | None:
     target = Path(rel).name
     page = 1
     while True:
-        rows, total = await doc_status.get_docs_paginated(
-            page=page, page_size=200, sort_field="updated_at", sort_direction="desc"
-        )
+        try:
+            rows, total = await doc_status.get_docs_paginated(
+                page=page, page_size=200, sort_field="updated_at", sort_direction="desc"
+            )
+        except Exception:
+            logging.warning("doc_status pagination failed", exc_info=True)
+            break
         if not rows:
             break
         for did, row_meta in rows:
@@ -180,7 +185,10 @@ async def _verify_doc_ingest_outcome(rag, rel: str, doc_id: str) -> tuple[bool, 
             return False, err or "文档已标记完成但未生成任何分块"
         return True, ""
     if status in ("processing", "pending", "handling"):
-        return False, err or f"文档仍处于处理中（{status}），可能 LLM 配额不足或抽取中断"
+        return (
+            False,
+            err or f"文档仍处于处理中（{status}），可能 LLM 配额不足或抽取中断",
+        )
     return False, err or f"未知文档状态：{status or 'empty'}"
 
 
@@ -199,9 +207,13 @@ async def _remove_existing_docs_for_file(rag, rel: str) -> int:
     matches: list[str] = []
     page = 1
     while True:
-        rows, total = await doc_status.get_docs_paginated(
-            page=page, page_size=200, sort_field="updated_at", sort_direction="desc"
-        )
+        try:
+            rows, total = await doc_status.get_docs_paginated(
+                page=page, page_size=200, sort_field="updated_at", sort_direction="desc"
+            )
+        except Exception:
+            logging.warning("doc_status pagination failed", exc_info=True)
+            break
         if not rows:
             break
         for doc_id, meta in rows:
@@ -436,9 +448,15 @@ async def _build_rag(
     scripts_dir = Path(__file__).resolve().parent
     if str(scripts_dir) not in sys.path:
         sys.path.insert(0, str(scripts_dir))
-    from query_doc_steering import install_query_steering_hooks  # noqa: WPS433
-
-    install_query_steering_hooks()
+    try:
+        from query_doc_steering import install_query_steering_hooks  # noqa: WPS433
+    except ImportError:
+        logger.warning(
+            "query_doc_steering not available; skipping query steering hooks "
+            "(expected until web/tooling PR lands)"
+        )
+    else:
+        install_query_steering_hooks()
 
     rag = RAGAnything(
         config=config,
@@ -468,9 +486,7 @@ async def _ingest_folder(
     session_started: list[str] | None = None,
     session_completed: list[str] | None = None,
 ) -> tuple[int, int, list[dict[str, str]], bool]:
-    files = _collect_files(
-        input_folder, config.supported_file_extensions, recursive
-    )
+    files = _collect_files(input_folder, config.supported_file_extensions, recursive)
     if not files:
         raise SystemExit(
             f"No supported files under {input_folder} "
@@ -495,9 +511,7 @@ async def _ingest_folder(
         """Run insert_content_list; return True if cancelled mid-flight."""
         if should_cancel and should_cancel():
             return True
-        task = asyncio.create_task(
-            rag.insert_content_list(content_list, **insert_kw)
-        )
+        task = asyncio.create_task(rag.insert_content_list(content_list, **insert_kw))
         try:
             while not task.done():
                 if should_cancel and should_cancel():
@@ -548,8 +562,14 @@ async def _ingest_folder(
                     **parse_extra,
                 )
             except Exception as parse_exc:
-                from raganything.ingest_runtime import IngestCancelledError  # noqa: WPS433
-
+                # Optional until ingest_runtime lands in a later PR; keep forever
+                # as a soft dependency (no-op when the module is present).
+                try:
+                    from raganything.ingest_runtime import (  # noqa: WPS433
+                        IngestCancelledError,
+                    )
+                except ImportError:
+                    IngestCancelledError = ()  # type: ignore[misc, assignment]
                 if isinstance(parse_exc, IngestCancelledError) or (
                     should_cancel and should_cancel()
                 ):
@@ -590,7 +610,9 @@ async def _ingest_folder(
             if session_completed is not None:
                 session_completed.append(rel)
             logger.info(f"INGEST_FILE_OK::{rel}")
-            await _emit({"type": "file_ok", "file": rel, "current": idx, "total": total})
+            await _emit(
+                {"type": "file_ok", "file": rel, "current": idx, "total": total}
+            )
         except Exception as e:
             err = str(e)
             logger.error(f"INGEST_FILE_FAIL::{fp}: {e}")
@@ -666,9 +688,12 @@ def _query_extras_from_env(query: str | None = None) -> dict:
         scripts_dir = Path(__file__).resolve().parent
         if str(scripts_dir) not in sys.path:
             sys.path.insert(0, str(scripts_dir))
-        from query_doc_steering import build_user_prompt_for_query  # noqa: WPS433
-
-        steer = build_user_prompt_for_query(query)
+        try:
+            from query_doc_steering import build_user_prompt_for_query  # noqa: WPS433
+        except ImportError:
+            steer = ""
+        else:
+            steer = build_user_prompt_for_query(query) or ""
         if steer:
             up = f"{up}\n{steer}".strip() if up else steer
     if up:
@@ -822,36 +847,41 @@ async def async_main() -> None:
         skip_multimodal=args.skip_multimodal,
     )
 
-    if not args.query_only:
-        parse_extra = _mineru_parse_kwargs(config.parser)
-        await _ingest_folder(
-            rag,
-            config,
-            logger,
-            input_folder=input_folder,
-            parser_output_dir=args.parser_output_dir,
-            parse_method=args.parse_method,
-            parse_extra=parse_extra,
-            recursive=args.recursive,
-            limit=args.limit,
-            skip_multimodal=args.skip_multimodal,
-        )
-        await rag.finalize_storages()
+    try:
+        if not args.query_only:
+            parse_extra = _mineru_parse_kwargs(config.parser)
+            await _ingest_folder(
+                rag,
+                config,
+                logger,
+                input_folder=input_folder,
+                parser_output_dir=args.parser_output_dir,
+                parse_method=args.parse_method,
+                parse_extra=parse_extra,
+                recursive=args.recursive,
+                limit=args.limit,
+                skip_multimodal=args.skip_multimodal,
+            )
 
-    if args.ingest_only:
-        return
+        if args.ingest_only:
+            return
 
-    if args.query.strip():
-        ans = await rag.aquery(
-            args.query.strip(),
-            mode=args.query_mode,
-            vlm_enhanced=False,
-            **_query_extras_from_env(args.query.strip()),
-        )
-        print(ans or "", flush=True)
-        return
+        if args.query.strip():
+            ans = await rag.aquery(
+                args.query.strip(),
+                mode=args.query_mode,
+                vlm_enhanced=False,
+                **_query_extras_from_env(args.query.strip()),
+            )
+            print(ans or "", flush=True)
+            return
 
-    await _interactive_loop(rag, args.query_mode)
+        await _interactive_loop(rag, args.query_mode)
+    finally:
+        try:
+            await rag.finalize_storages()
+        except Exception:
+            logging.warning("finalize_storages failed", exc_info=True)
 
 
 def main() -> None:
