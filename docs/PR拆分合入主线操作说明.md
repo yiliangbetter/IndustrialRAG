@@ -68,7 +68,6 @@ raganything/clarify_context.py
 raganything/clarify_gate.py
 raganything/local_hf_embedding.py
 raganything/modalprocessors.py
-raganything/naive_relevance.py
 raganything/parser.py
 raganything/pipeline_rerank.py
 raganything/processor.py
@@ -80,16 +79,11 @@ raganything/utils.py
 
 scripts/rag_pipeline_parse_graph_chat.py
 scripts/image_query_refs.py
-scripts/build_table_matrix_from_storage.py
-scripts/strip_table_flat_from_chunks.py
 scripts/list_ingested_docs.py
-scripts/naive_relevance.py
 
-tests/testparser_ingest_coalesce.py
 pyproject.toml
 uv.lock
 config/env.example
-config/query_steering_profiles.json
 env.example
 
 docs/PR拆分合入主线操作说明.md
@@ -100,7 +94,6 @@ docs/PR拆分合入主线操作说明.md
 **合入后验证**：
 
 ```powershell
-pytest tests/testparser_ingest_coalesce.py -q
 uv run python scripts/rag_pipeline_parse_graph_chat.py --help
 ```
 
@@ -271,13 +264,9 @@ git checkout lhq-rag-dev -- `
   raganything/ `
   scripts/rag_pipeline_parse_graph_chat.py `
   scripts/image_query_refs.py `
-  scripts/build_table_matrix_from_storage.py `
-  scripts/strip_table_flat_from_chunks.py `
   scripts/list_ingested_docs.py `
-  scripts/naive_relevance.py `
-  tests/testparser_ingest_coalesce.py `
   pyproject.toml uv.lock `
-  config/env.example config/query_steering_profiles.json `
+  config/env.example `
   env.example
 
 git add -A
@@ -435,7 +424,6 @@ git rebase origin/main
 无（第一个合入）
 
 ## Test plan
-- [ ] `pytest tests/testparser_ingest_coalesce.py -q`
 - [ ] `uv run python scripts/rag_pipeline_parse_graph_chat.py --help`
 ```
 
@@ -537,6 +525,77 @@ A：可以，但 PR-A 含它仍约 15k 行（当前 +7,698），在限额内；�
 **Q：四个 PR 都合完后，`lhq-rag-dev` 还有用吗？**
 A：可作为历史归档；新功能建议从最新 `main` 拉分支。
 
+**Q：PR-A 半套代码上怎么做全量测试？瘦身和大改谁先谁后？**
+A：见下文 **「十一、PR-A 瘦身 ↔ `lhq-rag-dev` 全量大改同步」**。半套分支只做 A 范围冒烟；全量验收必须在 `lhq-rag-dev`（或已含 A 的集成分支）。
+
 ---
 
-*文档生成依据：2026-07-12 对 `lhq-rag-dev` 与 `origin/main` 的 diff 统计（`2665196` 起 `image_query_refs.py` 已剔除 legacy 死代码，较初版统计少约 2.1k 行）。*
+## 十一、PR-A 瘦身 ↔ `lhq-rag-dev` 全量大改同步
+
+> 背景：`pr-a-core-engine` **不含** Web / 客户端 / 部分 hooks，无法做产品级全量回归。  
+> 瘦身适合直接改 PR-A；rerank / `utils` / `image_query_refs` 等大改需在全量树上验证。  
+> **约定**：可等大改进 A（或紧跟 follow-up）后再合 #47 进 `main`；但瘦身结果必须先并进 `lhq-rag-dev`，否则大改不包含已瘦身状态。
+
+### 11.1 工作类型与分支
+
+| 工作 | 在哪改 | 如何上 PR / 全量树 |
+|------|--------|-------------------|
+| **#47 瘦身**（删 naive、拿掉 steering JSON、移出迁移脚本、env 合并等） | `pr-a-core-engine` | 直接 commit + push 更新 #47；**先不合 `main` 也可以** |
+| **全量大改**（`RERANK_RELEASE_*` 收敛、`utils` 拆分/去 hardcode、`image_query_refs` 去领域 hardcode） | 先在 **`lhq-rag-dev`** | 全量测绿后，再 **拣回** `pr-a-core-engine`（勿整支 merge） |
+
+### 11.2 推荐流水线（瘦身 → 同步到 lhq → 大改 → 拣回 A → 再合 main）
+
+```text
+1) git checkout pr-a-core-engine
+   # 瘦身改动 → commit → push origin pr-a-core-engine
+   # （更新 GitHub #47；此时可不 merge 进 main）
+
+2) 把瘦身带进全量树（关键：否则 lhq 仍是瘦身前的引擎）
+   git checkout lhq-rag-dev
+   git merge pr-a-core-engine
+   # 冲突时：保留 lhq 的 Web / client / pack；接受 A 的删除与瘦身
+   git push origin lhq-rag-dev
+
+3) 在 lhq-rag-dev 上做大改 + 全量测试
+   # 此时代码 = 全量产品面 + 已瘦身引擎
+
+4) 把「属于 PR-A 范围」的大改弄回 pr-a-core-engine
+   # 禁止：git merge lhq-rag-dev → pr-a-core-engine
+   #      （会把 web/、client_*、pack_client* 整包带进 #47）
+   # 允许：
+   #   - git cherry-pick <大改相关 commit>
+   #   - 或 git checkout lhq-rag-dev -- <仅 A 清单内文件> 后再 commit
+   git checkout pr-a-core-engine
+   # …拣回… → commit → push origin pr-a-core-engine
+
+5) 再合 #47 进 main（或先合瘦身版 A、再立刻合 follow-up；按评审节奏）
+```
+
+```mermaid
+flowchart LR
+  slim["1 瘦身 on pr-a"] --> pushA["push 更新 #47"]
+  pushA --> mergeLhq["2 merge A into lhq-rag-dev"]
+  mergeLhq --> big["3 大改 + 全量测 on lhq"]
+  big --> pick["4 cherry-pick / 拣文件回 pr-a"]
+  pick --> mergeMain["5 合 #47 进 main"]
+```
+
+### 11.3 方向禁忌
+
+| 操作 | 是否允许 | 原因 |
+|------|----------|------|
+| `merge pr-a-core-engine` → `lhq-rag-dev` | **允许（推荐）** | 全量树吸收瘦身 / 引擎修复 |
+| `merge lhq-rag-dev` → `pr-a-core-engine` | **禁止** | 污染 PR-A，混入 Web/打包 |
+| 只在 `pr-a` 瘦身、从不 merge 到 `lhq` 就开始大改 | **禁止（若大改在 lhq）** | 大改基于未瘦身代码，与 #47 分叉 |
+| 只在 `pr-a` 上跑「全量话术 / Web」验收 | **不够** | A 代码不全，结果不可信 |
+
+### 11.4 与「另开会话」的对应
+
+- **短会话 / 本 PR 急合前**：只做 §11.1 瘦身（在 `pr-a-core-engine`）。  
+- **另开会话**：先确认 §11.2 第 2 步已完成，再在 `lhq-rag-dev` 做 rerank / utils / image 大改，最后 §11.2 第 4 步拣回 A。  
+- 细节待办见 [`docs/PR47_下一步工作摘要.md`](PR47_下一步工作摘要.md)。
+
+---
+
+*文档生成依据：2026-07-12 对 `lhq-rag-dev` 与 `origin/main` 的 diff 统计（`2665196` 起 `image_query_refs.py` 已剔除 legacy 死代码，较初版统计少约 2.1k 行）。*  
+*§十一补充：2026-07-25 PR-A 评审收尾与全量验证约定。*

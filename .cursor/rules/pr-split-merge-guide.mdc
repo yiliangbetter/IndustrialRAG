@@ -27,5 +27,15 @@ alwaysApply: true
 - 不要把 PR-B 的打包/Web 脚本塞进 PR-A（#47）
 - 不要删除或在「清理误暂存 docs」时丢掉 `docs/PR拆分合入主线操作说明.md`
 - 改某个 GitHub PR 时必须在**对应分支**上改并 push，不要只改 `lhq-rag-dev` 却期望 PR 更新
+- **禁止** `git merge lhq-rag-dev` → `pr-a-core-engine`（会污染 #47）
+- 在 `lhq` 做大改前，须已 `merge pr-a-core-engine` → `lhq-rag-dev`（否则大改不含瘦身）
+
+## 瘦身 ↔ 全量大改（摘要）
+
+1. 瘦身在 `pr-a-core-engine` → push #47（可暂不合 main）  
+2. `merge A → lhq-rag-dev` → 全量大改并测  
+3. cherry-pick / 拣文件回 `pr-a` → 再合 main  
+
+详见文档 **§十一**。
 
 详细文件清单与 Git 步骤以文档正文为准。
