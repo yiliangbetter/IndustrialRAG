@@ -86,6 +86,9 @@ _CAPTION_INFER_MAX_GAP = 120.0
 _CAPTION_INFER_WINDOW = 8
 
 
+_KV_FIELD_LINE_RE = re.compile(r"^[^\s：:，。、,.]{2,8}：")
+
+
 def _looks_like_section_heading(text: str) -> bool:
     stripped = text.strip()
     if not stripped:
@@ -94,7 +97,9 @@ def _looks_like_section_heading(text: str) -> bool:
         return True
     if stripped.startswith("第") and "节" in stripped[:8]:
         return True
-    if stripped.startswith("保养") and "：" in stripped:
+    # Any short ``键：值`` field line is structural, never a figure caption
+    # (generalises the former ``保养`` prefix hardcode; no schema needed).
+    if _KV_FIELD_LINE_RE.match(stripped):
         return True
     return False
 
@@ -372,11 +377,47 @@ def neighbor_context_text(
     return " ".join(parts).strip()
 
 
+_COLUMN_IMAGE_RATIO = 0.5
+
+
+_COLUMN_TEXT_RATIO = 0.52
+
+
+def _page_content_width(items: List[Dict[str, Any]], page_idx: Any) -> float | None:
+    """Right-most bbox edge (max x1) among a page's items; column-split basis."""
+    max_x1: float | None = None
+    for it in items:
+        if not isinstance(it, dict) or it.get("page_idx") != page_idx:
+            continue
+        bbox = it.get("bbox")
+        if not isinstance(bbox, (list, tuple)) or len(bbox) < 3:
+            continue
+        try:
+            x1 = float(bbox[2])
+        except (TypeError, ValueError):
+            continue
+        if max_x1 is None or x1 > max_x1:
+            max_x1 = x1
+    return max_x1
+
+
 def _text_image_layout_distance(
-    img_center: tuple[float, float], text_center: tuple[float, float], text_bbox: Any
+    img_center: tuple[float, float],
+    text_center: tuple[float, float],
+    text_bbox: Any,
+    page_width: float | None = None,
 ) -> float:
-    """Prefer left-column text when the image sits in the right column (manual layout)."""
-    if img_center[0] > 500 and text_center[0] < 520:
+    """Prefer left-column text when the image sits in the right column (manual layout).
+
+    The column split is derived from the page's own bbox width (max x1) instead of
+    absolute pixel constants, so different page sizes normalise consistently.
+    """
+    if page_width and page_width > 0:
+        img_split = _COLUMN_IMAGE_RATIO * page_width
+        text_split = _COLUMN_TEXT_RATIO * page_width
+    else:
+        img_split, text_split = 500.0, 520.0
+    if img_center[0] > img_split and text_center[0] < text_split:
         return abs(text_center[1] - img_center[1])
     return math.hypot(text_center[0] - img_center[0], text_center[1] - img_center[1])
 
@@ -409,7 +450,10 @@ def _layout_distance_for_text_image_pair(
     if text_center is None or img_center is None:
         return None
 
-    dist = _text_image_layout_distance(img_center, text_center, text_item.get("bbox"))
+    page_width = _page_content_width(items, page_idx)
+    dist = _text_image_layout_distance(
+        img_center, text_center, text_item.get("bbox"), page_width
+    )
     text_bottom = _bbox_bottom(text_item.get("bbox"))
     img_top = _bbox_top(image_item.get("bbox"))
     if text_bottom is not None and img_top is not None:
@@ -549,6 +593,7 @@ def context_text_for_image(
             seen.add(cleaned)
             ordered.append(cleaned)
 
+    page_width = _page_content_width(items, page_idx)
     if page_idx is not None and img_center is not None:
         ranked: List[tuple[float, str]] = []
         for j, other in enumerate(items):
@@ -563,7 +608,9 @@ def context_text_for_image(
             text_center = _bbox_center(text_bbox)
             if text_center is None:
                 continue
-            dist = _text_image_layout_distance(img_center, text_center, text_bbox)
+            dist = _text_image_layout_distance(
+                img_center, text_center, text_bbox, page_width
+            )
             if j < index:
                 dist = max(0.0, dist - _TEXT_BEFORE_IMAGE_BONUS)
             elif j > index:

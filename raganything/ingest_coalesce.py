@@ -6,6 +6,8 @@ docs/utils_refactor_schema_induction.md).
 
 import os
 import re
+from collections import Counter
+from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Dict, List
 
@@ -56,7 +58,139 @@ _TABLE_INGEST_MARKER = "[Table]"
 _INGEST_SEGMENT_DELIMITER = "\n<<<RAG_SEG_BOUNDARY>>>\n"
 
 
-_MAINTENANCE_FIELD_PREFIXES = ("保养周期：", "保养内容：", "保养步骤：")
+# --- Per-document record-field schema induction -------------------------
+#
+# Record-style manuals (e.g. maintenance logs) repeat a fixed sequence of
+# ``键：值`` field lines such as ``保养周期：… / 保养内容：… / 保养步骤：…``.
+# The coalesce record-boundary / step-closed logic used to hardcode those
+# three Chinese field names.  Instead we induce each document's field roles
+# from its own structure (run-signature induction) so no business-domain
+# literal stays in the code.  A field line is any ``键：`` line whose key is
+# 2-8 chars long; a run is a maximal sequence of consecutive field lines
+# (image-ref segments do not break a run).  A signature repeating >=
+# _SCHEMA_MIN_REPEAT times with >= _SCHEMA_MIN_KEYS distinct keys marks a
+# record schema: first key = initiator (record boundary), last key of the
+# most frequent signature = closer (procedure / step-closed), the rest are
+# metadata.  Documents without a dominant signature get schema=None and the
+# record-field logic short-circuits to a no-op.
+_FIELD_KEY_RE = re.compile(r"^([^\s：:，。、,.]{2,8})：")
+
+_SCHEMA_MIN_REPEAT = 3
+
+_SCHEMA_MIN_KEYS = 2
+
+
+@dataclass(frozen=True)
+class DocFieldSchema:
+    """Induced ``键：值`` record-field roles for one document/section batch."""
+
+    initiator: str
+    closer: str
+    metadata_keys: frozenset
+
+    @property
+    def field_keys(self) -> frozenset:
+        return frozenset({self.initiator, self.closer, *self.metadata_keys})
+
+    def field_key(self, line: str) -> str | None:
+        """Return the leading key when ``line`` starts a schema field line."""
+        match = _FIELD_KEY_RE.match((line or "").strip())
+        if match and match.group(1) in self.field_keys:
+            return match.group(1)
+        return None
+
+    def is_initiator(self, key: str | None) -> bool:
+        return key == self.initiator
+
+    def is_closer(self, key: str | None) -> bool:
+        return key == self.closer
+
+    def is_metadata(self, key: str | None) -> bool:
+        return key in self.metadata_keys
+
+
+def _line_field_key(line: str) -> str | None:
+    """Leading ``键：`` key (2-8 chars) of any line, schema-independent."""
+    match = _FIELD_KEY_RE.match((line or "").strip())
+    return match.group(1) if match else None
+
+
+def induce_field_schema(segments: List[str]) -> DocFieldSchema | None:
+    """Induce record-field roles from a batch of ingest segments.
+
+    Returns ``None`` when no key-sequence signature repeats often enough,
+    which disables the record-field coalesce logic for that batch.
+    """
+    runs: List[tuple] = []
+    current: List[str] = []
+    for segment in segments:
+        seg = (segment or "").strip()
+        if not seg:
+            continue
+        if _is_image_ref_segment(seg) or _TABLE_INGEST_MARKER in seg:
+            continue  # image / table segments do not break a field run
+        key = _line_field_key(seg.split("\n", 1)[0])
+        if key:
+            current.append(key)
+        elif current:
+            runs.append(tuple(current))
+            current = []
+    if current:
+        runs.append(tuple(current))
+
+    counts = Counter(runs)
+    candidates = [
+        sig
+        for sig, count in counts.items()
+        if count >= _SCHEMA_MIN_REPEAT and len(set(sig)) >= _SCHEMA_MIN_KEYS
+    ]
+    if not candidates:
+        return None
+
+    families: Dict[str, List[tuple]] = {}
+    for sig in candidates:
+        families.setdefault(sig[0], []).append(sig)
+    family = max(
+        families.values(), key=lambda sigs: sum(counts[s] for s in sigs)
+    )
+    best = max(family, key=lambda s: counts[s])
+    initiator = best[0]
+    closer = best[-1]
+    metadata = frozenset(k for sig in family for k in sig if k not in (initiator, closer))
+    return DocFieldSchema(
+        initiator=initiator, closer=closer, metadata_keys=metadata
+    )
+
+
+def _segment_field_keys(segment: str, schema: DocFieldSchema | None) -> List[str]:
+    """Schema field keys appearing at the start of any line in ``segment``."""
+    if schema is None:
+        return []
+    seg = (segment or "").strip()
+    if not seg:
+        return []
+    keys: List[str] = []
+    for line in seg.splitlines():
+        key = schema.field_key(line)
+        if key:
+            keys.append(key)
+    return keys
+
+
+def _segment_has_field_line(segment: str, schema: DocFieldSchema | None) -> bool:
+    return bool(_segment_field_keys(segment, schema))
+
+
+def _segment_has_initiator(segment: str, schema: DocFieldSchema | None) -> bool:
+    if schema is None:
+        return False
+    return any(key == schema.initiator for key in _segment_field_keys(segment, schema))
+
+
+def _segment_has_closer(segment: str, schema: DocFieldSchema | None) -> bool:
+    if schema is None:
+        return False
+    return any(key == schema.closer for key in _segment_field_keys(segment, schema))
 
 
 _COALESCE_HEADING_LOOKAHEAD = 8
@@ -93,69 +227,66 @@ def _is_orphan_heading_segment(segment: str) -> bool:
     return _is_section_heading_line(lines[0])
 
 
-def _maintenance_field_prefix(line: str) -> str | None:
-    line = (line or "").strip()
-    for prefix in _MAINTENANCE_FIELD_PREFIXES:
-        if line.startswith(prefix):
-            return prefix
-    return None
-
-
-def _is_orphan_maintenance_field_segment(segment: str) -> bool:
+def _is_orphan_record_field_segment(
+    segment: str, schema: DocFieldSchema | None
+) -> bool:
     """Single parser field line(s) such as ``保养周期：…`` not yet merged into a section block."""
+    if schema is None:
+        return False
     seg = (segment or "").strip()
     if not seg or _is_image_ref_segment(seg) or _TABLE_INGEST_MARKER in seg:
         return False
     lines = [line.strip() for line in seg.splitlines() if line.strip()]
     if not lines:
         return False
-    if len(lines) == 1:
-        return _maintenance_field_prefix(lines[0]) is not None
-    return all(_maintenance_field_prefix(line) is not None for line in lines)
+    return all(schema.field_key(line) is not None for line in lines)
 
 
-def _is_orphan_maintenance_metadata_only_segment(segment: str) -> bool:
-    """Short 保养内容/周期 field line(s), not a standalone 保养步骤 block."""
-    if not _is_orphan_maintenance_field_segment(segment):
+def _is_orphan_record_metadata_only_segment(
+    segment: str, schema: DocFieldSchema | None
+) -> bool:
+    """Initiator/metadata field line(s) only, not a standalone closer block."""
+    if schema is None:
+        return False
+    if not _is_orphan_record_field_segment(segment, schema):
         return False
     lines = [line.strip() for line in (segment or "").splitlines() if line.strip()]
     if not lines:
         return False
-    if len(lines) == 1:
-        prefix = _maintenance_field_prefix(lines[0])
-        return prefix in ("保养周期：", "保养内容：")
-    return all(
-        _maintenance_field_prefix(line) in ("保养周期：", "保养内容：")
-        for line in lines
-    )
+    return all(schema.field_key(line) != schema.closer for line in lines)
 
 
 def _segment_starts_new_section(segment: str) -> bool:
     return _is_section_heading_line(_segment_first_line(segment))
 
 
-def _maintenance_section_step_closed(text: str) -> bool:
-    """True once a subsection already has a ``保养步骤：`` procedure line."""
-    seg = (text or "").strip()
-    return bool(seg) and "保养步骤：" in seg
+def _record_section_step_closed(text: str, schema: DocFieldSchema | None) -> bool:
+    """True once a subsection already has a closer (procedure) field line."""
+    return _segment_has_closer(text, schema)
 
 
-def _section_heading_needs_field_merge(segment: str) -> bool:
-    """Heading (+ optional image) block still missing 保养步骤 body."""
+def _section_heading_needs_field_merge(
+    segment: str, schema: DocFieldSchema | None
+) -> bool:
+    """Heading (+ optional image) block still missing its closer body."""
     seg = (segment or "").strip()
     if not seg or not _segment_starts_new_section(seg):
         return False
     if _is_orphan_heading_segment(seg):
         return False
-    if "保养步骤：" in seg:
+    if schema is None:
         return False
-    if seg.count("保养内容：") >= 1 and seg.count("保养周期：") >= 1:
+    if _segment_has_closer(seg, schema):
+        return False
+    if _segment_has_initiator(seg, schema) and any(
+        schema.is_metadata(key) for key in _segment_field_keys(seg, schema)
+    ):
         return False
     return True
 
 
-def _segment_has_maintenance_cycle(text: str) -> bool:
-    return "保养周期：" in (text or "")
+def _segment_has_record_cycle(text: str, schema: DocFieldSchema | None) -> bool:
+    return _segment_has_initiator(text, schema)
 
 
 def _split_block_at_trailing_orphan_heading(block: str) -> List[str]:
@@ -173,7 +304,9 @@ def _split_block_at_trailing_orphan_heading(block: str) -> List[str]:
     return [block]
 
 
-def _split_overmerged_maintenance_segment(segment: str) -> List[str]:
+def _split_overmerged_record_segment(
+    segment: str, schema: DocFieldSchema | None
+) -> List[str]:
     """Split one ingest segment that bundled multiple implicit subsections (Q7 page-9)."""
     seg = (segment or "").strip()
     if not seg or _is_image_ref_segment(seg) or _TABLE_INGEST_MARKER in seg:
@@ -202,20 +335,22 @@ def _split_overmerged_maintenance_segment(segment: str) -> List[str]:
                 sections.append(current)
             current = [block]
             continue
-        prefix = _maintenance_field_prefix(first_line)
+        first_key = schema.field_key(first_line) if schema else None
         joined = "\n\n".join(current)
         if (
-            prefix == "保养周期："
+            schema is not None
+            and first_key == schema.initiator
             and current
-            and _segment_has_maintenance_cycle(joined)
+            and _segment_has_initiator(joined, schema)
         ):
             sections.append(current)
             current = [block]
             continue
         if (
-            prefix == "保养内容："
+            schema is not None
+            and schema.is_metadata(first_key)
             and current
-            and _maintenance_section_step_closed(joined)
+            and _record_section_step_closed(joined, schema)
         ):
             sections.append(current)
             current = [block]
@@ -230,58 +365,71 @@ def _split_overmerged_maintenance_segment(segment: str) -> List[str]:
     ]
 
 
-def _explode_overmerged_segments(segments: List[str]) -> List[str]:
+def _explode_overmerged_segments(
+    segments: List[str], schema: DocFieldSchema | None
+) -> List[str]:
     out: List[str] = []
     for segment in segments:
-        out.extend(_split_overmerged_maintenance_segment(segment))
+        out.extend(_split_overmerged_record_segment(segment, schema))
     return out
 
 
-def _segment_has_maintenance_body(segment: str) -> bool:
+def _segment_has_record_body(segment: str, schema: DocFieldSchema | None) -> bool:
     seg = (segment or "").strip()
     if not seg:
         return False
     if _segment_starts_new_section(seg):
         return True
-    if "保养内容：" in seg or "保养步骤：" in seg or "保养周期：" in seg:
+    if _segment_has_field_line(seg, schema):
         return True
     return False
 
 
-def _follows_maintenance_subsection(segments: List[str], index: int) -> bool:
-    """True when the next part is a 保养周期/内容 metadata line (not 保养步骤 body)."""
+def _follows_record_subsection(
+    segments: List[str], index: int, schema: DocFieldSchema | None
+) -> bool:
+    """True when the next part is an initiator/metadata line (not closer body)."""
+    if schema is None:
+        return False
     if index + 1 >= len(segments):
         return False
     nxt = (segments[index + 1] or "").strip()
     if not nxt or _is_image_ref_segment(nxt):
         return False
-    prefix = _maintenance_field_prefix(_segment_first_line(nxt))
-    return prefix in ("保养周期：", "保养内容：")
+    key = schema.field_key(_segment_first_line(nxt))
+    return key is not None and key != schema.closer
 
 
-def _has_backward_procedure_for_heading(segments: List[str], index: int) -> bool:
-    """Orphan 保养步骤 before a heading may still belong to that section (Q7)."""
+def _has_backward_procedure_for_heading(
+    segments: List[str], index: int, schema: DocFieldSchema | None
+) -> bool:
+    """Orphan closer block before a heading may still belong to that section (Q7)."""
+    if schema is None:
+        return False
     for j in range(max(0, index - _COALESCE_METADATA_LOOKAHEAD), index):
         cand = (segments[j] or "").strip()
         if not cand or _is_image_ref_segment(cand):
             continue
-        if _is_orphan_maintenance_field_segment(cand):
-            if _maintenance_field_prefix(_segment_first_line(cand)) == "保养步骤：":
+        if _is_orphan_record_field_segment(cand, schema):
+            if schema.field_key(_segment_first_line(cand)) == schema.closer:
                 return True
-        elif "保养步骤：" in cand and not _segment_starts_new_section(cand):
+        elif _segment_has_closer(cand, schema) and not _segment_starts_new_section(cand):
             return True
     return False
 
 
-def _should_collect_maintenance_subsection(segments: List[str], index: int) -> bool:
-    return _follows_maintenance_subsection(
-        segments, index
-    ) and not _has_backward_procedure_for_heading(segments, index)
+def _should_collect_record_subsection(
+    segments: List[str], index: int, schema: DocFieldSchema | None
+) -> bool:
+    return _follows_record_subsection(
+        segments, index, schema
+    ) and not _has_backward_procedure_for_heading(segments, index, schema)
 
 
-def _collect_maintenance_section_parts(
+def _collect_record_section_parts(
     segments: List[str],
     start: int,
+    schema: DocFieldSchema | None,
 ) -> tuple[List[str], int]:
     """Collect heading/field lines and optional immediate ``[图片]`` for one subsection."""
     parts = [segments[start]]
@@ -293,16 +441,24 @@ def _collect_maintenance_section_parts(
             continue
         if _is_orphan_heading_segment(nxt):
             break
-        if _segment_starts_new_section(
-            nxt
-        ) and not _is_orphan_maintenance_field_segment(nxt):
+        if _segment_starts_new_section(nxt) and not _is_orphan_record_field_segment(
+            nxt, schema
+        ):
             break
-        if _is_orphan_maintenance_field_segment(nxt):
+        if _is_orphan_record_field_segment(nxt, schema):
             joined = "\n\n".join(parts)
-            nxt_prefix = _maintenance_field_prefix(_segment_first_line(nxt))
-            if nxt_prefix == "保养周期：" and _segment_has_maintenance_cycle(joined):
+            nxt_key = schema.field_key(_segment_first_line(nxt)) if schema else None
+            if (
+                schema is not None
+                and nxt_key == schema.initiator
+                and _segment_has_initiator(joined, schema)
+            ):
                 break
-            if nxt_prefix == "保养内容：" and _maintenance_section_step_closed(joined):
+            if (
+                schema is not None
+                and schema.is_metadata(nxt_key)
+                and _record_section_step_closed(joined, schema)
+            ):
                 break
             parts.append(nxt)
             j += 1
@@ -321,8 +477,10 @@ def _collect_maintenance_section_parts(
     return parts, j
 
 
-def _assemble_maintenance_section_segments(segments: List[str]) -> List[str]:
-    """Group numbered headings with following 保养内容/周期/步骤 fields before the figure."""
+def _assemble_record_section_segments(
+    segments: List[str], schema: DocFieldSchema | None
+) -> List[str]:
+    """Group numbered headings with following record field lines before the figure."""
     working = [
         (segment or "").strip() for segment in segments if (segment or "").strip()
     ]
@@ -335,19 +493,19 @@ def _assemble_maintenance_section_segments(segments: List[str]) -> List[str]:
             i += 1
             continue
         if _is_orphan_heading_segment(seg):
-            if _should_collect_maintenance_subsection(working, i):
-                parts, i = _collect_maintenance_section_parts(working, i)
+            if _should_collect_record_subsection(working, i, schema):
+                parts, i = _collect_record_section_parts(working, i, schema)
                 out.append("\n\n".join(parts))
                 continue
             out.append(seg)
             i += 1
             continue
         if _segment_starts_new_section(seg):
-            parts, i = _collect_maintenance_section_parts(working, i)
+            parts, i = _collect_record_section_parts(working, i, schema)
             out.append("\n\n".join(parts))
             continue
-        if _is_orphan_maintenance_metadata_only_segment(seg):
-            parts, i = _collect_maintenance_section_parts(working, i)
+        if _is_orphan_record_metadata_only_segment(seg, schema):
+            parts, i = _collect_record_section_parts(working, i, schema)
             out.append("\n\n".join(parts))
             continue
         out.append(seg)
@@ -355,51 +513,59 @@ def _assemble_maintenance_section_segments(segments: List[str]) -> List[str]:
     return out
 
 
-def _preceding_section_accepts_trailing_fields(segment: str) -> bool:
-    """True when a prior block may absorb following 保养周期/内容/步骤 lines."""
+def _preceding_section_accepts_trailing_fields(
+    segment: str, schema: DocFieldSchema | None
+) -> bool:
+    """True when a prior block may absorb following record field lines."""
     seg = (segment or "").strip()
     if not seg or _is_image_ref_segment(seg) or _TABLE_INGEST_MARKER in seg:
         return False
-    if _maintenance_section_step_closed(seg):
+    if _record_section_step_closed(seg, schema):
         return False
-    if _is_orphan_maintenance_field_segment(seg):
+    if _is_orphan_record_field_segment(seg, schema):
         return False
     return (
         _segment_starts_new_section(seg)
         or _segment_has_inline_image(seg)
-        or _segment_has_maintenance_body(seg)
+        or _segment_has_record_body(seg, schema)
     )
 
 
-def _merge_trailing_procedure_into_preceding(segments: List[str]) -> List[str]:
-    """Attach trailing 保养周期/内容/步骤 field blocks to the preceding section (Q7)."""
+def _merge_trailing_procedure_into_preceding(
+    segments: List[str], schema: DocFieldSchema | None
+) -> List[str]:
+    """Attach trailing record field blocks to the preceding section (Q7)."""
     working = [
         (segment or "").strip() for segment in segments if (segment or "").strip()
     ]
+    if schema is None:
+        return working
     max_passes = max(len(working) * 2, 8)
     for _ in range(max_passes):
         changed = False
         i = 1
         while i < len(working):
             seg = working[i]
-            if not _is_orphan_maintenance_field_segment(seg):
+            if not _is_orphan_record_field_segment(seg, schema):
                 i += 1
                 continue
-            first_prefix = _maintenance_field_prefix(_segment_first_line(seg))
-            if first_prefix not in _MAINTENANCE_FIELD_PREFIXES:
+            first_key = schema.field_key(_segment_first_line(seg))
+            if first_key is None:
                 i += 1
                 continue
             prev = working[i - 1]
-            if not _preceding_section_accepts_trailing_fields(prev):
+            if not _preceding_section_accepts_trailing_fields(prev, schema):
                 i += 1
                 continue
-            if first_prefix == "保养周期：" and _segment_has_maintenance_cycle(prev):
+            if first_key == schema.initiator and _segment_has_initiator(prev, schema):
                 i += 1
                 continue
-            if first_prefix == "保养内容：" and "保养内容：" in prev:
+            if schema.is_metadata(first_key) and any(
+                key == first_key for key in _segment_field_keys(prev, schema)
+            ):
                 i += 1
                 continue
-            if first_prefix == "保养步骤：" and "保养步骤：" in prev:
+            if first_key == schema.closer and _segment_has_closer(prev, schema):
                 i += 1
                 continue
             working[i - 1] = f"{prev}\n\n{seg}"
@@ -410,8 +576,10 @@ def _merge_trailing_procedure_into_preceding(segments: List[str]) -> List[str]:
     return working
 
 
-def _merge_unheaded_fields_with_heading_sections(segments: List[str]) -> List[str]:
-    """Merge anonymous 保养内容/步骤 blocks into a later thin heading section (Q7)."""
+def _merge_unheaded_fields_with_heading_sections(
+    segments: List[str], schema: DocFieldSchema | None
+) -> List[str]:
+    """Merge anonymous record field blocks into a later thin heading section (Q7)."""
     working = [
         (segment or "").strip() for segment in segments if (segment or "").strip()
     ]
@@ -420,7 +588,7 @@ def _merge_unheaded_fields_with_heading_sections(segments: List[str]) -> List[st
         if i in skip:
             continue
         seg = working[i]
-        if not _section_heading_needs_field_merge(seg):
+        if not _section_heading_needs_field_merge(seg, schema):
             continue
         heading = _segment_first_line(seg)
         best_j = -1
@@ -433,7 +601,7 @@ def _merge_unheaded_fields_with_heading_sections(segments: List[str]) -> List[st
                 continue
             if _is_orphan_heading_segment(cand):
                 continue
-            if _segment_starts_new_section(cand) and "保养步骤：" in cand:
+            if _segment_starts_new_section(cand) and _segment_has_closer(cand, schema):
                 continue
             score = text_term_alignment_symmetric(heading, cand)
             if score > best_score:
@@ -446,25 +614,33 @@ def _merge_unheaded_fields_with_heading_sections(segments: List[str]) -> List[st
     return [seg for idx, seg in enumerate(working) if idx not in skip]
 
 
-def _merge_orphan_maintenance_metadata_segments(segments: List[str]) -> List[str]:
+def _merge_orphan_record_metadata_segments(
+    segments: List[str], schema: DocFieldSchema | None
+) -> List[str]:
     """Forward-merge orphan field lines into the next body block within a short window."""
     working = [
         (segment or "").strip() for segment in segments if (segment or "").strip()
     ]
+    if schema is None:
+        return working
     max_passes = max(len(working) * 2, 8)
     for _ in range(max_passes):
         changed = False
         i = 0
         while i < len(working):
-            if not _is_orphan_maintenance_field_segment(working[i]):
+            if not _is_orphan_record_field_segment(working[i], schema):
                 i += 1
                 continue
             meta_parts: List[str] = []
             j = i
-            while j < len(working) and _is_orphan_maintenance_field_segment(working[j]):
+            while j < len(working) and _is_orphan_record_field_segment(
+                working[j], schema
+            ):
                 meta_parts.append(working[j])
                 j += 1
-            if meta_parts and _maintenance_section_step_closed("\n\n".join(meta_parts)):
+            if meta_parts and _record_section_step_closed(
+                "\n\n".join(meta_parts), schema
+            ):
                 i += len(meta_parts)
                 continue
             if j >= len(working):
@@ -477,7 +653,7 @@ def _merge_orphan_maintenance_metadata_segments(segments: List[str]) -> List[str
                     continue
                 if _segment_starts_new_section(
                     cand
-                ) and not _is_orphan_maintenance_field_segment(cand):
+                ) and not _is_orphan_record_field_segment(cand, schema):
                     continue
                 anchor = " ".join(meta_parts)
                 score = text_term_alignment_symmetric(anchor, cand)
@@ -491,7 +667,7 @@ def _merge_orphan_maintenance_metadata_segments(segments: List[str]) -> List[str
                     and not _is_image_ref_segment(cand)
                     and not (
                         _segment_starts_new_section(cand)
-                        and not _is_orphan_maintenance_field_segment(cand)
+                        and not _is_orphan_record_field_segment(cand, schema)
                     )
                 ):
                     best_k = j
@@ -523,7 +699,9 @@ def _segment_has_inline_image(segment: str) -> bool:
     return bool(seg) and (_is_image_ref_segment(seg) or _IMAGE_REF_MARKER in seg)
 
 
-def _is_thin_section_lead_segment(segment: str) -> bool:
+def _is_thin_section_lead_segment(
+    segment: str, schema: DocFieldSchema | None
+) -> bool:
     """Numbered section heading + optional short tail, no inline figure (Template B manuals)."""
     seg = (segment or "").strip()
     if not seg or _segment_has_inline_image(seg) or _TABLE_INGEST_MARKER in seg:
@@ -533,14 +711,18 @@ def _is_thin_section_lead_segment(segment: str) -> bool:
     lines = [line.strip() for line in seg.splitlines() if line.strip()]
     if not lines or len(lines) > 4:
         return False
-    if "保养步骤：" in seg:
+    if _segment_has_closer(seg, schema):
         return False
-    if seg.count("保养内容：") >= 1 and seg.count("保养周期：") >= 1:
+    if _segment_has_initiator(seg, schema) and any(
+        schema.is_metadata(key) for key in _segment_field_keys(seg, schema)
+    ):
         return False
     return True
 
 
-def _merge_thin_section_with_following_figure(segments: List[str]) -> List[str]:
+def _merge_thin_section_with_following_figure(
+    segments: List[str], schema: DocFieldSchema | None
+) -> List[str]:
     """Merge thin ``N.N 标题`` blocks with the immediate next figure-bearing segment."""
     working = [
         (segment or "").strip() for segment in segments if (segment or "").strip()
@@ -551,7 +733,7 @@ def _merge_thin_section_with_following_figure(segments: List[str]) -> List[str]:
     while i < n:
         seg = working[i]
         if (
-            _is_thin_section_lead_segment(seg)
+            _is_thin_section_lead_segment(seg, schema)
             and i + 1 < n
             and _segment_has_inline_image(working[i + 1])
             and not _segment_starts_new_section(working[i + 1])
@@ -632,6 +814,7 @@ def _heading_body_merge_score(
     candidate: str,
     segments: List[str],
     candidate_index: int,
+    schema: DocFieldSchema | None,
 ) -> float:
     score = text_term_alignment_symmetric(heading, candidate)
     inline_labels: List[str] = []
@@ -670,7 +853,7 @@ def _heading_body_merge_score(
                     nearest_img = max(nearest_img, align)
                     score = max(score, align * 0.88 + score * 0.12)
                 break
-            if _segment_has_maintenance_body(img_seg):
+            if _segment_has_record_body(img_seg, schema):
                 break
 
     if inline_labels:
@@ -692,6 +875,7 @@ def _best_heading_body_score_before(
     heading: str,
     working: List[str],
     heading_index: int,
+    schema: DocFieldSchema | None,
 ) -> float:
     best = 0.0
     for j in range(max(0, heading_index - _COALESCE_HEADING_LOOKAHEAD), heading_index):
@@ -700,21 +884,27 @@ def _best_heading_body_score_before(
             continue
         if _TABLE_INGEST_MARKER in cand:
             continue
-        if not _segment_has_maintenance_body(cand):
+        if not _segment_has_record_body(cand, schema):
             continue
-        best = max(best, _heading_body_merge_score(heading, cand, working, j))
+        best = max(best, _heading_body_merge_score(heading, cand, working, j, schema))
     return best
 
 
-def _maintenance_step_alignment(heading: str, candidate: str) -> float:
+def _record_step_alignment(
+    heading: str, candidate: str, schema: DocFieldSchema | None
+) -> float:
+    if schema is None:
+        return 0.0
     best = 0.0
     for line in (candidate or "").splitlines():
-        if line.startswith("保养步骤："):
+        if schema.field_key(line) == schema.closer:
             best = max(best, text_term_alignment_symmetric(heading, line))
     return best
 
 
-def _merge_trailing_orphan_headings_backward(working: List[str]) -> List[str]:
+def _merge_trailing_orphan_headings_backward(
+    working: List[str], schema: DocFieldSchema | None
+) -> List[str]:
     """Exclusive backward pairing when headings trail their body blocks (Q3)."""
     heading_indices = [
         idx for idx, seg in enumerate(working) if _is_orphan_heading_segment(seg)
@@ -727,7 +917,7 @@ def _merge_trailing_orphan_headings_backward(working: List[str]) -> List[str]:
         if not _is_orphan_heading_segment(seg)
         and not _is_image_ref_segment(seg)
         and _TABLE_INGEST_MARKER not in seg
-        and _segment_has_maintenance_body(seg)
+        and _segment_has_record_body(seg, schema)
     ]
     if not body_indices:
         return working
@@ -735,9 +925,9 @@ def _merge_trailing_orphan_headings_backward(working: List[str]) -> List[str]:
     for hi in heading_indices:
         heading = working[hi]
         for bi in body_indices:
-            score = _heading_body_merge_score(heading, working[bi], working, bi)
+            score = _heading_body_merge_score(heading, working[bi], working, bi, schema)
             if score >= 0.12:
-                step_align = _maintenance_step_alignment(heading, working[bi])
+                step_align = _record_step_alignment(heading, working[bi], schema)
                 pairs.append((score, step_align, -abs(hi - bi), hi, bi))
     pairs.sort(key=lambda item: (item[0], item[1], item[2]), reverse=True)
     used_headings: set[int] = set()
@@ -751,7 +941,9 @@ def _merge_trailing_orphan_headings_backward(working: List[str]) -> List[str]:
     return [seg for idx, seg in enumerate(working) if idx not in used_headings]
 
 
-def _merge_orphan_heading_segments(segments: List[str]) -> List[str]:
+def _merge_orphan_heading_segments(
+    segments: List[str], schema: DocFieldSchema | None
+) -> List[str]:
     """Attach orphan section headings (e.g. ``2.1.1 …``) to the best-aligned body block."""
     working = [
         (segment or "").strip() for segment in segments if (segment or "").strip()
@@ -775,11 +967,11 @@ def _merge_orphan_heading_segments(segments: List[str]) -> List[str]:
                     break
                 if _TABLE_INGEST_MARKER in cand or _is_image_ref_segment(cand):
                     continue
-                score = _heading_body_merge_score(heading, cand, working, j)
+                score = _heading_body_merge_score(heading, cand, working, j, schema)
                 if score > best_score:
                     best_score = score
                     best_j = j
-            backward_best = _best_heading_body_score_before(heading, working, i)
+            backward_best = _best_heading_body_score_before(heading, working, i, schema)
             if (
                 best_j >= 0
                 and backward_best >= 0.12
@@ -807,7 +999,7 @@ def _merge_orphan_heading_segments(segments: List[str]) -> List[str]:
             i += 1
         if not changed:
             break
-    return _merge_trailing_orphan_headings_backward(working)
+    return _merge_trailing_orphan_headings_backward(working, schema)
 
 
 def _coalesce_immediate_text_image_segments(segments: List[str]) -> List[str]:
@@ -889,23 +1081,32 @@ def _lookahead_pair_text_image_segments(
     return out
 
 
-def coalesce_text_image_segments(segments: List[str]) -> List[str]:
+def coalesce_text_image_segments(
+    segments: List[str], schema: DocFieldSchema | None = None
+) -> List[str]:
     """Merge anchor text with inline figures for indexing (P2: headings + lookahead).
 
     Keeps figure metadata in the same vector chunk as the anchor body so rerank +
     steering filter text and inline figures together (Route A ingest).
+
+    ``schema`` is normally induced once over the whole document by the table-aware
+    entry points and threaded down so tiny single-record section groups still share
+    the document-level field roles.  When omitted (direct callers) it is induced
+    locally over ``segments``.
     """
     if not segments:
         return []
-    exploded = _explode_overmerged_segments(segments)
-    assembled = _assemble_maintenance_section_segments(exploded)
-    metadata = _merge_orphan_maintenance_metadata_segments(assembled)
-    bridged = _merge_unheaded_fields_with_heading_sections(metadata)
-    merged = _merge_orphan_heading_segments(bridged)
+    if schema is None:
+        schema = induce_field_schema(segments)
+    exploded = _explode_overmerged_segments(segments, schema)
+    assembled = _assemble_record_section_segments(exploded, schema)
+    metadata = _merge_orphan_record_metadata_segments(assembled, schema)
+    bridged = _merge_unheaded_fields_with_heading_sections(metadata, schema)
+    merged = _merge_orphan_heading_segments(bridged, schema)
     split = _split_multi_image_segments(merged)
-    thin_fig = _merge_thin_section_with_following_figure(split)
+    thin_fig = _merge_thin_section_with_following_figure(split, schema)
     paired = _lookahead_pair_text_image_segments(thin_fig)
-    trailing = _merge_trailing_procedure_into_preceding(paired)
+    trailing = _merge_trailing_procedure_into_preceding(paired, schema)
     return _coalesce_immediate_text_image_segments(trailing)
 
 
@@ -1028,11 +1229,13 @@ def _split_sub_parts_at_section_heading_boundaries(
     return groups
 
 
-def _coalesce_sub_parts_by_section(sub_parts: List[str]) -> List[str]:
+def _coalesce_sub_parts_by_section(
+    sub_parts: List[str], schema: DocFieldSchema | None = None
+) -> List[str]:
     """Run P2 coalesce within each numbered-section batch (avoids mega-doc cross-merge)."""
     out: List[str] = []
     for group in _split_sub_parts_at_section_heading_boundaries(sub_parts):
-        out.extend(coalesce_text_image_segments(group))
+        out.extend(coalesce_text_image_segments(group, schema=schema))
     return out
 
 
@@ -1046,22 +1249,29 @@ def coalesce_parts_for_embedding_ingest(
         if table_aware_ingest_enabled():
             return build_table_aware_ingest_segments(document_parts)
         parts = [p.strip() for p in document_parts if p.strip()]
-        return _coalesce_sub_parts_by_section(parts) if parts else []
+        if not parts:
+            return []
+        return _coalesce_sub_parts_by_section(parts, induce_field_schema(parts))
     segments = [s.strip() for s in (text_content or "").split("\n\n") if s.strip()]
-    return _coalesce_sub_parts_by_section(segments) if segments else []
+    if not segments:
+        return []
+    return _coalesce_sub_parts_by_section(segments, induce_field_schema(segments))
 
 
 def build_table_aware_ingest_segments(document_parts: List[str]) -> List[str]:
     """Keep each ``[Table]`` block intact; coalesce adjacent non-table parts."""
     segments: List[str] = []
     buf: List[str] = []
+    # Induce field roles once over the whole document so single-record section
+    # groups still share the document-level schema (run-signature needs >=3 reps).
+    schema = induce_field_schema([p for p in document_parts if (p or "").strip()])
 
     def flush_buf() -> None:
         nonlocal buf
         if not buf:
             return
         sub_parts = [p.strip() for p in buf if (p or "").strip()]
-        segments.extend(_coalesce_sub_parts_by_section(sub_parts))
+        segments.extend(_coalesce_sub_parts_by_section(sub_parts, schema))
         buf = []
 
     for part in document_parts:
