@@ -1,6 +1,7 @@
 import pytest
 
 from raganything.batch_parser import BatchParser
+from raganything.parser import MineruParser
 
 
 def test_batch_parser_uses_paddleocr_parser():
@@ -202,3 +203,147 @@ async def test_parse_document_office_skips_none_method(monkeypatch, tmp_path):
     await dummy.parse_document(str(fake_docx), parse_method=None, method=None)
 
     assert "method" not in captured_kwargs
+
+
+@pytest.mark.parametrize(
+    ("conversion_method", "parse_method_name"),
+    [
+        ("convert_text_to_pdf", "parse_text_file"),
+        ("convert_office_to_pdf", "parse_office_doc"),
+    ],
+)
+def test_mineru_converted_documents_forward_parse_method(
+    monkeypatch, tmp_path, conversion_method, parse_method_name
+):
+    """Office/text→PDF conversion must forward method/lang into parse_pdf.
+
+    Regression guard for the production-only fix that started forwarding
+    `method` after LibreOffice/text conversion (otherwise OCR selection is
+    silently dropped and MinerU always uses `auto`).
+    """
+    source = tmp_path / ("source.md" if "text" in parse_method_name else "source.docx")
+    source.write_bytes(b"input")
+    converted_pdf = tmp_path / "converted.pdf"
+    converted_pdf.write_bytes(b"%PDF-1.4\n")
+    captured = {}
+
+    def fake_convert(cls, file_path, output_dir=None):
+        captured["converted_from"] = file_path
+        captured["convert_output_dir"] = output_dir
+        return converted_pdf
+
+    def fake_parse_pdf(self, pdf_path, output_dir=None, method="auto", lang=None, **kw):
+        captured["parse_pdf"] = {
+            "pdf_path": pdf_path,
+            "output_dir": output_dir,
+            "method": method,
+            "lang": lang,
+            "kwargs": kw,
+        }
+        return [{"type": "text", "text": "parsed"}]
+
+    monkeypatch.setattr(MineruParser, conversion_method, classmethod(fake_convert))
+    monkeypatch.setattr(MineruParser, "parse_pdf", fake_parse_pdf)
+
+    parser = MineruParser()
+    result = getattr(parser, parse_method_name)(
+        source,
+        output_dir=str(tmp_path / "out"),
+        lang="ch",
+        method="ocr",
+        backend="pipeline",
+    )
+
+    assert result == [{"type": "text", "text": "parsed"}]
+    assert captured["converted_from"] == source
+    assert captured["convert_output_dir"] == str(tmp_path / "out")
+    assert captured["parse_pdf"] == {
+        "pdf_path": converted_pdf,
+        "output_dir": str(tmp_path / "out"),
+        "method": "ocr",
+        "lang": "ch",
+        "kwargs": {"backend": "pipeline"},
+    }
+
+
+@pytest.mark.asyncio
+async def test_parse_document_image_falls_back_to_mineru(monkeypatch, tmp_path):
+    """Custom/Docling parsers without image support must fall back to MinerU."""
+    import raganything.processor as processor_module
+
+    class FakeLogger:
+        def info(self, *args, **kwargs):
+            pass
+
+        def warning(self, *args, **kwargs):
+            pass
+
+        def error(self, *args, **kwargs):
+            pass
+
+        def debug(self, *args, **kwargs):
+            pass
+
+    class UnsupportedImageParser:
+        def parse_image(self, **kwargs):
+            raise NotImplementedError("image parsing not supported")
+
+    mineru_calls = []
+
+    class FakeMineruParser:
+        def parse_image(self, **kwargs):
+            mineru_calls.append(kwargs)
+            return [{"type": "text", "text": "mineru image fallback", "page_idx": 0}]
+
+    monkeypatch.setattr(
+        processor_module,
+        "get_parser",
+        lambda parser_name: UnsupportedImageParser(),
+    )
+    monkeypatch.setattr(processor_module, "MineruParser", FakeMineruParser)
+
+    class DummyProcessor(processor_module.ProcessorMixin):
+        pass
+
+    dummy = DummyProcessor()
+    dummy.config = type(
+        "Config",
+        (),
+        {
+            "parser": "docling",
+            "parser_output_dir": str(tmp_path / "output"),
+            "parse_method": "auto",
+            "display_content_stats": False,
+            "use_full_path": False,
+        },
+    )()
+    dummy.logger = FakeLogger()
+    dummy.parse_cache = None
+
+    async def fake_store_cached_result(*args, **kwargs):
+        return None
+
+    monkeypatch.setattr(
+        DummyProcessor,
+        "_store_cached_result",
+        fake_store_cached_result,
+        raising=False,
+    )
+    monkeypatch.setattr(
+        DummyProcessor,
+        "_generate_content_based_doc_id",
+        lambda self, content_list: "doc-image",
+        raising=False,
+    )
+
+    fake_png = tmp_path / "figure.png"
+    fake_png.write_bytes(b"\x89PNG\r\n\x1a\n")
+
+    content_list, doc_id = await dummy.parse_document(str(fake_png))
+
+    assert doc_id == "doc-image"
+    assert content_list == [
+        {"type": "text", "text": "mineru image fallback", "page_idx": 0}
+    ]
+    assert len(mineru_calls) == 1
+    assert mineru_calls[0]["image_path"] == fake_png
