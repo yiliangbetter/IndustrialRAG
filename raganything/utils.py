@@ -10,6 +10,11 @@ from pathlib import Path
 from lightrag.utils import logger
 
 
+# MinerU v2 prose block types. These are not multimodal; callers recover
+# plaintext via ProcessorMixin._plaintext_from_mineru_blocks when needed.
+_MINERU_V2_PROSE_TYPES = frozenset({"title", "paragraph", "list"})
+
+
 def separate_content(
     content_list: List[Dict[str, Any]],
 ) -> Tuple[str, List[Dict[str, Any]]]:
@@ -33,6 +38,11 @@ def separate_content(
             text = item.get("text", "")
             if text.strip():
                 text_parts.append(text)
+        elif content_type in _MINERU_V2_PROSE_TYPES:
+            # Prose blocks must not go through GenericModalProcessor — that
+            # double-processes document body as KG entities when plaintext is
+            # recovered separately for text insert.
+            continue
         else:
             # Multimodal content (image, table, equation, etc.)
             multimodal_items.append(item)

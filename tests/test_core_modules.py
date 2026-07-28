@@ -173,8 +173,40 @@ class TestSeparateContent:
         text, multimodal = separate_content(content)
         assert "no type field" in text
 
+    def test_mineru_v2_prose_types_are_not_multimodal(self):
+        """title/paragraph/list must not be routed to GenericModalProcessor."""
+        content = [
+            {
+                "type": "title",
+                "content": {"title_content": [{"type": "text", "content": "Intro"}]},
+            },
+            {
+                "type": "paragraph",
+                "content": {
+                    "paragraph_content": [{"type": "text", "content": "Body text"}]
+                },
+            },
+            {
+                "type": "list",
+                "content": {
+                    "list_items": [
+                        {
+                            "item_content": [
+                                {"type": "text", "content": "item one"}
+                            ]
+                        }
+                    ]
+                },
+            },
+            {"type": "image", "img_path": "/abs/fig.png"},
+            {"type": "table", "table_body": "|a|b|"},
+            {"type": "equation", "latex": "E=mc^2"},
+        ]
+        text, multimodal = separate_content(content)
+        # Nested prose is recovered by _plaintext_from_mineru_blocks, not here
+        assert text == ""
+        assert [m["type"] for m in multimodal] == ["image", "table", "equation"]
 
-# ── Image Encoding Tests ─────────────────────────────────────────
 
 
 class TestEncodeImageToBase64:

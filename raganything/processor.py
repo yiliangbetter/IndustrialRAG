@@ -42,7 +42,7 @@ class ProcessorMixin:
             return os.path.basename(file_path)
 
     def _generate_cache_key(
-        self, file_path: Path, parse_method: str = None, **kwargs
+        self, file_path: Path, parse_method: str = None, output_dir: str = None, **kwargs
     ) -> str:
         """
         Generate cache key based on file path and parsing configuration
@@ -50,6 +50,7 @@ class ProcessorMixin:
         Args:
             file_path: Path to the file
             parse_method: Parse method used
+            output_dir: Parser output directory (image artifacts live here)
             **kwargs: Additional parser parameters
 
         Returns:
@@ -65,6 +66,10 @@ class ProcessorMixin:
             "mtime": mtime,
             "parser": self.config.parser,
             "parse_method": parse_method or self.config.parse_method,
+            # output_dir affects where MinerU writes images referenced by img_path
+            "output_dir": str(Path(output_dir).resolve())
+            if output_dir
+            else str(Path(self.config.parser_output_dir).resolve()),
         }
 
         # Add relevant kwargs to config
@@ -90,6 +95,20 @@ class ProcessorMixin:
         cache_key = hashlib.md5(config_str.encode()).hexdigest()
 
         return cache_key
+
+    @staticmethod
+    def _cached_content_artifacts_exist(content_list: List[Dict[str, Any]]) -> bool:
+        """Return False if any cached multimodal image path is missing on disk."""
+        for item in content_list or []:
+            if not isinstance(item, dict):
+                continue
+            for field_name in ("img_path", "table_img_path", "equation_img_path"):
+                img_path = item.get(field_name)
+                if not img_path:
+                    continue
+                if not Path(img_path).exists():
+                    return False
+        return True
 
     def _generate_content_based_doc_id(self, content_list: List[Dict[str, Any]]) -> str:
         """
@@ -273,7 +292,12 @@ class ProcessorMixin:
         await self.lightrag._insert_done()
 
     async def _get_cached_result(
-        self, cache_key: str, file_path: Path, parse_method: str = None, **kwargs
+        self,
+        cache_key: str,
+        file_path: Path,
+        parse_method: str = None,
+        output_dir: str = None,
+        **kwargs,
     ) -> tuple[List[Dict[str, Any]], str] | None:
         """
         Get cached parsing result if available and valid
@@ -282,6 +306,7 @@ class ProcessorMixin:
             cache_key: Cache key to look up
             file_path: Path to the file for mtime check
             parse_method: Parse method used
+            output_dir: Parser output directory used for this parse
             **kwargs: Additional parser parameters
 
         Returns:
@@ -303,11 +328,20 @@ class ProcessorMixin:
                 self.logger.debug(f"Cache invalid - file modified: {cache_key}")
                 return None
 
+            resolved_output_dir = str(
+                Path(
+                    output_dir
+                    if output_dir is not None
+                    else self.config.parser_output_dir
+                ).resolve()
+            )
+
             # Check parsing configuration
             cached_config = cached_data.get("parse_config", {})
             current_config = {
                 "parser": self.config.parser,
                 "parse_method": parse_method or self.config.parse_method,
+                "output_dir": resolved_output_dir,
             }
 
             # Add relevant kwargs to current config
@@ -328,6 +362,8 @@ class ProcessorMixin:
             }
             current_config.update(relevant_kwargs)
 
+            # Older cache entries lack output_dir; treat missing key as mismatch
+            # so a re-parse stores the new schema rather than serving stale paths.
             if cached_config != current_config:
                 self.logger.debug(f"Cache invalid - config changed: {cache_key}")
                 return None
@@ -336,6 +372,11 @@ class ProcessorMixin:
             doc_id = cached_data.get("doc_id")
 
             if content_list and doc_id:
+                if not self._cached_content_artifacts_exist(content_list):
+                    self.logger.info(
+                        f"Cache invalid - missing image artifacts for key: {cache_key}"
+                    )
+                    return None
                 self.logger.debug(
                     f"Found valid cached parsing result for key: {cache_key}"
                 )
@@ -358,6 +399,7 @@ class ProcessorMixin:
         doc_id: str,
         file_path: Path,
         parse_method: str = None,
+        output_dir: str = None,
         **kwargs,
     ) -> None:
         """
@@ -369,6 +411,7 @@ class ProcessorMixin:
             doc_id: Content-based document ID
             file_path: Path to the file for mtime storage
             parse_method: Parse method used
+            output_dir: Parser output directory used for this parse
             **kwargs: Additional parser parameters
         """
         if not hasattr(self, "parse_cache") or self.parse_cache is None:
@@ -378,10 +421,19 @@ class ProcessorMixin:
             # Get file modification time
             file_mtime = file_path.stat().st_mtime
 
+            resolved_output_dir = str(
+                Path(
+                    output_dir
+                    if output_dir is not None
+                    else self.config.parser_output_dir
+                ).resolve()
+            )
+
             # Create parsing configuration
             parse_config = {
                 "parser": self.config.parser,
                 "parse_method": parse_method or self.config.parse_method,
+                "output_dir": resolved_output_dir,
             }
 
             # Add relevant kwargs to config
@@ -465,11 +517,13 @@ class ProcessorMixin:
             )
 
         # Generate cache key based on file and configuration
-        cache_key = self._generate_cache_key(file_path, parse_method, **kwargs)
+        cache_key = self._generate_cache_key(
+            file_path, parse_method, output_dir=output_dir, **kwargs
+        )
 
         # Check cache first
         cached_result = await self._get_cached_result(
-            cache_key, file_path, parse_method, **kwargs
+            cache_key, file_path, parse_method, output_dir=output_dir, **kwargs
         )
         if cached_result is not None:
             content_list, doc_id = cached_result
@@ -612,7 +666,13 @@ class ProcessorMixin:
 
         # Store result in cache
         await self._store_cached_result(
-            cache_key, content_list, doc_id, file_path, parse_method, **kwargs
+            cache_key,
+            content_list,
+            doc_id,
+            file_path,
+            parse_method,
+            output_dir=output_dir,
+            **kwargs,
         )
 
         # Display content statistics if requested
@@ -843,43 +903,9 @@ class ProcessorMixin:
 
         # Update doc_status to include multimodal chunks in the standard chunks_list
         if multimodal_chunk_ids:
-            try:
-                # Get current document status
-                current_doc_status = await self.lightrag.doc_status.get_by_id(doc_id)
-
-                if current_doc_status:
-                    existing_chunks_list = current_doc_status.get("chunks_list", [])
-                    existing_chunks_count = current_doc_status.get("chunks_count", 0)
-
-                    # Add multimodal chunks to the standard chunks_list
-                    updated_chunks_list = existing_chunks_list + multimodal_chunk_ids
-                    updated_chunks_count = existing_chunks_count + len(
-                        multimodal_chunk_ids
-                    )
-
-                    # Update document status with integrated chunk list
-                    await self.lightrag.doc_status.upsert(
-                        {
-                            doc_id: {
-                                **current_doc_status,  # Keep existing fields
-                                "chunks_list": updated_chunks_list,  # Integrated chunks list
-                                "chunks_count": updated_chunks_count,  # Updated total count
-                                "updated_at": time.strftime("%Y-%m-%dT%H:%M:%S+00:00"),
-                            }
-                        }
-                    )
-
-                    # Ensure doc_status update is persisted to disk
-                    await self.lightrag.doc_status.index_done_callback()
-
-                    self.logger.info(
-                        f"Updated doc_status with {len(multimodal_chunk_ids)} multimodal chunks integrated into chunks_list"
-                    )
-
-            except Exception as e:
-                self.logger.warning(
-                    f"Error updating doc_status with multimodal chunks: {e}"
-                )
+            await self._update_doc_status_with_chunks_type_aware(
+                doc_id, multimodal_chunk_ids
+            )
 
         # Batch merge all multimodal content results (similar to text content processing)
         if all_chunk_results:
@@ -1528,33 +1554,46 @@ class ProcessorMixin:
             # Get current document status
             current_doc_status = await self.lightrag.doc_status.get_by_id(doc_id)
 
-            if current_doc_status:
-                existing_chunks_list = current_doc_status.get("chunks_list", [])
-                existing_chunks_count = current_doc_status.get("chunks_count", 0)
+            if current_doc_status is None:
+                # Multimodal-only ingest never creates doc_status via text ainsert.
+                # Create a minimal record so chunk lists and completion flags persist
+                # and retries do not duplicate entities/chunks.
+                current_doc_status = {
+                    "status": DocStatus.PROCESSED,
+                    "chunks_list": [],
+                    "chunks_count": 0,
+                    "multimodal_processed": False,
+                    "content_summary": "",
+                    "content": "",
+                    "error_msg": "",
+                }
 
-                # Add multimodal chunks to the standard chunks_list
-                updated_chunks_list = existing_chunks_list + chunk_ids
-                updated_chunks_count = existing_chunks_count + len(chunk_ids)
+            existing_chunks_list = current_doc_status.get("chunks_list", [])
+            existing_chunks_count = current_doc_status.get("chunks_count", 0)
 
-                # Update document status with integrated chunk list
-                await self.lightrag.doc_status.upsert(
-                    {
-                        doc_id: {
-                            **current_doc_status,  # Keep existing fields
-                            "chunks_list": updated_chunks_list,  # Integrated chunks list
-                            "chunks_count": updated_chunks_count,  # Updated total count
-                            "updated_at": time.strftime("%Y-%m-%dT%H:%M:%S+00:00"),
-                        }
+            # Add multimodal chunks to the standard chunks_list
+            updated_chunks_list = existing_chunks_list + chunk_ids
+            updated_chunks_count = existing_chunks_count + len(chunk_ids)
+
+            # Update document status with integrated chunk list
+            await self.lightrag.doc_status.upsert(
+                {
+                    doc_id: {
+                        **current_doc_status,  # Keep existing fields
+                        "chunks_list": updated_chunks_list,  # Integrated chunks list
+                        "chunks_count": updated_chunks_count,  # Updated total count
+                        "updated_at": time.strftime("%Y-%m-%dT%H:%M:%S+00:00"),
                     }
-                )
+                }
+            )
 
-                # Ensure doc_status update is persisted to disk
-                await self.lightrag.doc_status.index_done_callback()
+            # Ensure doc_status update is persisted to disk
+            await self.lightrag.doc_status.index_done_callback()
 
-                self.logger.info(
-                    f"Updated doc_status: added {len(chunk_ids)} multimodal chunks to standard chunks_list "
-                    f"(total chunks: {updated_chunks_count})"
-                )
+            self.logger.info(
+                f"Updated doc_status: added {len(chunk_ids)} multimodal chunks to standard chunks_list "
+                f"(total chunks: {updated_chunks_count})"
+            )
 
         except Exception as e:
             self.logger.warning(
@@ -1565,20 +1604,30 @@ class ProcessorMixin:
         """Mark multimodal content processing as complete in the document status."""
         try:
             current_doc_status = await self.lightrag.doc_status.get_by_id(doc_id)
-            if current_doc_status:
-                await self.lightrag.doc_status.upsert(
-                    {
-                        doc_id: {
-                            **current_doc_status,
-                            "multimodal_processed": True,
-                            "updated_at": time.strftime("%Y-%m-%dT%H:%M:%S+00:00"),
-                        }
+            if current_doc_status is None:
+                # Create status when text insert was skipped (multimodal-only docs).
+                current_doc_status = {
+                    "status": DocStatus.PROCESSED,
+                    "chunks_list": [],
+                    "chunks_count": 0,
+                    "content_summary": "",
+                    "content": "",
+                    "error_msg": "",
+                }
+            await self.lightrag.doc_status.upsert(
+                {
+                    doc_id: {
+                        **current_doc_status,
+                        "status": current_doc_status.get("status", DocStatus.PROCESSED),
+                        "multimodal_processed": True,
+                        "updated_at": time.strftime("%Y-%m-%dT%H:%M:%S+00:00"),
                     }
-                )
-                await self.lightrag.doc_status.index_done_callback()
-                self.logger.debug(
-                    f"Marked multimodal content processing as complete for document {doc_id}"
-                )
+                }
+            )
+            await self.lightrag.doc_status.index_done_callback()
+            self.logger.debug(
+                f"Marked multimodal content processing as complete for document {doc_id}"
+            )
         except Exception as e:
             self.logger.warning(
                 f"Error marking multimodal processing as complete for document {doc_id}: {e}"
