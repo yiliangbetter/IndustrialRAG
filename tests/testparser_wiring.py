@@ -202,3 +202,109 @@ async def test_parse_document_office_skips_none_method(monkeypatch, tmp_path):
     await dummy.parse_document(str(fake_docx), parse_method=None, method=None)
 
     assert "method" not in captured_kwargs
+
+
+@pytest.mark.asyncio
+async def test_parse_document_generic_routes_md_txt_with_method(monkeypatch, tmp_path):
+    """`.md`/`.txt` must use parse_document and forward the configured method."""
+    import raganything.processor as processor_module
+
+    class FakeLogger:
+        def info(self, *args, **kwargs):
+            pass
+
+        def warning(self, *args, **kwargs):
+            pass
+
+        def error(self, *args, **kwargs):
+            pass
+
+        def debug(self, *args, **kwargs):
+            pass
+
+    captured = []
+
+    class FakeParser:
+        def parse_pdf(self, **kwargs):
+            raise AssertionError("PDF path should not be used for text files")
+
+        def parse_office_doc(self, **kwargs):
+            raise AssertionError("Office path should not be used for text files")
+
+        def parse_document(self, **kwargs):
+            captured.append(kwargs)
+            return [
+                {
+                    "type": "text",
+                    "text": f"generic:{kwargs['file_path'].suffix}",
+                    "page_idx": 0,
+                }
+            ]
+
+    monkeypatch.setattr(
+        processor_module,
+        "get_parser",
+        lambda parser_name: FakeParser(),
+    )
+
+    class DummyProcessor(processor_module.ProcessorMixin):
+        pass
+
+    dummy = DummyProcessor()
+    dummy.config = type(
+        "Config",
+        (),
+        {
+            "parser": "mineru",
+            "parser_output_dir": str(tmp_path / "output"),
+            "parse_method": "auto",
+            "display_content_stats": False,
+            "use_full_path": False,
+        },
+    )()
+    dummy.logger = FakeLogger()
+    dummy.parse_cache = None
+
+    async def fake_store_cached_result(*args, **kwargs):
+        return None
+
+    monkeypatch.setattr(
+        DummyProcessor,
+        "_store_cached_result",
+        fake_store_cached_result,
+        raising=False,
+    )
+    monkeypatch.setattr(
+        DummyProcessor,
+        "_generate_content_based_doc_id",
+        lambda self, content_list: "doc-generic",
+        raising=False,
+    )
+
+    md_file = tmp_path / "notes.md"
+    txt_file = tmp_path / "notes.txt"
+    md_file.write_text("# hello")
+    txt_file.write_text("hello")
+
+    md_content, md_id = await dummy.parse_document(
+        str(md_file), parse_method="ocr", lang="en"
+    )
+    txt_content, txt_id = await dummy.parse_document(
+        str(txt_file), parse_method="txt", lang="zh"
+    )
+
+    assert md_id == "doc-generic"
+    assert txt_id == "doc-generic"
+    assert md_content == [
+        {"type": "text", "text": "generic:.md", "page_idx": 0}
+    ]
+    assert txt_content == [
+        {"type": "text", "text": "generic:.txt", "page_idx": 0}
+    ]
+    assert len(captured) == 2
+    assert captured[0]["method"] == "ocr"
+    assert captured[0]["lang"] == "en"
+    assert captured[0]["file_path"] == md_file
+    assert captured[1]["method"] == "txt"
+    assert captured[1]["lang"] == "zh"
+    assert captured[1]["file_path"] == txt_file
