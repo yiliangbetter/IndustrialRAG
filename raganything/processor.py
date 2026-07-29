@@ -731,7 +731,7 @@ class ProcessorMixin:
                 multimodal_items=multimodal_items, file_path=file_path, doc_id=doc_id
             )
 
-            # Mark multimodal content as processed and update final status
+            # Mark multimodal content as processed only after full batch success
             await self._mark_multimodal_processing_complete(doc_id)
 
             log_message = "Multimodal content processing complete"
@@ -753,14 +753,23 @@ class ProcessorMixin:
 
         except Exception as e:
             self.logger.error(f"Error in multimodal processing: {e}")
-            # Fallback to individual processing if batch processing fails
+            # Fallback to individual processing if batch processing fails.
+            # Do not mark complete here: individual path marks only on full success
+            # and re-raises when items are dropped, so callers never see false success.
             self.logger.warning("Falling back to individual multimodal processing")
             await self._process_multimodal_content_individual(
                 multimodal_items, file_path, doc_id
             )
 
-            # Mark multimodal content as processed even after fallback
-            await self._mark_multimodal_processing_complete(doc_id)
+            if callback_manager is not None:
+                duration = time.time() - mm_start_time
+                callback_manager.dispatch(
+                    "on_multimodal_complete",
+                    file_path=file_path,
+                    processed_count=len(multimodal_items),
+                    duration_seconds=duration,
+                    doc_id=doc_id,
+                )
 
     async def _process_multimodal_content_individual(
         self, multimodal_items: List[Dict[str, Any]], file_path: str, doc_id: str
@@ -786,6 +795,8 @@ class ProcessorMixin:
             existing_doc_status.get("chunks_count", 0) if existing_doc_status else 0
         )
 
+        failed_items = 0
+        succeeded_items = 0
         for i, item in enumerate(multimodal_items):
             try:
                 content_type = item.get("type", "unknown")
@@ -828,15 +839,18 @@ class ProcessorMixin:
                         chunk_id = entity_info["chunk_id"]
                         multimodal_chunk_ids.append(chunk_id)
 
+                    succeeded_items += 1
                     self.logger.info(
                         f"{content_type} processing complete: {entity_info.get('entity_name', 'Unknown')}"
                     )
                 else:
+                    failed_items += 1
                     self.logger.warning(
                         f"No suitable processor found for {content_type} type content"
                     )
 
             except Exception as e:
+                failed_items += 1
                 self.logger.error(f"Error processing multimodal content: {str(e)}")
                 self.logger.debug("Exception details:", exc_info=True)
                 continue
@@ -914,9 +928,16 @@ class ProcessorMixin:
 
             await self.lightrag._insert_done()
 
+        if failed_items or succeeded_items != len(multimodal_items):
+            raise RuntimeError(
+                f"Individual multimodal processing incomplete for {doc_id}: "
+                f"{succeeded_items}/{len(multimodal_items)} items succeeded "
+                f"({failed_items} failures). Refusing to mark multimodal_processed."
+            )
+
         self.logger.info("Individual multimodal content processing complete")
 
-        # Mark multimodal content as processed
+        # Mark multimodal content as processed only after every item succeeded
         await self._mark_multimodal_processing_complete(doc_id)
 
     async def _process_multimodal_content_batch_type_aware(
@@ -1055,8 +1076,18 @@ class ProcessorMixin:
                 multimodal_data_list.append(result)
 
         if not multimodal_data_list:
-            self.logger.warning("No valid multimodal descriptions generated")
-            return
+            raise RuntimeError(
+                f"No valid multimodal descriptions generated for {doc_id} "
+                f"({len(multimodal_items)} item(s) attempted). "
+                "Refusing to mark multimodal processing complete."
+            )
+
+        if len(multimodal_data_list) != len(multimodal_items):
+            raise RuntimeError(
+                f"Multimodal description generation incomplete for {doc_id}: "
+                f"{len(multimodal_data_list)}/{len(multimodal_items)} succeeded. "
+                "Refusing to mark multimodal_processed so failed items can be retried."
+            )
 
         self.logger.info(
             f"Generated descriptions for {len(multimodal_data_list)}/{len(multimodal_items)} multimodal items using correct processors"
