@@ -947,15 +947,9 @@ class ImageModalProcessor(BaseModalProcessor):
 
         except Exception as e:
             logger.error(f"Error generating image description: {e}")
-            # Fallback processing
-            fallback_entity = {
-                "entity_name": entity_name
-                if entity_name
-                else f"image_{compute_mdhash_id(str(modal_content))}",
-                "entity_type": "image",
-                "summary": f"Image content: {str(modal_content)[:100]}",
-            }
-            return str(modal_content), fallback_entity
+            # Must not return a soft fallback: batch ingest treats a 2-tuple as
+            # success, marks multimodal_processed, and skips retries.
+            raise
 
     async def process_multimodal_content(
         self,
@@ -1010,15 +1004,11 @@ class ImageModalProcessor(BaseModalProcessor):
 
         except Exception as e:
             logger.error(f"Error processing image content: {e}")
-            # Fallback processing
-            fallback_entity = {
-                "entity_name": entity_name
-                if entity_name
-                else f"image_{compute_mdhash_id(str(modal_content))}",
-                "entity_type": "image",
-                "summary": f"Image content: {str(modal_content)[:100]}",
-            }
-            return str(modal_content), fallback_entity
+            # Must not return a 2-tuple: callers unpack
+            # (caption, entity_info, chunk_results). A short-tuple fallback
+            # raised ValueError, skipped the item, and previously let the
+            # document be marked multimodal_processed anyway.
+            raise
 
     def _parse_response(
         self, response: str, entity_name: str = None
@@ -1143,15 +1133,9 @@ class TableModalProcessor(BaseModalProcessor):
 
         except Exception as e:
             logger.error(f"Error generating table description: {e}")
-            # Fallback processing
-            fallback_entity = {
-                "entity_name": entity_name
-                if entity_name
-                else f"table_{compute_mdhash_id(str(modal_content))}",
-                "entity_type": "table",
-                "summary": f"Table content: {str(modal_content)[:100]}",
-            }
-            return str(modal_content), fallback_entity
+            # Must not return a soft fallback: batch ingest treats a 2-tuple as
+            # success, marks multimodal_processed, and skips retries.
+            raise
 
     async def process_multimodal_content(
         self,
@@ -1205,15 +1189,8 @@ class TableModalProcessor(BaseModalProcessor):
 
         except Exception as e:
             logger.error(f"Error processing table content: {e}")
-            # Fallback processing
-            fallback_entity = {
-                "entity_name": entity_name
-                if entity_name
-                else f"table_{compute_mdhash_id(str(modal_content))}",
-                "entity_type": "table",
-                "summary": f"Table content: {str(modal_content)[:100]}",
-            }
-            return str(modal_content), fallback_entity
+            # Must not return a 2-tuple: callers unpack three values.
+            raise
 
     def _parse_table_response(
         self, response: str, entity_name: str = None
@@ -1332,15 +1309,9 @@ class EquationModalProcessor(BaseModalProcessor):
 
         except Exception as e:
             logger.error(f"Error generating equation description: {e}")
-            # Fallback processing
-            fallback_entity = {
-                "entity_name": entity_name
-                if entity_name
-                else f"equation_{compute_mdhash_id(str(modal_content))}",
-                "entity_type": "equation",
-                "summary": f"Equation content: {str(modal_content)[:100]}",
-            }
-            return str(modal_content), fallback_entity
+            # Must not return a soft fallback: batch ingest treats a 2-tuple as
+            # success, marks multimodal_processed, and skips retries.
+            raise
 
     async def process_multimodal_content(
         self,
@@ -1390,15 +1361,8 @@ class EquationModalProcessor(BaseModalProcessor):
 
         except Exception as e:
             logger.error(f"Error processing equation content: {e}")
-            # Fallback processing
-            fallback_entity = {
-                "entity_name": entity_name
-                if entity_name
-                else f"equation_{compute_mdhash_id(str(modal_content))}",
-                "entity_type": "equation",
-                "summary": f"Equation content: {str(modal_content)[:100]}",
-            }
-            return str(modal_content), fallback_entity
+            # Must not return a 2-tuple: callers unpack three values.
+            raise
 
     def _parse_equation_response(
         self, response: str, entity_name: str = None
@@ -1507,15 +1471,9 @@ class GenericModalProcessor(BaseModalProcessor):
 
         except Exception as e:
             logger.error(f"Error generating {content_type} description: {e}")
-            # Fallback processing
-            fallback_entity = {
-                "entity_name": entity_name
-                if entity_name
-                else f"{content_type}_{compute_mdhash_id(str(modal_content))}",
-                "entity_type": content_type,
-                "summary": f"{content_type} content: {str(modal_content)[:100]}",
-            }
-            return str(modal_content), fallback_entity
+            # Must not return a soft fallback: batch ingest treats a 2-tuple as
+            # success, marks multimodal_processed, and skips retries.
+            raise
 
     async def process_multimodal_content(
         self,
@@ -1553,15 +1511,8 @@ class GenericModalProcessor(BaseModalProcessor):
 
         except Exception as e:
             logger.error(f"Error processing {content_type} content: {e}")
-            # Fallback processing
-            fallback_entity = {
-                "entity_name": entity_name
-                if entity_name
-                else f"{content_type}_{compute_mdhash_id(str(modal_content))}",
-                "entity_type": content_type,
-                "summary": f"{content_type} content: {str(modal_content)[:100]}",
-            }
-            return str(modal_content), fallback_entity
+            # Must not return a 2-tuple: callers unpack three values.
+            raise
 
     def _parse_generic_response(
         self, response: str, entity_name: str = None, content_type: str = "content"
