@@ -17,6 +17,7 @@ from .ingest_coalesce import (
     prepare_table_aware_ingest_segments,
     table_aware_ingest_enabled,
 )
+from .machine_derive import derive_machine_from_docname
 
 
 def compute_ingest_chunk_id(
@@ -144,6 +145,7 @@ async def insert_doc_scoped_text_content(
             "content": content,
             "full_doc_id": doc_id,
             "file_path": file_path,
+            "machine": derive_machine_from_docname(file_path),
             "chunk_order_index": order,
             "tokens": tokens,
             "llm_cache_list": [],

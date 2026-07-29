@@ -95,6 +95,7 @@ from iqr_anchor import (
     _supplement_answer_topic_figure_chunks,
     _supplement_cross_manual_figure_chunks,
 )
+from iqr_machine import known_machine_names, resolve_machine_name
 
 
 _MAINT_TOPIC_RE = re.compile(r"保养内容[：:]\s*([^\n]{2,48})", re.IGNORECASE)
@@ -543,16 +544,6 @@ def _cited_manual_pdf_stems(answer: str) -> list[str]:
     return stems
 
 
-_KNOWN_MACHINE_NAMES = (
-    "高速智能封边机",
-    "高速自动封边机",
-    "双端封边机",
-    "自动封边机",
-    "加工中心",
-    "数控六面钻",
-)
-
-
 _ANSWER_STRUCTURAL_LABEL_KEYS = frozenset(
     _normalize_label_key(x)
     for x in (
@@ -705,7 +696,7 @@ def _machine_from_section_title(title: str) -> str:
     title = title.strip("《》").strip()
     if _is_answer_structural_label(title):
         return ""
-    for name in _KNOWN_MACHINE_NAMES:
+    for name in known_machine_names():
         if name in title:
             return name
     if "封边机" in title:
@@ -917,7 +908,7 @@ def _infer_listing_pairs_from_cited_chunks(
             continue
         machine = ""
         fp = _doc_basename(doc)
-        for name in _KNOWN_MACHINE_NAMES:
+        for name in known_machine_names():
             if name in fp:
                 machine = name
                 break
@@ -1032,23 +1023,15 @@ def _manual_hint_for_component(
         ):
             continue
         fp = _doc_basename(doc)
-        for name in _KNOWN_MACHINE_NAMES:
+        for name in known_machine_names():
             if name in fp:
                 return name
     return ""
 
 
 def _resolve_known_machine_name(text: str) -> str:
-    """Longest known machine name in *text* (avoids 自动封边机 ⊂ 高速自动封边机 false positives)."""
-    blob = (text or "").strip()
-    if not blob:
-        return ""
-    compact = re.sub(r"\s+", "", blob)
-    for name in sorted(_KNOWN_MACHINE_NAMES, key=len, reverse=True):
-        nc = re.sub(r"\s+", "", name)
-        if nc in compact or name in blob:
-            return name
-    return ""
+    """Longest KB machine name in *text* (avoids 自动封边机 ⊂ 高速自动封边机 false positives)."""
+    return resolve_machine_name(text)
 
 
 def _doc_matches_manual_hint(doc: dict[str, Any], manual_hint: str) -> bool:
@@ -1062,21 +1045,9 @@ def _doc_matches_manual_hint(doc: dict[str, Any], manual_hint: str) -> bool:
     hint_compact = re.sub(r"\s+", "", hint)
     if not fp_compact:
         return False
-    if (
-        "高速智能" in hint_compact
-        and "高速自动" in fp_compact
-        and "高速智能" not in fp_compact
-    ):
-        return False
-    if (
-        "高速自动" in hint_compact
-        and "高速智能" in fp_compact
-        and "高速自动" not in fp_compact
-    ):
-        return False
-    if hint_compact in ("自动封边机", "自动封边") or hint == "自动封边机":
-        if "高速自动" in fp_compact or "高速智能" in fp_compact:
-            return False
+    # Data-driven anti-bleed: resolve both sides to their canonical KB machine
+    # and require agreement (replaces the former hard-coded 高速智能/高速自动/
+    # 自动封边机 substring special cases).
     hint_machine = _resolve_known_machine_name(hint)
     fp_machine = _resolve_known_machine_name(fp)
     if hint_machine and fp_machine:
@@ -1085,7 +1056,7 @@ def _doc_matches_manual_hint(doc: dict[str, Any], manual_hint: str) -> bool:
         nc = re.sub(r"\s+", "", hint_machine)
         if nc not in fp_compact and hint_machine not in fp:
             return False
-        return not fp_machine or fp_machine == hint_machine
+        return True
     if hint_compact in fp_compact:
         return True
     if hint_compact and len(hint_compact) >= 8 and hint_compact[:8] in fp_compact:
@@ -3059,7 +3030,7 @@ def _infer_listing_machine_context(query: str, answer: str) -> str:
     if _machine_spans_from_answer(answer):
         return ""
     cited = _cited_manual_hints_from_answer(answer)
-    for name in _KNOWN_MACHINE_NAMES:
+    for name in known_machine_names():
         if name not in q:
             continue
         for hint in cited:

@@ -60,21 +60,9 @@ def _source_hint_matches_doc(hint: str, doc_hint: str) -> bool:
         return False
     hint_compact = re.sub(r"\s+", "", hint)
     doc_compact = re.sub(r"\s+", "", doc_hint)
-    if (
-        "高速智能" in hint_compact
-        and "高速自动" in doc_compact
-        and "高速智能" not in doc_compact
-    ):
-        return False
-    if (
-        "高速自动" in hint_compact
-        and "高速智能" in doc_compact
-        and "高速自动" not in doc_compact
-    ):
-        return False
-    if hint_compact in ("自动封边机", "自动封边") or hint == "自动封边机":
-        if "高速自动" in doc_compact or "高速智能" in doc_compact:
-            return False
+    # Data-driven anti-bleed: resolve both sides to their canonical KB machine
+    # and require agreement (replaces the former hard-coded 高速智能/高速自动/
+    # 自动封边机 substring special cases).
     hint_machine = _resolve_known_machine_name(hint)
     doc_machine = _resolve_known_machine_name(doc_hint)
     if hint_machine and doc_machine:

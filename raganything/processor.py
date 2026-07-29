@@ -12,6 +12,7 @@ from typing import Dict, List, Any, Tuple, Optional
 from pathlib import Path
 
 from raganything.base import DocStatus
+from raganything.machine_derive import derive_machine_from_docname
 from raganything.parser import MineruParser, MineruExecutionError, get_parser
 from raganything.utils import (
     separate_content,
@@ -391,6 +392,7 @@ class ProcessorMixin:
                 "full_doc_id": doc_id,
                 "chunk_order_index": idx,
                 "file_path": file_ref,
+                "machine": derive_machine_from_docname(file_ref),
                 "llm_cache_list": [],
             }
 
@@ -1302,6 +1304,7 @@ class ProcessorMixin:
                 "full_doc_id": doc_id,
                 "chunk_order_index": chunk_order_index,
                 "file_path": file_ref,
+                "machine": derive_machine_from_docname(file_ref),
                 "llm_cache_list": [],  # LightRAG will populate this field
                 # Multimodal-specific metadata
                 "is_multimodal": True,
