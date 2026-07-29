@@ -11,10 +11,6 @@ Examples::
     --markers "关键词1,关键词2" \\
     "你的测试问题"
 
-  uv run python scripts/dump_query_context.py -w ./rag_storage_run \\
-    --naive-scores \\
-    "你的测试问题"
-
 If QUERY is omitted, uses env ``DUMP_QUERY_DEFAULT`` when set; otherwise the script exits with an error.
 """
 
@@ -96,11 +92,6 @@ async def _async_main() -> None:
         help="Write full report as UTF-8 (recommended on Windows). Default: docs/query_context_dump.txt.",
     )
     p.add_argument(
-        "--naive-scores",
-        action="store_true",
-        help="Append naive chunk-vector relevance scores (query / high_level / low_level).",
-    )
-    p.add_argument(
         "query",
         nargs="?",
         default=None,
@@ -124,14 +115,6 @@ async def _async_main() -> None:
 
     rag, _, _ = await rpc._build_rag(wd, pod)
     param = QueryParam(mode=args.query_mode.strip())
-    naive_payload = None
-    if args.naive_scores:
-        from raganything.naive_relevance import (  # noqa: WPS433
-            format_relevance_report,
-            score_naive_relevance,
-        )
-
-        naive_payload = await score_naive_relevance(rag.lightrag, query, query_param=param)
     data = await rag.lightrag.aquery_data(query, param)
 
     out_path = args.out
@@ -146,9 +129,6 @@ async def _async_main() -> None:
         lines.append(s)
 
     out("query: " + query)
-    if naive_payload:
-        out("\n=== naive relevance scores (chunk vector probe) ===\n")
-        out(format_relevance_report(naive_payload).rstrip())
     out("status: " + str(data.get("status")))
     out("message: " + str(data.get("message", "")))
     meta = data.get("metadata") or {}

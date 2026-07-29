@@ -228,28 +228,6 @@ async def _run_aquery(q: str, mode: str, *, stream: bool) -> str | AsyncIterator
         )
 
 
-async def _resolve_naive_relevance(query: str, mode: str) -> dict[str, Any] | None:
-    from query_progress_hooks import get_naive_relevance  # noqa: WPS433
-
-    cached = get_naive_relevance()
-    if isinstance(cached, dict):
-        return cached
-    from raganything.naive_relevance import (  # noqa: WPS433
-        is_naive_relevance_enabled,
-        score_naive_relevance,
-    )
-
-    if not is_naive_relevance_enabled(mode) or state.rag is None:
-        return None
-    from lightrag import QueryParam  # noqa: WPS433
-
-    return await score_naive_relevance(
-        state.rag.lightrag,
-        query,
-        query_param=QueryParam(mode=mode),
-    )
-
-
 async def _inject_clarify_bundle_for_bypass(gate_result: Any, body: QueryBody) -> bool:
     """Inject cached probe bundle in the **current** task context (for answer aquery)."""
     from raganything.clarify_gate import ClarifyBypass, resolve_clarify_bundle  # noqa: WPS433
@@ -388,7 +366,6 @@ def _persist_query_debug_dump(
     answer: str | None = None,
     error: str | None = None,
     duration_ms: int | None = None,
-    naive_relevance: dict[str, Any] | None = None,
     clarify_gate: dict[str, Any] | None = None,
     web_timing: dict[str, Any] | None = None,
 ) -> Path | None:
@@ -402,7 +379,6 @@ def _persist_query_debug_dump(
         answer=answer,
         error=error,
         duration_ms=duration_ms,
-        naive_relevance=naive_relevance,
         clarify_gate=clarify_gate,
         web_timing=web_timing,
     )
@@ -1004,9 +980,7 @@ async def api_query(body: QueryBody):
         clarify_gate_meta = _clarify_bypass_meta(gate_result)
 
         from query_progress_hooks import (  # noqa: WPS433
-            get_naive_relevance,
             query_progress_hooks,
-            set_query_lightrag,
             set_query_media_roots,
             set_query_text_for_images,
         )
@@ -1018,7 +992,6 @@ async def api_query(body: QueryBody):
         error: str | None = None
         set_query_media_roots([parser_root])
         set_query_text_for_images(q)
-        set_query_lightrag(state.rag.lightrag, mode=mode)
         try:
             async with query_progress_hooks():
                 raw = await _run_aquery(q, mode, stream=False)
@@ -1039,10 +1012,8 @@ async def api_query(body: QueryBody):
                 parser_root=parser_root,
                 error=error,
                 duration_ms=int((time.perf_counter() - started) * 1000),
-                naive_relevance=get_naive_relevance(),
             )
             raise HTTPException(500, f"Query failed: {exc}") from exc
-        naive_rel = get_naive_relevance()
         answer_wall_s = time.perf_counter() - started
         web_timing = _finalize_web_timing(
             gate_result,
@@ -1056,7 +1027,6 @@ async def api_query(body: QueryBody):
             thinking=thinking,
             answer=answer,
             duration_ms=int((gate_wall_s + answer_wall_s) * 1000),
-            naive_relevance=naive_rel,
             clarify_gate=clarify_gate_meta,
             web_timing=web_timing,
         )
@@ -1066,8 +1036,6 @@ async def api_query(body: QueryBody):
             "mode": mode,
             "query": q,
         }
-        if naive_rel is not None:
-            payload["naive_relevance"] = naive_rel
         if dump_path is not None:
             payload["debug_dump"] = {"path": str(dump_path), "name": dump_path.name}
         return payload
@@ -1096,7 +1064,6 @@ def _sse_progress_event(ev: dict[str, Any]) -> str | None:
         "retrieval_scope",
         "related_images",
         "inline_images",
-        "naive_relevance",
     ):
         return _sse(ev)
     return None
@@ -1105,7 +1072,7 @@ def _sse_progress_event(ev: dict[str, Any]) -> str | None:
 async def _query_stream_events(q: str, mode: str, body: QueryBody) -> AsyncIterator[str]:
     """SSE tied to real LightRAG stages (retrieve → rerank → generate), then token deltas."""
     from query_doc_steering import strip_manual_circled_step_markers  # noqa: WPS433
-    from query_progress_hooks import query_progress_hooks, get_naive_relevance, set_query_lightrag, set_query_media_roots, set_query_text_for_images  # noqa: WPS433
+    from query_progress_hooks import query_progress_hooks, set_query_media_roots, set_query_text_for_images  # noqa: WPS433
     from stream_cot_parser import StreamCotParser  # noqa: WPS433
     from raganything.clarify_gate import ClarifyBypass, ClarifyRequired  # noqa: WPS433
 
@@ -1197,7 +1164,6 @@ async def _query_stream_events(q: str, mode: str, body: QueryBody) -> AsyncItera
 
         set_query_media_roots([parser_root])
         set_query_text_for_images(q)
-        set_query_lightrag(state.rag.lightrag, mode=mode)
         started = time.perf_counter()
 
         thinking_parts: list[str] = []
@@ -1241,14 +1207,12 @@ async def _query_stream_events(q: str, mode: str, body: QueryBody) -> AsyncItera
                         kind, payload = res_task.result()
                         if kind == "error":
                             stream_error = _friendly_query_error(payload)
-                            naive_rel = await _resolve_naive_relevance(q, mode)
                             dump_path = _persist_query_debug_dump(
                                 query=q,
                                 mode=mode,
                                 parser_root=parser_root,
                                 error=stream_error,
                                 duration_ms=int((time.perf_counter() - started) * 1000),
-                                naive_relevance=naive_rel,
                             )
                             if dump_path is not None:
                                 yield _sse(
@@ -1265,14 +1229,12 @@ async def _query_stream_events(q: str, mode: str, body: QueryBody) -> AsyncItera
                             chunk_iter = _iter_llm_chunks(payload)
                         except Exception as exc:
                             stream_error = _friendly_query_error(exc)
-                            naive_rel = await _resolve_naive_relevance(q, mode)
                             dump_path = _persist_query_debug_dump(
                                 query=q,
                                 mode=mode,
                                 parser_root=parser_root,
                                 error=stream_error,
                                 duration_ms=int((time.perf_counter() - started) * 1000),
-                                naive_relevance=naive_rel,
                             )
                             if dump_path is not None:
                                 yield _sse(
@@ -1323,9 +1285,6 @@ async def _query_stream_events(q: str, mode: str, body: QueryBody) -> AsyncItera
                             )
                         elif related:
                             yield _sse({"type": "related_images", "images": related})
-                        naive_rel = get_naive_relevance() or await _resolve_naive_relevance(
-                            q, mode
-                        )
                         answer_wall_s = time.perf_counter() - started
                         web_timing = _finalize_web_timing(
                             gate_result,
@@ -1339,12 +1298,9 @@ async def _query_stream_events(q: str, mode: str, body: QueryBody) -> AsyncItera
                             thinking="".join(thinking_parts).strip(),
                             answer=final_answer,
                             duration_ms=int((gate_wall_s + answer_wall_s) * 1000),
-                            naive_relevance=naive_rel,
                             clarify_gate=clarify_gate_meta,
                             web_timing=web_timing,
                         )
-                        if naive_rel is not None and not get_naive_relevance():
-                            yield _sse({"type": "naive_relevance", "data": naive_rel})
                         if dump_path is not None:
                             yield _sse(
                                 {

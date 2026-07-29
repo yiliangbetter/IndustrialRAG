@@ -88,15 +88,6 @@ _last_image_debug: ContextVar[dict[str, Any] | None] = ContextVar(
 _steering_report: ContextVar[dict[str, Any] | None] = ContextVar(
     "steering_report", default=None
 )
-_lightrag_for_relevance: ContextVar[Any | None] = ContextVar(
-    "lightrag_for_relevance", default=None
-)
-_query_mode_for_relevance: ContextVar[str | None] = ContextVar(
-    "query_mode_for_relevance", default=None
-)
-_naive_relevance: ContextVar[dict[str, Any] | None] = ContextVar(
-    "naive_relevance", default=None
-)
 _llm_input: ContextVar[dict[str, Any] | None] = ContextVar("llm_input", default=None)
 _last_probe_raw_data: ContextVar[dict[str, Any] | None] = ContextVar(
     "last_probe_raw_data", default=None
@@ -174,9 +165,6 @@ def _sync_query_debug_snapshot() -> None:
             "inline_placements": list(_inline_placements.get() or []),
             "steering_report": dict(_steering_report.get() or {}),
             "images_debug": dict(_last_image_debug.get() or {}),
-            "naive_relevance": dict(_naive_relevance.get() or {})
-            if isinstance(_naive_relevance.get(), dict)
-            else _naive_relevance.get(),
             "llm_input": dict(_llm_input.get() or {})
             if isinstance(_llm_input.get(), dict)
             else _llm_input.get(),
@@ -198,7 +186,6 @@ def get_query_debug_state() -> dict[str, Any]:
         "inline_placements": list(_inline_placements.get() or []),
         "steering_report": dict(_steering_report.get() or {}),
         "images_debug": dict(_last_image_debug.get() or {}),
-        "naive_relevance": _naive_relevance.get(),
         "llm_input": _llm_input.get(),
     }
     if not snap:
@@ -324,56 +311,6 @@ def _apply_kg_scope_to_query_context(ctx: Any) -> Any:
         context=scoped_context or "",
         raw_data=scoped_raw or raw_data,
     )
-
-
-def get_naive_relevance() -> dict[str, Any] | None:
-    """Latest naive relevance payload for the in-flight query (if scored)."""
-    val = _naive_relevance.get()
-    return dict(val) if isinstance(val, dict) else None
-
-
-def set_query_lightrag(lightrag: Any, *, mode: str | None = None) -> None:
-    """Attach LightRAG for per-query naive relevance scoring inside hooks."""
-    _lightrag_for_relevance.set(lightrag)
-    if mode is not None:
-        _query_mode_for_relevance.set(mode.strip() or None)
-
-
-async def _ensure_naive_relevance_scored(query: str) -> dict[str, Any] | None:
-    existing = _naive_relevance.get()
-    if isinstance(existing, dict) and existing.get("query") == (query or "").strip():
-        return existing
-
-    mode = _query_mode_for_relevance.get() or ""
-    from raganything.naive_relevance import (  # noqa: WPS433
-        is_naive_relevance_enabled,
-        score_naive_relevance,
-    )
-
-    if not is_naive_relevance_enabled(mode):
-        return None
-
-    lightrag = _lightrag_for_relevance.get()
-    if lightrag is None:
-        return None
-
-    from lightrag import QueryParam
-
-    payload = await score_naive_relevance(
-        lightrag,
-        query,
-        query_param=QueryParam(mode=mode or "mix"),
-    )
-    _naive_relevance.set(payload)
-    _sync_query_debug_snapshot()
-
-    q = _progress_queue.get()
-    if q is not None:
-        try:
-            q.put_nowait({"type": "naive_relevance", "data": payload})
-        except asyncio.QueueFull:
-            pass
-    return payload
 
 
 def finalize_inline_images(
@@ -715,7 +652,6 @@ async def query_progress_hooks() -> AsyncIterator[asyncio.Queue[dict[str, str]]]
         query = args[0] if args else kwargs.get("query", "")
         if isinstance(query, str) and query.strip():
             _query_text.set(query)
-            await _ensure_naive_relevance_scored(query)
         ctx = await orig_build_ctx(*args, **kwargs)
         ctx = _apply_kg_scope_to_query_context(ctx)
         _capture_llm_context_from_build_result(ctx)
@@ -735,7 +671,6 @@ async def query_progress_hooks() -> AsyncIterator[asyncio.Queue[dict[str, str]]]
         query = args[0] if args else kwargs.get("query", "")
         if isinstance(query, str) and query.strip():
             _query_text.set(query)
-            await _ensure_naive_relevance_scored(query)
         return await orig_naive_query(*args, **kwargs)
 
     async def _apply_rerank_if_enabled(
@@ -967,9 +902,6 @@ async def query_progress_hooks() -> AsyncIterator[asyncio.Queue[dict[str, str]]]
         _inline_placements.set(None)
         _steering_report.set(None)
         _last_image_debug.set(None)
-        _lightrag_for_relevance.set(None)
-        _query_mode_for_relevance.set(None)
-        _naive_relevance.set(None)
         _llm_input.set(None)
         _last_probe_raw_data.set(None)
         clear_clarify_context_injection()

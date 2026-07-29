@@ -188,7 +188,6 @@ def build_query_dump(
     related_images: list[dict[str, Any]] | None = None,
     images_debug: dict[str, Any] | None = None,
     steering_report: dict[str, Any] | None = None,
-    naive_relevance: dict[str, Any] | None = None,
     clarify_gate: dict[str, Any] | None = None,
     llm_input: dict[str, Any] | None = None,
     duration_ms: int | None = None,
@@ -215,8 +214,6 @@ def build_query_dump(
         },
         "steering": steering_report or {},
     }
-    if isinstance(naive_relevance, dict) and naive_relevance:
-        payload["naive_relevance"] = naive_relevance
     if isinstance(clarify_gate, dict) and clarify_gate:
         payload["clarify_gate"] = clarify_gate
     if isinstance(web_timing, dict) and web_timing:
@@ -248,7 +245,6 @@ def persist_query_debug_dump(
     answer: str | None = None,
     error: str | None = None,
     duration_ms: int | None = None,
-    naive_relevance: dict[str, Any] | None = None,
     clarify_gate: dict[str, Any] | None = None,
     enabled: bool | None = None,
     name_prefix: str = "",
@@ -275,10 +271,6 @@ def persist_query_debug_dump(
     )
 
     hook_state = get_query_debug_state()
-    if naive_relevance is None:
-        naive_relevance = hook_state.get("naive_relevance")
-        if not isinstance(naive_relevance, dict):
-            naive_relevance = None
     retrieved_docs = hook_state.get("retrieved_docs")
     docs_text = hook_state.get("retrieved_docs_text")
     if not docs_text and isinstance(retrieved_docs, list):
@@ -313,7 +305,6 @@ def persist_query_debug_dump(
         steering_report=hook_state.get("steering_report")
         if isinstance(hook_state.get("steering_report"), dict)
         else None,
-        naive_relevance=naive_relevance,
         clarify_gate=clarify_gate,
         llm_input=hook_state.get("llm_input")
         if isinstance(hook_state.get("llm_input"), dict)

@@ -25,7 +25,7 @@ rpc = importlib.util.module_from_spec(spec)
 assert spec.loader is not None
 spec.loader.exec_module(rpc)
 
-from score_query_relevance import _load_cases  # noqa: E402
+from query_test_cases import _load_cases  # noqa: E402
 from raganything.clarify_gate import (  # noqa: E402
     ClarifyBypass,
     ClarifyRequired,
