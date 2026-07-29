@@ -42,186 +42,31 @@ sys.path.insert(0, str(_ROOT))
 load_dotenv(_ROOT / ".env", override=False)
 
 # Key checks from docs/测试例参考答案.md (Q1–Q17)
-REF: dict[int, dict] = {
-    1: {
-        "query": "高速智能封边机维护保养手册适用于哪些产品型号？",
-        "text_all": ["NB9-Smart", "NB10-Smart"],
-        "text_any": [],
-        "want_images": False,
-        "caption_any": [],
-    },
-    2: {
-        "query": "高速智能封边机开机前我要如何检查电源开关？",
-        "text_all": ["外观", "作用", "接地"],
-        "text_any": [],
-        "want_images": False,
-        "caption_any": [],
-    },
-    3: {
-        "query": "高速智能封边机机床床身清洁，要多长时间做一次？",
-        "text_all": ["每天"],
-        "text_any": [],
-        "want_images": True,
-        "caption_any": ["清洁机器床身", "机床外部清洁"],
-    },
-    4: {
-        "query": "高速智能封边机机床内部进行清洁，请问步骤是什么？",
-        "text_all": [],
-        "text_any": [],
-        "text_need2": [["吸尘机", "碎布"], ["刮削", "灰尘"], ["油污"]],
-        "want_images": True,
-        "caption_any": ["清洁机床内部"],
-    },
-    5: {
-        "query": "高速智能封边机清理压带轮残胶应该使用什么工具？",
-        "text_all": ["刮刀"],
-        "text_any": [],
-        "want_images": True,
-        "caption_any": ["压带轮残胶清理"],
-    },
-    6: {
-        "query": "高速智能封边机的输送链条进行保养我要加注什么？",
-        "text_all": [],
-        "text_any": ["润滑脂2#", "润滑脂 2#", "润滑脂2＃"],
-        "want_images": True,
-        "caption_any": ["输送链条加润滑脂"],
-    },
-    7: {
-        "query": "对高速智能封边机的进料部分保养时，需要使用什么表？表针读数需要小于多少？",
-        "text_all": ["百分表"],
-        "text_any": ["0.15"],
-        "want_images": True,
-        "caption_any": ["进料部分保养"],
-    },
-    8: {
-        "query": "高速智能封边机更换预铣刀时，刀刃的装配方向应该如何？",
-        "text_all": [],
-        "text_any": [],
-        "text_need2": [["顺铣"], ["逆铣"]],
-        "want_images": True,
-        "caption_any": ["检查预铣刀磨损情况", "预铣刀"],
-    },
-    9: {
-        "query": "检查高速智能封边机的注油泵时，如果油位过低，需要注入哪个品牌的哪种液压油产品？",
-        "text_all": [],
-        "text_any": [],
-        "text_need2": [["美孚"], ["长效液压油"]],
-        "want_images": True,
-        "caption_any": ["检查注油泵油量", "注油泵"],
-    },
-    10: {
-        "query": "高速智能封边机的保养中，哪些部件需要使用美孚长效液压油？",
-        "text_all": [
-            "自动注油泵",
-            "辅助进料导轨",
-            "进料靠板",
-            "预铣机构导轨",
-            "平切机构导轨",
-            "精修导轨",
-            "仿形机构导轨",
-            "开槽机构丝杆",
-            "刮边机构导轨",
-        ],
-        "text_any": [],
-        "want_images": False,
-        "caption_any": [],
-    },
-    11: {
-        "query": "高速智能封边机的保养中，哪些部件需要清理残胶",
-        "text_all": ["压带轮", "仿形靠板", "涂胶轴"],
-        "text_any": [],
-        "want_images": True,
-        "caption_any": [
-            "压带轮残胶清理",
-            "仿形靠板上残胶清理",
-            "清理胶轴老化胶水",
-            "电机检查清理",
-        ],
-        "caption_min_match": 3,
-    },
-    12: {
-        "query": "高速智能封边机的保养中，需要清理粉尘，碎屑的部件有哪些？",
-        "text_all": [],
-        "text_any": [],
-        "text_min_len": 200,
-        "want_images": True,
-        "caption_min": 1,
-    },
-    13: {
-        "query": "我将为高速智能封边机进行季度保养，请问我需要准备哪几种润滑脂？",
-        "text_all": [],
-        "text_any": [],
-        "text_need2": [["润滑脂2#", "润滑脂 2#", "润滑脂2＃"], ["高温润滑脂"]],
-        "want_images": True,
-        "caption_min": 1,
-        "caption_topic_any": ["润滑脂", "润滑", "涂胶轴", "导轨", "齿条"],
-    },
-    14: {
-        "query": "南兴的封边机一共有多少产品型号？",
-        "text_all": [],
-        "text_any": [],
-        "text_need2": [
-            ["NB9-Smart", "NB10-Smart"],
-            ["双端", "NB6S", "NB7H", "NB8C"],
-            ["高速自动", "NB6P", "NB7P", "NB8P"],
-            ["自动封边", "NBC", "NB5J", "NB6J", "NB7CJ"],
-        ],
-        "text_min_len": 80,
-        "want_images": False,
-        "caption_any": [],
-    },
-    15: {
-        "query": "这四种封边机的电控板的保养周期分别是多久",
-        "text_all": [],
-        "text_any": [],
-        "text_need2": [],
-        "text_machine_cycles": [
-            {
-                "machine": ["高速智能", "智能封边"],
-                "cycle_any": ["季度", "每季"],
-                "cycle_forbidden": ["半年", "每半年"],
-            },
-            {"machine": ["自动封边"], "cycle_any": ["半年", "每半年"]},
-            {"machine": ["双端"], "cycle_any": ["半年", "每半年"]},
-            {"machine": ["高速自动"], "cycle_any": ["半年", "每半年"]},
-        ],
-        "want_images": True,
-        "caption_min": 4,
-        "image_min_sources": 4,
-        "caption_topic_any": ["电控"],
-    },
-    16: {
-        "query": "1#透平油（气动油）是哪些机型的保养所需要的，是用来保养哪个部件？",
-        "text_all": [],
-        "text_any": [],
-        "text_need2": [
-            ["三联件", "油雾器", "油杯"],
-            ["双端"],
-            ["自动封边"],
-            ["高速自动"],
-        ],
-        "want_images": True,
-        "image_answer_pairs": True,
-    },
-    17: {
-        "query": "所有机型中，各自哪些部件需要清除残胶",
-        "text_all": [],
-        "text_any": [],
-        "text_need2": [
-            ["高速智能"],
-            ["高速自动", "自动封边", "双端"],
-            ["压带轮"],
-            ["仿形靠", "仿形靠模", "仿形靠板"],
-            ["涂胶轴", "胶轴", "老化胶水"],
-            ["涂胶电机", "电机检查"],
-        ],
-        "text_min_len": 120,
-        "want_images": True,
-        "image_answer_pairs": True,
-        # 自动封边机手册「熔胶盒」条目无专用配图 chunk；批测不计入 pair_missing
-        "image_pair_waive": [("自动封边机", "熔胶盒")],
-    },
-}
+_TEST_CASES_PATH = _ROOT / "tests" / "fixtures" / "test_cases_shili17.json"
+
+
+def _load_test_cases(path: Path = _TEST_CASES_PATH) -> dict[int, dict]:
+    """Load shili17 cases externalized to ``tests/fixtures/test_cases_shili17.json``.
+
+    Phase-1 structural rework: cases live outside the script so the harness
+    stays generic. Each case's ``text`` and ``image`` criteria are flattened
+    back into one spec dict (plus ``query``) — the exact shape the former
+    inline ``REF`` provided — so ``grade_text`` / ``grade_images`` are
+    unchanged. The split is deliberate: when the image-matching logic is
+    reworked (PR47 §4 A/B), only the ``image`` criteria + ``grade_images``
+    change; text criteria and the harness stay stable.
+    """
+    data = json.loads(path.read_text(encoding="utf-8"))
+    cases: dict[int, dict] = {}
+    for case in data["cases"]:
+        spec: dict = {"query": case["query"]}
+        spec.update(case.get("text") or {})
+        spec.update(case.get("image") or {})
+        cases[int(case["id"])] = spec
+    return cases
+
+
+REF: dict[int, dict] = _load_test_cases()
 
 
 def _format_duration(seconds: float) -> str:
