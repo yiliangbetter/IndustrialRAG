@@ -446,8 +446,10 @@ def _machine_spans_from_answer(answer: str) -> list[str]:
     seen: set[str] = set()
     for span in _answer_listing_spans(_answer_primary_listing_body(answer)):
         machine = _machine_from_section_title(span)
-        if not machine and ("封边机" in span or "加工中心" in span):
-            machine = span
+        if not machine:
+            # Data-driven fallback: dynamic KB machine vocab (whitespace-tolerant)
+            # replaces the former hard-coded 封边机/加工中心 substring literals.
+            machine = resolve_machine_name(span)
         if not machine:
             continue
         key = _normalize_label_key(machine)
@@ -476,8 +478,7 @@ def _component_spans_from_answer(answer: str) -> list[str]:
     return [
         span
         for span in _answer_listing_spans(_answer_primary_listing_body(answer))
-        if "封边机" not in span
-        and "加工中心" not in span
+        if not resolve_machine_name(span)
         and not _is_answer_structural_label(span)
     ]
 
@@ -544,35 +545,35 @@ def _cited_manual_pdf_stems(answer: str) -> list[str]:
     return stems
 
 
-_ANSWER_STRUCTURAL_LABEL_KEYS = frozenset(
-    _normalize_label_key(x)
-    for x in (
-        "保养部件",
-        "依据内容",
-        "依据说明",
-        "依据",
-        "润滑部位",
-        "润滑方式",
-        "润滑周期",
-        "保养周期",
-        "操作要求",
-        "操作方法",
-        "加注工具",
-        "加注标准",
-        "使用的测量工具",
-        "表针读数标准",
-    )
-)
-
-
-_COMPONENT_FIELD_KEYS = frozenset(
-    _normalize_label_key(x) for x in ("保养部件", "润滑部位")
+# Generic structural suffixes that answer field labels end with (保养周期 /
+# 操作步骤 / 加注工具 / 表针读数标准 / 润滑部位 / 保养部件 …). Language-level
+# presentation structure (same class as ``DOC_TYPE_KEYWORDS``), NOT business
+# data: a span ending in one of these is a field label, never a figure subject.
+# Replaces the former 14-entry ``_ANSWER_STRUCTURAL_LABEL_KEYS`` enumeration —
+# every one of those labels ends in a suffix here, and the suffix form also
+# generalizes to unseen labels (LLM answer wording is low-randomness, but new
+# field labels still follow these endings). Real components (压带轮 / 涂胶轴 /
+# 仿形靠模 / 电机散热风扇) end in none of them.
+_STRUCTURAL_LABEL_SUFFIXES = (
+    "周期",
+    "步骤",
+    "内容",
+    "方式",
+    "部位",
+    "部件",
+    "工具",
+    "标准",
+    "依据",
+    "要求",
+    "方法",
+    "说明",
 )
 
 
 def _is_answer_structural_label(span: str) -> bool:
-    """Answer-template field names (cross-manual listing prompts), not figure subjects."""
-    return _normalize_label_key(span) in _ANSWER_STRUCTURAL_LABEL_KEYS
+    """Answer field label (ends in a structural suffix), not a figure subject."""
+    key = _normalize_label_key(span)
+    return bool(key) and key.endswith(_STRUCTURAL_LABEL_SUFFIXES)
 
 
 def _is_ordinal_enumeration_bullet_head(head: str) -> bool:
@@ -644,12 +645,9 @@ def _cross_listing_figure_topics(query: str, answer: str) -> list[str]:
 
 
 def _is_component_field_name(field_name: str) -> bool:
+    """Field label whose *value* lists components (保养部件 / 润滑部位 [+ 序号])."""
     name = (field_name or "").strip()
-    if _normalize_label_key(name) in _COMPONENT_FIELD_KEYS:
-        return True
-    return bool(
-        re.fullmatch(r"保养部件\d*", name) or re.fullmatch(r"润滑部位\d*", name)
-    )
+    return bool(re.fullmatch(r"(?:保养部件|润滑部位)\d*", name))
 
 
 _MACHINE_LINE_COMPONENT_PATTERNS = (
@@ -689,6 +687,18 @@ def _components_from_machine_line_value(value: str, query: str) -> list[str]:
     return out
 
 
+def _is_machine_class_span(text: str) -> bool:
+    """Generic machine-*class* suffix (封边机 / 钻 / 中心).
+
+    Language-level structural cue (same class as ``DOC_TYPE_KEYWORDS``), NOT
+    business data: specific machine names come from the dynamic KB vocab
+    (``known_machine_names`` / ``resolve_machine_name``); this only catches a
+    not-yet-ingested machine whose name still ends with a known class suffix.
+    """
+    blob = (text or "").strip()
+    return "封边机" in blob or bool(re.search(r"(?:钻|中心)$", blob))
+
+
 def _machine_from_section_title(title: str) -> str:
     title = re.sub(r"^\d+\.\s*", "", title).strip()
     title = re.sub(r"^[一二三四五六七八九十]+、", "", title).strip()
@@ -699,10 +709,8 @@ def _machine_from_section_title(title: str) -> str:
     for name in known_machine_names():
         if name in title:
             return name
-    if "封边机" in title:
+    if _is_machine_class_span(title):
         return title.split("维护保养")[0].split(".pdf")[0].split(".PDF")[0].strip()
-    if re.search(r"(?:钻|中心)$", title) and 2 <= len(title) <= 24:
-        return title
     return ""
 
 
@@ -897,15 +905,15 @@ def _infer_listing_pairs_from_cited_chunks(
         for machine, comp in existing
     }
     out = list(existing)
-    q = (query or "").strip()
     for doc in pool:
         if cited and not _doc_matches_cited_hints(doc, cited):
             continue
         content = _doc_content(doc).strip()
         if not content or not extract_image_refs_from_context(content):
             continue
-        if "残胶" in q and "残胶" not in content and "老化胶水" not in content:
-            continue
+        # Query-topic relevance is enforced per-component below via
+        # ``_pair_component_ref_align`` (保养内容/图注/小节主语 alignment ≥0.75);
+        # the former hard-coded 残胶/老化胶水 doc pre-filter was redundant.
         machine = ""
         fp = _doc_basename(doc)
         for name in known_machine_names():
@@ -984,9 +992,6 @@ def _filter_cross_listing_pair_targets(
             for h in cited
         ):
             continue
-        if re.search(r"1#透平油|透平油", query or ""):
-            if "六面钻" in machine or "加工中心" in machine:
-                continue
         key = (_normalize_label_key(machine), _normalize_label_key(comp))
         if key in seen:
             continue
@@ -2138,7 +2143,7 @@ def _span_keep_listing_targets(
         answer_bullets = [
             span
             for span in _answer_bullets_for_inline_figure_match(answer)
-            if span and "封边机" not in span and "加工中心" not in span
+            if span and not resolve_machine_name(span)
         ]
         if len(answer_bullets) >= 2:
             return answer_bullets[:12]
