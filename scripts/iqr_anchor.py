@@ -1,7 +1,7 @@
-"""image_query_refs submodule ``iqr_anchor`` (stage-0 relocation, auto-generated).
+"""image_query_refs submodule ``iqr_anchor``.
 
-Behavior-preserving split of scripts/image_query_refs.py. Do not hand-edit;
-regenerate via scripts/_tmp_iqr_gen.py.
+Section anchoring and chunk locality: anchor-section selection, chunk
+section scoring, and order-neighbor expansion for LLM chunks.
 """
 from __future__ import annotations
 

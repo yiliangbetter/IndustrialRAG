@@ -1,7 +1,6 @@
-"""image_query_refs submodule ``iqr_media`` (stage-0 relocation, auto-generated).
+"""image_query_refs submodule ``iqr_media``.
 
-Behavior-preserving split of scripts/image_query_refs.py. Do not hand-edit;
-regenerate via scripts/_tmp_iqr_gen.py.
+Media path resolution, safety checks, and media-token encode/decode.
 """
 from __future__ import annotations
 

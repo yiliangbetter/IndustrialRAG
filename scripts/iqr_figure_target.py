@@ -1,7 +1,7 @@
-"""image_query_refs submodule ``iqr_figure_target`` (stage-0 relocation, auto-generated).
+"""image_query_refs submodule ``iqr_figure_target``.
 
-Behavior-preserving split of scripts/image_query_refs.py. Do not hand-edit;
-regenerate via scripts/_tmp_iqr_gen.py.
+Figure-target extraction from answers: machine/component/listing targets,
+cited-manual hints, and citation-based doc filtering.
 """
 from __future__ import annotations
 

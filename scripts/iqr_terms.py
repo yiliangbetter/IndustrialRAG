@@ -1,7 +1,7 @@
-"""image_query_refs submodule ``iqr_terms`` (stage-0 relocation, auto-generated).
+"""image_query_refs submodule ``iqr_terms``.
 
-Behavior-preserving split of scripts/image_query_refs.py. Do not hand-edit;
-regenerate via scripts/_tmp_iqr_gen.py.
+Query/term utilities: normalization, subject needles, bigrams, and label
+matching.
 """
 from __future__ import annotations
 

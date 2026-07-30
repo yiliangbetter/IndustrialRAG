@@ -1,7 +1,6 @@
-"""image_query_refs submodule ``iqr_config`` (stage-0 relocation, auto-generated).
+"""image_query_refs submodule ``iqr_config``.
 
-Behavior-preserving split of scripts/image_query_refs.py. Do not hand-edit;
-regenerate via scripts/_tmp_iqr_gen.py.
+Environment-driven thresholds and limits for query-time image selection.
 """
 from __future__ import annotations
 

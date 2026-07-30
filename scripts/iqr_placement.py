@@ -1,7 +1,7 @@
-"""image_query_refs submodule ``iqr_placement`` (stage-0 relocation, auto-generated).
+"""image_query_refs submodule ``iqr_placement``.
 
-Behavior-preserving split of scripts/image_query_refs.py. Do not hand-edit;
-regenerate via scripts/_tmp_iqr_gen.py.
+Inline image placement: semantic/caption placements, end fallback, and
+API image assembly.
 """
 from __future__ import annotations
 

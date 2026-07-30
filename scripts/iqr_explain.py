@@ -1,7 +1,7 @@
-"""image_query_refs submodule ``iqr_explain`` (stage-0 relocation, auto-generated).
+"""image_query_refs submodule ``iqr_explain``.
 
-Behavior-preserving split of scripts/image_query_refs.py. Do not hand-edit;
-regenerate via scripts/_tmp_iqr_gen.py.
+Diagnostics and explanations for image-selection decisions (query intent,
+retrieval support, human-readable explain output).
 """
 from __future__ import annotations
 

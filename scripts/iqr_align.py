@@ -1,7 +1,7 @@
-"""image_query_refs submodule ``iqr_align`` (stage-0 relocation, auto-generated).
+"""image_query_refs submodule ``iqr_align``.
 
-Behavior-preserving split of scripts/image_query_refs.py. Do not hand-edit;
-regenerate via scripts/_tmp_iqr_gen.py.
+Reference/chunk alignment scoring: figure-ref align gates, subject/citation
+chunk scores, and answer-to-chunk citation overlap.
 """
 from __future__ import annotations
 

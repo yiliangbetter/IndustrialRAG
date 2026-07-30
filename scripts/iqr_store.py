@@ -1,7 +1,6 @@
-"""image_query_refs submodule ``iqr_store`` (stage-0 relocation, auto-generated).
+"""image_query_refs submodule ``iqr_store``.
 
-Behavior-preserving split of scripts/image_query_refs.py. Do not hand-edit;
-regenerate via scripts/_tmp_iqr_gen.py.
+KV-store access, doc/content helpers, source hints, and content-list loading.
 """
 from __future__ import annotations
 
