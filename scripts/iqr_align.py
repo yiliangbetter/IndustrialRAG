@@ -402,7 +402,7 @@ _ANSWER_REF_RE = re.compile(r"###\s*References\b.*", re.I | re.S)
 
 
 _CITATION_PUNCT_RE = re.compile(
-    r"[\s!！?？。.，,~、；;：:" "''（）()\\[\\]【】\-/／·]+"
+    r"[\s!！?？。.，,~、；;：:" r"''（）()\[\]【】\-/／·]+"
 )
 
 
