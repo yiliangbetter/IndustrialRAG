@@ -10,11 +10,9 @@ from pathlib import Path
 _ROOT = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(_ROOT / "scripts"))
 
-from image_query_refs import (  # noqa: E402
-    _answer_body_for_citation_match,
-    _chunk_citation_score,
-    filter_docs_cited_by_answer,
-)
+from iqr_align import _chunk_citation_score  # noqa: E402
+from iqr_figure_target import _answer_body_for_citation_match  # noqa: E402
+from image_query_refs import filter_docs_cited_by_answer  # noqa: E402
 
 QUERY = "高速智能封边机机床床身清洁，要多长时间做一次？"
 

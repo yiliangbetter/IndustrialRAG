@@ -166,7 +166,7 @@ def grade_text(answer: str, spec: dict) -> tuple[bool, list[str]]:
 
 
 def _image_matches_machine(img: dict, machine_hint: str) -> bool:
-    from image_query_refs import _doc_matches_manual_hint  # noqa: WPS433
+    from iqr_figure_target import _doc_matches_manual_hint  # noqa: WPS433
 
     blob = " ".join(
         str(img.get(key) or "")
@@ -181,10 +181,8 @@ def _image_matches_machine(img: dict, machine_hint: str) -> bool:
 
 
 def _image_matches_component(img: dict, component: str) -> bool:
-    from image_query_refs import (  # noqa: WPS433
-        _label_matches_listing_target,
-        _listing_target_head,
-    )
+    from iqr_figure_target import _label_matches_listing_target  # noqa: WPS433
+    from iqr_terms import _listing_target_head  # noqa: WPS433
 
     head = _listing_target_head(component)
     cap = str(img.get("caption") or "")
@@ -205,11 +203,8 @@ def _grade_images_answer_pairs(
     *,
     pair_waive: list[tuple[str, str]] | None = None,
 ) -> tuple[bool, list[str]]:
-    from image_query_refs import (  # noqa: WPS433
-        _listing_target_head,
-        _machine_component_targets_from_answer,
-        _normalize_label_key,
-    )
+    from iqr_figure_target import _machine_component_targets_from_answer  # noqa: WPS433
+    from iqr_terms import _listing_target_head, _normalize_label_key  # noqa: WPS433
 
     notes: list[str] = []
     if not imgs:
@@ -438,7 +433,7 @@ def _gate_alert_message(cid: int, gate_probe: dict[str, Any]) -> str:
 def _print_gate_alert(cid: int, gate_probe: dict[str, Any]) -> None:
     banner = "!" * 72
     print(f"\n{banner}", flush=True)
-    print(f"  *** GATE ALERT（shili17 期望 final > 7）***", flush=True)
+    print("  *** GATE ALERT（shili17 期望 final > 7）***", flush=True)
     print(f"  {_gate_alert_message(cid, gate_probe)}", flush=True)
     print(f"{banner}\n", flush=True)
 
@@ -730,7 +725,7 @@ def write_report(
             f"- 模式：{mode}",
             f"- 工作目录：`{wd}`",
             f"- 媒体根：`{media_root}`",
-            f"- 参考答案：`docs/测试例参考答案.md`",
+            "- 参考答案：`docs/测试例参考答案.md`",
             f"- 通过（文字+配图）：**{passed}/{len(rows)}**",
             f"- 仅文字通过：**{text_only}/{len(rows)}**",
         ]
@@ -745,7 +740,7 @@ def write_report(
         )
     lines.extend(
         [
-            f"- Query dumps：`logs/query_dumps/`（本批 JSON 见各题 `dump_path`）",
+            "- Query dumps：`logs/query_dumps/`（本批 JSON 见各题 `dump_path`）",
             "",
         ]
     )
@@ -781,7 +776,6 @@ def write_report(
         if len(cap_summary) > 48:
             cap_summary = cap_summary[:45] + "…"
         gp = r.get("gate_probe") or {}
-        fs = gp.get("final_score")
         fs_cell = _format_gate_final_score(gp) if gp else "—"
         gate_band = str(gp.get("gate_band") or "—")
         if gp.get("gate_direct_ok") is False:

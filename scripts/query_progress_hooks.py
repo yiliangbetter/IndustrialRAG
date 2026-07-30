@@ -319,10 +319,9 @@ def finalize_inline_images(
     answer_text: str | None = None,
 ) -> dict[str, Any]:
     """Resolve inline figures cited by the generated answer (Plan A + placements)."""
+    from iqr_figure_target import _is_multi_machine_comparison_query  # noqa: WPS433
+    from iqr_store import _dedupe_doc_list, _doc_content  # noqa: WPS433
     from image_query_refs import (  # noqa: WPS433
-        _dedupe_doc_list,
-        _doc_content,
-        _is_multi_machine_comparison_query,
         build_inline_placements,
         default_image_selection_limit,
         extract_image_refs_from_context,
@@ -381,12 +380,12 @@ def finalize_inline_images(
             ]
             if multi_fig:
                 anchor_pool = _dedupe_doc_list(anchor_pool + multi_fig)
-        from image_query_refs import (  # noqa: WPS433
-            _cited_manual_hints_from_answer,
-            _doc_basename,
+        from iqr_anchor import (  # noqa: WPS433
             _load_figure_chunks_for_manual_paths,
             _should_expand_cited_manual_kv_pool,
         )
+        from iqr_figure_target import _cited_manual_hints_from_answer  # noqa: WPS433
+        from iqr_store import _doc_basename  # noqa: WPS433
 
         if _should_expand_cited_manual_kv_pool(q, answer):
             cited = _cited_manual_hints_from_answer(answer)
@@ -526,10 +525,8 @@ def _sync_llm_chunks_for_images(query: str, chunks: list[dict]) -> None:
     _retrieved_docs.set(merged)
     if not (_rerank_figure_pool.get() or []):
         try:
-            from image_query_refs import (  # noqa: WPS433
-                _doc_content,
-                extract_image_refs_from_context,
-            )
+            from iqr_store import _doc_content  # noqa: WPS433
+            from image_query_refs import extract_image_refs_from_context  # noqa: WPS433
 
             fig_docs = [
                 doc
@@ -722,12 +719,12 @@ async def query_progress_hooks() -> AsyncIterator[asyncio.Queue[dict[str, str]]]
             final_docs = docs
         _sync_retrieved_docs_after_rerank(final_docs)
         try:
-            from image_query_refs import (  # noqa: WPS433
+            from iqr_align import (  # noqa: WPS433
                 _chunk_figure_context_aligns_query,
                 _chunk_subject_score,
-                _doc_content,
-                extract_image_refs_from_context,
             )
+            from iqr_store import _doc_content  # noqa: WPS433
+            from image_query_refs import extract_image_refs_from_context  # noqa: WPS433
 
             fig_candidates: list[tuple[float, dict]] = []
             for doc in retrieved_docs or []:
@@ -746,10 +743,8 @@ async def query_progress_hooks() -> AsyncIterator[asyncio.Queue[dict[str, str]]]
                 from query_doc_steering import _is_cross_manual_listing_query  # noqa: WPS433
 
                 if _is_cross_manual_listing_query(query):
-                    from image_query_refs import (  # noqa: WPS433
-                        _doc_basename,
-                        _load_figure_chunks_for_manual_paths,
-                    )
+                    from iqr_anchor import _load_figure_chunks_for_manual_paths  # noqa: WPS433
+                    from iqr_store import _doc_basename  # noqa: WPS433
 
                     allowed = {
                         fp

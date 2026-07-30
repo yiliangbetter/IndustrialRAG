@@ -14,10 +14,8 @@ if str(ROOT) not in sys.path:
 if str(ROOT / "scripts") not in sys.path:
     sys.path.insert(0, str(ROOT / "scripts"))
 
-from image_query_refs import (  # noqa: E402
-    _answer_logic_lines,
-    build_inline_placements,
-)
+from iqr_figure_target import _answer_logic_lines  # noqa: E402
+from image_query_refs import build_inline_placements  # noqa: E402
 
 
 def _load_dump(path: Path) -> dict:
