@@ -3,6 +3,7 @@
 Section anchoring and chunk locality: anchor-section selection, chunk
 section scoring, and order-neighbor expansion for LLM chunks.
 """
+
 from __future__ import annotations
 
 import json
@@ -80,7 +81,17 @@ def _ref_section_subject(ref: dict[str, Any]) -> str:
 
 def _should_expand_cited_manual_kv_pool(query: str, answer: str) -> bool:
     """True when cited manuals need KV figure chunks beyond LLM retrieval."""
-    from iqr_figure_target import _answer_has_multi_section_markdown, _cited_manual_pdf_stems, _component_spans_from_answer, _is_component_listing_across_machines, _is_listing_scope_query, _is_multi_machine_comparison_query, _machine_from_section_title, _machine_spans_from_answer
+    from iqr_figure_target import (
+        _answer_has_multi_section_markdown,
+        _cited_manual_pdf_stems,
+        _component_spans_from_answer,
+        _is_component_listing_across_machines,
+        _is_listing_scope_query,
+        _is_multi_machine_comparison_query,
+        _machine_from_section_title,
+        _machine_spans_from_answer,
+    )
+
     stems = _cited_manual_pdf_stems(answer)
     q = (query or "").strip()
     if len(stems) >= 2:
@@ -163,6 +174,7 @@ def _chunk_is_short_section_heading(content: str) -> bool:
 def _chunk_anchor_structural_adjustment(content: str) -> float:
     """Boost short section headings; penalize table mega-chunks and TOC (structural only)."""
     from iqr_figure_target import _chunk_is_table_heavy, _chunk_is_toc_heavy
+
     adj = 0.0
     if _chunk_is_table_heavy(content):
         adj -= 2.0
@@ -225,6 +237,7 @@ def _anchor_section_carries_subject(
     subjects: list[str],
 ) -> bool:
     from iqr_figure_target import _chunk_heading_blob
+
     blob = _chunk_heading_blob(anchor_content)
     if not blob:
         return False
@@ -247,7 +260,13 @@ def _best_anchor_chunk(
     manual_hint: str = "",
 ) -> dict[str, Any] | None:
     """Pick anchor chunk from full manual order + manual-scoped cite pool."""
-    from iqr_figure_target import _cite_pool_chunk_ids, _doc_matches_manual_hint, _manual_scoped_cite_pool, _resolve_doc_with_order_index
+    from iqr_figure_target import (
+        _cite_pool_chunk_ids,
+        _doc_matches_manual_hint,
+        _manual_scoped_cite_pool,
+        _resolve_doc_with_order_index,
+    )
+
     scoped_cite = (
         _manual_scoped_cite_pool(cite_pool, manual_hint)
         if manual_hint
@@ -331,7 +350,15 @@ def _best_inline_figure_from_pool(
     exclude_chunk_ids: set[str] | None = None,
 ) -> tuple[dict[str, Any] | None, dict[str, Any] | None, str]:
     """Best inline-figure chunk in pool aligned to anchor (cite / manual evidence)."""
-    from iqr_figure_target import _answer_bullet_component_head, _doc_matches_manual_hint, _figure_ref_matches_listing_target, _figure_ref_matches_target_topic, _is_cover_page_ref, _machine_bullet_subject
+    from iqr_figure_target import (
+        _answer_bullet_component_head,
+        _doc_matches_manual_hint,
+        _figure_ref_matches_listing_target,
+        _figure_ref_matches_target_topic,
+        _is_cover_page_ref,
+        _machine_bullet_subject,
+    )
+
     align_blob = _anchor_align_blob(anchor_text, query)
     head = (
         _answer_bullet_component_head(anchor_text)
@@ -411,7 +438,11 @@ def _figure_ref_from_content_list_for_target(
     anchor_content: str = "",
 ) -> tuple[dict[str, Any] | None, str]:
     """content_list + ``best_image_for_text_item`` fallback (same priority as ingest)."""
-    from iqr_figure_target import _doc_matches_manual_hint, _figure_ref_matches_target_topic, _is_cover_page_ref
+    from iqr_figure_target import (
+        _doc_matches_manual_hint,
+        _figure_ref_matches_target_topic,
+        _is_cover_page_ref,
+    )
     from raganything.utils import best_image_for_text_item, context_text_for_image
 
     align_blob = _anchor_align_blob(anchor_text, query)
@@ -505,7 +536,14 @@ def _figure_doc_for_anchor_neighbor(
     component: str = "",
 ) -> tuple[dict[str, Any] | None, str]:
     """Return (doc_with_figure, source) where source is ``anchor`` or ``neighbor``."""
-    from iqr_figure_target import _doc_matches_manual_hint, _figure_ref_matches_target_topic, _is_cover_page_ref, _pick_figure_ref_for_target_kind, _resolve_doc_with_order_index
+    from iqr_figure_target import (
+        _doc_matches_manual_hint,
+        _figure_ref_matches_target_topic,
+        _is_cover_page_ref,
+        _pick_figure_ref_for_target_kind,
+        _resolve_doc_with_order_index,
+    )
+
     anchor = _resolve_doc_with_order_index(anchor)
     if manual_hint and not _doc_matches_manual_hint(anchor, manual_hint):
         return None, ""
@@ -719,7 +757,13 @@ def _supplement_component_listing_figure_chunks(
     answer: str,
 ) -> list[dict[str, Any]]:
     """One inline-figure chunk per (machine, component) pair, scoped to cited manuals."""
-    from iqr_figure_target import _answer_body_for_citation_match, _best_figure_doc_for_component, _cited_manual_hints_from_answer, _machine_component_listing_pair_targets
+    from iqr_figure_target import (
+        _answer_body_for_citation_match,
+        _best_figure_doc_for_component,
+        _cited_manual_hints_from_answer,
+        _machine_component_listing_pair_targets,
+    )
+
     pairs = _machine_component_listing_pair_targets(
         query or "", answer, pool, kept=kept
     )
@@ -781,7 +825,13 @@ def _supplement_cross_manual_figure_chunks(
     answer: str,
 ) -> list[dict[str, Any]]:
     """Keep one inline-figure chunk per manual when the answer compares multiple models."""
-    from iqr_figure_target import _answer_body_for_citation_match, _answer_has_multi_section_markdown, _is_component_listing_across_machines, _is_multi_machine_comparison_query
+    from iqr_figure_target import (
+        _answer_body_for_citation_match,
+        _answer_has_multi_section_markdown,
+        _is_component_listing_across_machines,
+        _is_multi_machine_comparison_query,
+    )
+
     if _is_component_listing_across_machines(query or ""):
         return _supplement_component_listing_figure_chunks(
             all_docs, kept, query=query, answer=answer
@@ -886,6 +936,7 @@ def _ref_conflicts_anchor_sections(
 ) -> bool:
     """True when a figure cites an explicit section incompatible with answer anchors."""
     from iqr_figure_target import _ref_maint_section_id
+
     if not anchor_sections:
         return False
     blob = " ".join(
@@ -917,6 +968,7 @@ def _ref_context_subject_aligns(
 ) -> bool:
     """Context carries answer substance when parser footnotes truncate (e.g. 床外部清洁)."""
     from iqr_figure_target import _anchor_maintenance_spans, _maintenance_content_spans
+
     ctx = (ctx or "").strip()
     if not ctx:
         return False
@@ -1017,6 +1069,7 @@ def _chunk_query_section_score(
     pool_primary: str,
 ) -> float:
     from iqr_figure_target import _MAINT_TOPIC_RE
+
     score = 0.0
     if anchor_sections and _chunk_belongs_to_anchor_sections(
         query, pool_primary, content, anchor_sections
@@ -1044,7 +1097,15 @@ def _anchor_chunks_by_query_section(
     kept: list[dict[str, Any]] | None = None,
 ) -> tuple[list[dict[str, Any]], dict[str, Any]]:
     """Query-led section anchor when citation kept nothing (single-topic, terse answers)."""
-    from iqr_figure_target import _answer_body_for_citation_match, _answer_weak_consistency_gate, _chunk_is_title_only, _chunk_is_toc_heavy, _is_listing_scope_query, _retrieval_prefers_catalog_field
+    from iqr_figure_target import (
+        _answer_body_for_citation_match,
+        _answer_weak_consistency_gate,
+        _chunk_is_title_only,
+        _chunk_is_toc_heavy,
+        _is_listing_scope_query,
+        _retrieval_prefers_catalog_field,
+    )
+
     meta: dict[str, Any] = {
         "mode": "query_section_anchor",
         "anchor_sections": [],
@@ -1181,6 +1242,7 @@ def _section_id_from_line_or_context(text: str, line: str) -> str | None:
 def _best_section_id_from_content(query: str, content: str) -> str | None:
     """Prefer a section heading that contains query subject terms (e.g. 2.1.1 机床床身清洁)."""
     from iqr_figure_target import _chunk_is_toc_heavy, _is_toc_or_directory_line
+
     needles = _query_subject_needles(query)
     best: tuple[float, str] | None = None
     for line in content.splitlines():
@@ -1245,6 +1307,7 @@ def _pick_anchor_sections(
 ) -> list[str]:
     """Choose one (or few) manual section ids for inline-image scan."""
     from iqr_figure_target import _chunk_is_toc_heavy, _is_toc_or_directory_line
+
     min_overlap = _image_anchor_min_line_overlap()
     max_sections = _image_anchor_max_sections()
     needles = _query_subject_needles(query)
@@ -1364,7 +1427,19 @@ def _supplement_answer_topic_figure_chunks(
     query: str | None = None,
 ) -> list[dict[str, Any]]:
     """Add one inline-figure chunk per answer component topic from the search pool."""
-    from iqr_figure_target import _answer_body_for_citation_match, _chunk_matches_answer_topic, _cited_manual_hints_from_answer, _doc_matches_manual_hint, _is_component_listing_across_machines, _is_multi_machine_comparison_query, _label_matches_listing_target, _machine_spans_from_answer, _manual_hint_for_component, _span_keep_listing_targets
+    from iqr_figure_target import (
+        _answer_body_for_citation_match,
+        _chunk_matches_answer_topic,
+        _cited_manual_hints_from_answer,
+        _doc_matches_manual_hint,
+        _is_component_listing_across_machines,
+        _is_multi_machine_comparison_query,
+        _label_matches_listing_target,
+        _machine_spans_from_answer,
+        _manual_hint_for_component,
+        _span_keep_listing_targets,
+    )
+
     topics = _span_keep_listing_targets(query or "", answer, pool, kept=kept)
     if len(topics) < 2:
         return kept
@@ -1459,7 +1534,11 @@ def _llm_chunk_locality_max_add() -> int:
 
 
 def _llm_chunk_locality_skipped(query: str) -> str | None:
-    from iqr_figure_target import _is_catalog_or_model_listing_query, _is_listing_scope_query
+    from iqr_figure_target import (
+        _is_catalog_or_model_listing_query,
+        _is_listing_scope_query,
+    )
+
     q = (query or "").strip()
     if not q:
         return "empty_query"
@@ -1476,6 +1555,7 @@ def _order_neighbor_candidates_for_anchor(
     seen: set[str],
 ) -> list[tuple[int, dict[str, Any]]]:
     from iqr_figure_target import _chunk_is_toc_heavy, _resolve_doc_with_order_index
+
     anchor = _resolve_doc_with_order_index(anchor)
     anchor_idx = _doc_chunk_order_index(anchor)
     if anchor_idx is None or not manual_chunks:
@@ -1516,6 +1596,7 @@ def supplement_unique_chunks_with_order_neighbors(
 ) -> tuple[list[dict[str, Any]], dict[str, Any]]:
     """Pre-rerank: expand retrieval pool with ±order_index neighbors (same manual)."""
     from iqr_figure_target import _resolve_doc_with_order_index
+
     meta: dict[str, Any] = {"mode": "off", "added": 0, "phase": "pre_rerank"}
     if not llm_chunk_locality_enabled():
         meta["reason"] = "disabled"
@@ -1579,6 +1660,7 @@ def merge_order_neighbors_into_llm_chunks(
 ) -> list[dict[str, Any]]:
     """Post top-k: insert missing ±order_index neighbors, then re-apply token truncation."""
     from iqr_figure_target import _relabel_dc_chunks, _resolve_doc_with_order_index
+
     if not llm_chunk_locality_enabled() or not chunks:
         return list(chunks)
     if _llm_chunk_locality_skipped(query):
@@ -1648,6 +1730,7 @@ def merge_order_neighbors_into_llm_chunks(
 def _find_anchor_in_answer(answer: str, anchor: str) -> tuple[int, int, float]:
     """Return (start, end, score) in answer text for inserting a figure after anchor."""
     from iqr_figure_target import _answer_text_for_placement
+
     body = _answer_text_for_placement(answer)
     anchor = (anchor or "").strip()
     if not body or not anchor:
@@ -1734,5 +1817,3 @@ def _is_section_number_heading(label: str) -> bool:
     if not stripped:
         return False
     return bool(_SECTION_HEADING_RE.match(stripped))
-
-

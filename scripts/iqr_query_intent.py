@@ -4,6 +4,7 @@ Query intent classifiers and shared compiled constants.  This module is a
 pure leaf — it imports only from external utilities and ``iqr_domain_schema``,
 never from other ``iqr_*`` siblings (avoiding circular imports).
 """
+
 from __future__ import annotations
 
 import re
@@ -15,6 +16,7 @@ from iqr_domain_schema import schema as _domain_schema
 # ---------------------------------------------------------------------------
 # Compiled constants (schema-driven + static)
 # ---------------------------------------------------------------------------
+
 
 def _build_section_marker_re() -> re.Pattern[str]:
     alt = "|".join(re.escape(m) for m in _domain_schema.section_markers)
@@ -65,6 +67,7 @@ except ImportError:
 # ---------------------------------------------------------------------------
 # Query intent classifiers
 # ---------------------------------------------------------------------------
+
 
 def _retrieval_prefers_catalog_field(query: str, text: str) -> bool:
     """Top retrieval lines are foreword catalog rows, not procedure topics."""
@@ -156,9 +159,7 @@ def _is_component_listing_across_machines(query: str) -> bool:
     q = (query or "").strip()
     if not q:
         return False
-    if not (
-        re.search(r"部件|零件|组件", q) and re.search(r"哪些|有什么|有哪|各自", q)
-    ):
+    if not (re.search(r"部件|零件|组件", q) and re.search(r"哪些|有什么|有哪|各自", q)):
         return False
     # Single-machine query → not a cross-manual listing.
     if resolve_machine_name(q):

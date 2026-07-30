@@ -2,6 +2,7 @@
 
 KV-store access, doc/content helpers, source hints, and content-list loading.
 """
+
 from __future__ import annotations
 
 import json
@@ -53,6 +54,7 @@ def _is_multi_source_retrieval(retrieved_docs: list[dict[str, Any]] | None) -> b
 def _source_hint_matches_doc(hint: str, doc_hint: str) -> bool:
     """Machine-aware doc_hint filter for content_list supplement (no substring bleed)."""
     from iqr_figure_target import _resolve_known_machine_name
+
     hint = (hint or "").strip()
     doc_hint = (doc_hint or "").strip()
     if not hint or not doc_hint:
@@ -104,6 +106,7 @@ def _doc_chunk_order_index(doc: dict[str, Any]) -> int | None:
 def _load_manual_chunks_for_locality(manual_hint: str) -> list[dict[str, Any]]:
     """All KB chunks for one manual, sorted by ingest order (includes short heading chunks)."""
     from iqr_figure_target import _doc_matches_manual_hint
+
     hint = (manual_hint or "").strip()
     if not hint:
         return []
@@ -230,6 +233,7 @@ def _ranked_retrieval_lines(
     """Lines from retrieved context ranked by query term overlap."""
     from iqr_align import _PDF_NAME_RE, _SECTION_NUM_RE
     from iqr_figure_target import _is_toc_or_directory_line
+
     if not text.strip():
         return []
     scored: list[tuple[float, str]] = []
@@ -373,6 +377,7 @@ def _context_for_image_scan(
 ) -> tuple[str, dict[str, Any]]:
     """Inline-image scan: answer-topic chunks only (no query-primary expansion)."""
     from iqr_figure_target import _figure_context_from_answer_docs
+
     if (answer or "").strip() and retrieved_docs:
         return _figure_context_from_answer_docs(
             answer, list(retrieved_docs or []), query=query
@@ -412,6 +417,7 @@ def _refs_from_retrieved_docs_text(
 
 def _eligible_figure_refs(context: str) -> list[dict[str, Any]]:
     from iqr_figure_target import _is_cover_page_ref
+
     return [
         ref
         for ref in extract_image_refs_from_context(context)
@@ -451,6 +457,7 @@ def _source_key_from_path(path_str: str) -> str:
 def _source_hints_from_text(text: str) -> set[str]:
     """Document titles/paths mentioned in retrieved context."""
     from iqr_align import _PDF_NAME_RE, _REF_LINE_RE
+
     hints: set[str] = set()
     for match in _REF_LINE_RE.finditer(text):
         title = match.group(2).strip()
@@ -506,5 +513,3 @@ def _load_content_list_items(path: Path) -> list[dict[str, Any]] | None:
     if cached is None:
         return None
     return list(cached)
-
-

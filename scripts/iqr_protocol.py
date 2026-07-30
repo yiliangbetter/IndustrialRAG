@@ -3,6 +3,7 @@
 Shared data types (FigureTarget, logic lines), image-ref regexes, and
 context parsing/normalization.
 """
+
 from __future__ import annotations
 
 import re
@@ -92,6 +93,7 @@ def _append_logic_line(
     subject: str = "",
 ) -> None:
     from iqr_terms import _normalize_label_key
+
     if not machine and not subject:
         return
     key = (
@@ -109,8 +111,20 @@ def _append_logic_line(
 def _image_score_for_logic_line(
     line: _LogicLine, img: dict[str, Any], *, query: str = ""
 ) -> float:
-    from iqr_terms import _is_procedure_steps_query, _line_has_query_subject_hit, _listing_target_head, _normalize_label_key, _query_subject_needles, _subject_from_machine_field_line
-    from iqr_figure_target import _label_matches_listing_target, _pair_component_ref_align, _ref_matches_manual_hint
+    from iqr_terms import (
+        _is_procedure_steps_query,
+        _line_has_query_subject_hit,
+        _listing_target_head,
+        _normalize_label_key,
+        _query_subject_needles,
+        _subject_from_machine_field_line,
+    )
+    from iqr_figure_target import (
+        _label_matches_listing_target,
+        _pair_component_ref_align,
+        _ref_matches_manual_hint,
+    )
+
     q = (query or "").strip()
     if _is_procedure_steps_query(q) and (line.subject or line.machine):
         caption = str(img.get("caption") or "").strip()
@@ -155,6 +169,7 @@ def _image_score_for_logic_line(
 
 def _maintenance_topic_from_text(text: str) -> str:
     from iqr_figure_target import _MAINT_TOPIC_RE
+
     if not text:
         return ""
     match = _MAINT_TOPIC_RE.search(text)
@@ -200,6 +215,7 @@ def _image_block_for_path(context: str, path_match_start: int) -> str:
 
 def _metadata_from_block(block: str) -> dict[str, Any]:
     from iqr_figure_target import _is_usable_source_figure_label
+
     page = None
     pm = _PAGE_RE.search(block)
     if pm:
@@ -243,7 +259,11 @@ def _metadata_from_block(block: str) -> dict[str, Any]:
 
 def extract_image_refs_from_context(context: str) -> list[dict[str, Any]]:
     """Parse image metadata from retrieved LightRAG context text."""
-    from iqr_figure_target import _enrich_ref_from_image_block, _heading_before_image_block
+    from iqr_figure_target import (
+        _enrich_ref_from_image_block,
+        _heading_before_image_block,
+    )
+
     context = normalize_context_for_image_parse(context)
     if not context.strip():
         return []
@@ -276,5 +296,3 @@ def extract_image_refs_from_context(context: str) -> list[dict[str, Any]]:
         refs.append(ref)
 
     return refs
-
-

@@ -150,16 +150,14 @@ def induce_field_schema(segments: List[str]) -> DocFieldSchema | None:
     families: Dict[str, List[tuple]] = {}
     for sig in candidates:
         families.setdefault(sig[0], []).append(sig)
-    family = max(
-        families.values(), key=lambda sigs: sum(counts[s] for s in sigs)
-    )
+    family = max(families.values(), key=lambda sigs: sum(counts[s] for s in sigs))
     best = max(family, key=lambda s: counts[s])
     initiator = best[0]
     closer = best[-1]
-    metadata = frozenset(k for sig in family for k in sig if k not in (initiator, closer))
-    return DocFieldSchema(
-        initiator=initiator, closer=closer, metadata_keys=metadata
+    metadata = frozenset(
+        k for sig in family for k in sig if k not in (initiator, closer)
     )
+    return DocFieldSchema(initiator=initiator, closer=closer, metadata_keys=metadata)
 
 
 def _segment_field_keys(segment: str, schema: DocFieldSchema | None) -> List[str]:
@@ -413,7 +411,9 @@ def _has_backward_procedure_for_heading(
         if _is_orphan_record_field_segment(cand, schema):
             if schema.field_key(_segment_first_line(cand)) == schema.closer:
                 return True
-        elif _segment_has_closer(cand, schema) and not _segment_starts_new_section(cand):
+        elif _segment_has_closer(cand, schema) and not _segment_starts_new_section(
+            cand
+        ):
             return True
     return False
 
@@ -699,9 +699,7 @@ def _segment_has_inline_image(segment: str) -> bool:
     return bool(seg) and (_is_image_ref_segment(seg) or _IMAGE_REF_MARKER in seg)
 
 
-def _is_thin_section_lead_segment(
-    segment: str, schema: DocFieldSchema | None
-) -> bool:
+def _is_thin_section_lead_segment(segment: str, schema: DocFieldSchema | None) -> bool:
     """Numbered section heading + optional short tail, no inline figure (Template B manuals)."""
     seg = (segment or "").strip()
     if not seg or _segment_has_inline_image(seg) or _TABLE_INGEST_MARKER in seg:

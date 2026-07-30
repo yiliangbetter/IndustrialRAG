@@ -3,6 +3,7 @@
 Diagnostics and explanations for image-selection decisions (query intent,
 retrieval support, human-readable explain output).
 """
+
 from __future__ import annotations
 
 from pathlib import Path
@@ -391,5 +392,3 @@ def explain_query_images(
         "target_count": len(extract_figure_targets(query or "", answer or "")),
     }
     return debug
-
-
