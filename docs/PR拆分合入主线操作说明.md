@@ -84,13 +84,13 @@ graph TD
 # ② iqr 引擎拆分（image_query_refs.py 7800行 → 13 个 iqr_* + facade）
 scripts/iqr_align.py
 scripts/iqr_anchor.py
-scripts/iqr_answer.py
-scripts/iqr_chunk.py
-scripts/iqr_cite.py
-scripts/iqr_context.py
+scripts/iqr_config.py
 scripts/iqr_domain_schema.py
+scripts/iqr_explain.py
 scripts/iqr_figure_target.py
 scripts/iqr_machine.py
+scripts/iqr_media.py
+scripts/iqr_placement.py
 scripts/iqr_protocol.py
 scripts/iqr_query_intent.py
 scripts/iqr_store.py
@@ -132,12 +132,12 @@ docs/domain_schema_design.md
 scripts/_induce_field_schema.py       ← 客户切换工具
 
 # ④ 测试
-tests/test_iqr_query_intent.py
-tests/test_iqr_figure_target.py
-tests/test_iqr_protocol.py
-tests/test_domain_schema.py
+tests/test_chunk_locality_anchor.py
+tests/test_clarify_candidate_skip_probe.py
+tests/test_field_schema_induction.py
+tests/test_figure_targets.py
+tests/test_image_chunk_locality.py
 tests/test_ingest_coalesce_schema.py
-tests/test_machine_derive.py
 tests/fixtures/                       ← 测试数据
 ```
 
@@ -316,12 +316,13 @@ git checkout pr-a-core-engine
 git checkout lhq-rag-dev -- `
   scripts/iqr_align.py `
   scripts/iqr_anchor.py `
-  scripts/iqr_answer.py `
-  scripts/iqr_chunk.py `
-  scripts/iqr_cite.py `
-  scripts/iqr_context.py `
+  scripts/iqr_config.py `
+  scripts/iqr_domain_schema.py `
+  scripts/iqr_explain.py `
   scripts/iqr_figure_target.py `
   scripts/iqr_machine.py `
+  scripts/iqr_media.py `
+  scripts/iqr_placement.py `
   scripts/iqr_protocol.py `
   scripts/iqr_query_intent.py `
   scripts/iqr_store.py `
@@ -355,7 +356,13 @@ git checkout lhq-rag-dev -- `
   scripts/query_progress_hooks.py `
   docs/domain_schema_design.md `
   scripts/_induce_field_schema.py `
-  tests/
+  tests/fixtures `
+  tests/test_chunk_locality_anchor.py `
+  tests/test_clarify_candidate_skip_probe.py `
+  tests/test_field_schema_induction.py `
+  tests/test_figure_targets.py `
+  tests/test_image_chunk_locality.py `
+  tests/test_ingest_coalesce_schema.py
 
 git add -A
 git commit --no-verify -m "feat: domain schema externalization + runtime deps + tests"
