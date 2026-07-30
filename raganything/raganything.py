@@ -258,15 +258,26 @@ class RAGAnything(QueryMixin, ProcessorMixin, BatchMixin):
             else:
                 self.logger.warning(f"Unknown config parameter: {key}")
 
-    async def _ensure_lightrag_initialized(self):
-        """Ensure LightRAG instance is initialized, create if necessary"""
+    async def _ensure_lightrag_initialized(self, require_parser: bool = True):
+        """Ensure LightRAG instance is initialized, create if necessary.
+
+        Args:
+            require_parser: When True (default), verify the configured document parser
+                CLI is installed. Pass False for parse-free operations such as
+                ``insert_content_list`` and query helpers that only need LightRAG.
+        """
         try:
-            # Check parser installation first
+            # Check parser installation first (only when a parse will be performed)
             if not self._parser_installation_checked:
                 if self.config.allow_embedding_only_ingestion:
                     self._parser_installation_checked = True
                     self.logger.info(
                         "Embedding-only ingestion enabled: parser installation check skipped"
+                    )
+                elif not require_parser:
+                    # Do not mark as checked: a later parse path must still verify.
+                    self.logger.info(
+                        "Parser installation check skipped (not required for this operation)"
                     )
                 else:
                     if not self.doc_parser.check_installation():

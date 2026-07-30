@@ -677,8 +677,8 @@ class ProcessorMixin:
                 doc_id=doc_id,
             )
 
-        # Ensure LightRAG is initialized before accessing its storages
-        init_result = await self._ensure_lightrag_initialized()
+        # Multimodal processing does not invoke the document parser.
+        init_result = await self._ensure_lightrag_initialized(require_parser=False)
         if not init_result or not init_result.get("success"):
             self.logger.error(
                 "LightRAG initialization failed; skipping multimodal processing"
@@ -2129,8 +2129,8 @@ class ProcessorMixin:
         callback_manager = getattr(self, "callback_manager", None)
         doc_start_time = time.time()
 
-        # Ensure LightRAG is initialized
-        init_result = await self._ensure_lightrag_initialized()
+        # Ensure LightRAG is initialized (no document parsing in this path)
+        init_result = await self._ensure_lightrag_initialized(require_parser=False)
         if not init_result or not init_result.get("success"):
             raise RuntimeError(
                 f"LightRAG initialization failed: {(init_result or {}).get('error', 'unknown error')}"

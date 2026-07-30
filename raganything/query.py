@@ -237,8 +237,8 @@ class QueryMixin:
                 }]
             )
         """
-        # Ensure LightRAG is initialized
-        init_result = await self._ensure_lightrag_initialized()
+        # Query path does not parse documents; parser CLI is not required.
+        init_result = await self._ensure_lightrag_initialized(require_parser=False)
         if not init_result or not init_result.get("success"):
             raise RuntimeError(
                 f"LightRAG initialization failed: {(init_result or {}).get('error', 'unknown error')}"
@@ -374,8 +374,8 @@ class QueryMixin:
                 "Please provide a vision model function when initializing RAGAnything."
             )
 
-        # Ensure LightRAG is initialized
-        init_result = await self._ensure_lightrag_initialized()
+        # Query path does not parse documents; parser CLI is not required.
+        init_result = await self._ensure_lightrag_initialized(require_parser=False)
         if not init_result or not init_result.get("success"):
             raise RuntimeError(
                 f"LightRAG initialization failed: {(init_result or {}).get('error', 'unknown error')}"
