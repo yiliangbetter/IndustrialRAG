@@ -107,6 +107,16 @@ _GENERIC_CYCLE_LABEL_RE = re.compile(r"^保养周期[：:].+$")
 
 _MAINT_CYCLE_VALUE_RE = re.compile(r"^每.{1,16}(?:一次|保养一次|/次|一遍)$")
 
+# --- Frequently-used inline patterns (compiled once) ---
+_WS_RE = re.compile(r"\s+")
+_BOLD_RE = re.compile(r"\*\*([^*]+)\*\*")
+_PAREN_SPLIT_RE = re.compile(r"[（(]")
+_CONJUNCTION_RE = re.compile(r"[与和、及]")
+_REFERENCES_SPLIT_RE = re.compile(r"\n###\s*References\b", re.IGNORECASE)
+_NEWLINES_RE = re.compile(r"[\n\r]+")
+_BULLET_PREFIX_RE = re.compile(r"^[-*•]\s+")
+_PERIOD_NL_SPLIT_RE = re.compile(r"[。\n]")
+
 
 try:
     from query_doc_steering import (  # noqa: WPS433
@@ -167,7 +177,7 @@ def _answer_text_for_listing() -> str:
 
 def _answer_bullet_component_head(line: str) -> str:
     """Component span from markdown answer bullet (``**部件**``), not a domain lexicon."""
-    payload = re.sub(r"^[-*•]\s+", "", (line or "").strip())
+    payload = _BULLET_PREFIX_RE.sub("", (line or "").strip())
     bold = re.match(r"^\*\*([^*]+)\*\*", payload)
     if bold:
         return _listing_target_head(bold.group(1).strip())
@@ -191,7 +201,7 @@ def _ref_maintenance_topic(ref: dict[str, Any]) -> str:
         return ""
     topic = match.group(1).strip()
     topic = re.split(r"保养步骤|保养周期", topic, maxsplit=1)[0].strip()
-    topic = re.split(r"[。\n]", topic, maxsplit=1)[0].strip()[:32]
+    topic = _PERIOD_NL_SPLIT_RE.split(topic, maxsplit=1)[0].strip()[:32]
     return topic
 
 
@@ -346,13 +356,13 @@ def _answer_listing_spans(answer: str) -> list[str]:
         fname = (field.group(1) or field.group(2) or "").strip()
         if _is_component_field_name(fname):
             value = field.group(3).strip().strip("*").rstrip("。")
-            value = re.split(r"[（(]", value, maxsplit=1)[0].strip()
+            value = _PAREN_SPLIT_RE.split(value, maxsplit=1)[0].strip()
             if value:
                 add(value)
             continue
         machine = _machine_from_section_title(fname)
         if machine:
-            for extra in re.findall(r"\*\*([^*]+)\*\*", field.group(3)):
+            for extra in _BOLD_RE.findall(field.group(3)):
                 add(extra.strip())
 
     for match in re.finditer(r"\*\*([^*]{2,32})\*\*", answer or ""):
@@ -386,7 +396,7 @@ def _maintenance_topics_in_text(text: str, query: str) -> list[str]:
     for match in _MAINT_TOPIC_RE.finditer(text or ""):
         topic = match.group(1).strip()
         topic = re.split(r"保养步骤|保养周期", topic, maxsplit=1)[0].strip()
-        topic = re.split(r"[。\n]", topic, maxsplit=1)[0].strip()[:32]
+        topic = _PERIOD_NL_SPLIT_RE.split(topic, maxsplit=1)[0].strip()[:32]
         if len(topic) < 4:
             continue
         key = _normalize_label_key(topic)
@@ -510,7 +520,7 @@ def _cited_manual_hints_from_answer(answer: str) -> set[str]:
     text = (answer or "").strip()
     if not text:
         return set()
-    parts = re.split(r"\n###\s*References\b", text, maxsplit=1, flags=re.I)
+    parts = _REFERENCES_SPLIT_RE.split(text, maxsplit=1)
     ref_blob = parts[1] if len(parts) > 1 else text
     hints: set[str] = set()
     for match in _REF_LINE_RE.finditer(ref_blob):
@@ -519,18 +529,18 @@ def _cited_manual_hints_from_answer(answer: str) -> set[str]:
             stem = title.split(".pdf")[0].split(".PDF")[0].strip()
             if stem:
                 hints.add(stem[:80])
-                compact = re.sub(r"\s+", "", stem)
+                compact = _WS_RE.sub("", stem)
                 if compact:
                     hints.add(compact[:80])
                 machine = _machine_from_section_title(stem)
                 if machine:
                     hints.add(machine)
-                    hints.add(re.sub(r"\s+", "", machine))
+                    hints.add(_WS_RE.sub("", machine))
     for match in _PDF_NAME_RE.finditer(ref_blob):
         stem = Path(match.group(0)).stem[:80]
         if stem:
             hints.add(stem)
-            compact = re.sub(r"\s+", "", stem)
+            compact = _WS_RE.sub("", stem)
             if compact:
                 hints.add(compact[:80])
     return {h for h in hints if h and len(h) >= 4}
@@ -541,7 +551,7 @@ def _cited_manual_pdf_stems(answer: str) -> list[str]:
     text = (answer or "").strip()
     if not text:
         return []
-    parts = re.split(r"\n###\s*References\b", text, maxsplit=1, flags=re.I)
+    parts = _REFERENCES_SPLIT_RE.split(text, maxsplit=1)
     ref_blob = parts[1] if len(parts) > 1 else ""
     stems: list[str] = []
     seen: set[str] = set()
@@ -550,7 +560,7 @@ def _cited_manual_pdf_stems(answer: str) -> list[str]:
         if not title:
             continue
         stem = title.split(".pdf")[0].split(".PDF")[0].strip()
-        key = re.sub(r"\s+", "", stem)
+        key = _WS_RE.sub("", stem)
         if key and key not in seen:
             seen.add(key)
             stems.append(stem)
@@ -604,7 +614,7 @@ def _is_maintenance_cycle_value(span: str) -> bool:
     span = (span or "").strip()
     if not span:
         return False
-    compact = re.sub(r"\s+", "", span)
+    compact = _WS_RE.sub("", span)
     return bool(
         _MAINT_CYCLE_VALUE_RE.match(span) or _MAINT_CYCLE_VALUE_RE.match(compact)
     )
@@ -694,7 +704,7 @@ def _components_from_machine_line_value(value: str, query: str) -> list[str]:
         for match in re.finditer(pat, value):
             add(match.group(1))
     if not out and "保养周期" not in value:
-        for extra in re.findall(r"\*\*([^*]+)\*\*", value):
+        for extra in _BOLD_RE.findall(value):
             add(extra)
     return out
 
@@ -766,9 +776,9 @@ def _machine_component_targets_from_answer(
                     pairs.append((machine, comp))
                     inline_added = True
                 if not inline_added and "**" not in value:
-                    plain = re.sub(r"\*\*([^*]+)\*\*", r"\1", value)
+                    plain = _BOLD_RE.sub(r"\1", value)
                     plain = plain.strip().rstrip("。")
-                    plain = re.split(r"[（(]", plain, maxsplit=1)[0].strip()
+                    plain = _PAREN_SPLIT_RE.split(plain, maxsplit=1)[0].strip()
                     if (
                         plain
                         and len(plain) <= 32
@@ -815,9 +825,9 @@ def _machine_component_targets_from_answer(
                     pairs.append((machine, comp))
                     inline_added = True
                 if not inline_added and "**" not in value:
-                    plain = re.sub(r"\*\*([^*]+)\*\*", r"\1", value)
+                    plain = _BOLD_RE.sub(r"\1", value)
                     plain = plain.strip().rstrip("。")
-                    plain = re.split(r"[（(]", plain, maxsplit=1)[0].strip()
+                    plain = _PAREN_SPLIT_RE.split(plain, maxsplit=1)[0].strip()
                     if (
                         plain
                         and len(plain) <= 32
@@ -833,7 +843,7 @@ def _machine_component_targets_from_answer(
                             pairs.append((machine, comp))
                 continue
             if current_machine and _is_component_field_name(field_name):
-                bold_parts = re.findall(r"\*\*([^*]+)\*\*", value)
+                bold_parts = _BOLD_RE.findall(value)
                 if bold_parts:
                     for part in bold_parts:
                         comp = _listing_target_head(part.strip())
@@ -841,7 +851,7 @@ def _machine_component_targets_from_answer(
                             pairs.append((current_machine, comp))
                 else:
                     value = value.strip().strip("*").rstrip("。")
-                    value = re.split(r"[（(]", value, maxsplit=1)[0].strip()
+                    value = _PAREN_SPLIT_RE.split(value, maxsplit=1)[0].strip()
                     parts = re.split(r"[/／、与和及]", value)
                     for part in parts:
                         part = part.strip()
@@ -863,7 +873,7 @@ def _machine_component_targets_from_answer(
                 current_machine = machine
                 inline_added = False
                 for comp in _components_from_machine_line_value(line, q):
-                    parts = re.split(r"[与和、及]", comp)
+                    parts = _CONJUNCTION_RE.split(comp)
                     for part in parts:
                         part = part.strip()
                         if part:
@@ -874,7 +884,7 @@ def _machine_component_targets_from_answer(
                 continue
             if current_machine:
                 comp_raw = _listing_target_head(bullet_title)
-                parts = re.split(r"[与和、及]", comp_raw)
+                parts = _CONJUNCTION_RE.split(comp_raw)
                 for part in parts:
                     part = part.strip()
                     if part:
@@ -885,7 +895,7 @@ def _machine_component_targets_from_answer(
             comp_blob = maint_match.group(1).strip().strip("*").strip()
             comp_blob = comp_blob.split("/")[0].strip()
             comp_raw = _listing_target_head(comp_blob)
-            parts = re.split(r"[与和、及]", comp_raw)
+            parts = _CONJUNCTION_RE.split(comp_raw)
             for part in parts:
                 part = part.strip()
                 if part:
@@ -894,7 +904,7 @@ def _machine_component_targets_from_answer(
         comp_match = re.match(r"^\s*\d+\.\s*\*\*([^*]+)\*\*", line)
         if comp_match and current_machine:
             comp_raw = _listing_target_head(comp_match.group(1))
-            parts = re.split(r"[与和、及]", comp_raw)
+            parts = _CONJUNCTION_RE.split(comp_raw)
             for part in parts:
                 part = part.strip()
                 if part:
@@ -1058,8 +1068,8 @@ def _doc_matches_manual_hint(doc: dict[str, Any], manual_hint: str) -> bool:
     fp = str(doc.get("file_path") or doc.get("path") or "").replace("\\", "/")
     if not fp:
         fp = _doc_basename(doc)
-    fp_compact = re.sub(r"\s+", "", fp)
-    hint_compact = re.sub(r"\s+", "", hint)
+    fp_compact = _WS_RE.sub("", fp)
+    hint_compact = _WS_RE.sub("", hint)
     if not fp_compact:
         return False
     # Data-driven anti-bleed: resolve both sides to their canonical KB machine
@@ -1070,7 +1080,7 @@ def _doc_matches_manual_hint(doc: dict[str, Any], manual_hint: str) -> bool:
     if hint_machine and fp_machine:
         return hint_machine == fp_machine
     if hint_machine:
-        nc = re.sub(r"\s+", "", hint_machine)
+        nc = _WS_RE.sub("", hint_machine)
         if nc not in fp_compact and hint_machine not in fp:
             return False
         return True
@@ -1130,9 +1140,9 @@ def _answer_bullet_lines_for_figure_targets(answer: str) -> list[str]:
     seen: set[str] = set()
     for raw_line in body.splitlines():
         line = raw_line.strip()
-        if not re.match(r"^[-*•]\s+", line):
+        if not _BULLET_PREFIX_RE.match(line):
             continue
-        payload = re.sub(r"^[-*•]\s+", "", line).strip()
+        payload = _BULLET_PREFIX_RE.sub("", line).strip()
         if len(payload) < 4:
             continue
         machine_bullet = re.match(r"^\*\*([^*]+)\*\*[：:]", payload)
@@ -1193,11 +1203,11 @@ def _machine_bullet_subject_variants(line: str) -> list[str]:
     )
     if not m:
         return variants
-    body = re.sub(r"\*\*([^*]+)\*\*", r"\1", m.group(1).strip())
+    body = _BOLD_RE.sub(r"\1", m.group(1).strip())
     body = re.split(r"保养周期", body, maxsplit=1)[0].strip().rstrip("。")
     for inner in re.findall(r"[（(]([^）)]+)[）)]", body):
         add(_listing_target_head(inner))
-    for part in re.split(r"[（(]", body, maxsplit=1):
+    for part in _PAREN_SPLIT_RE.split(body, maxsplit=1):
         add(_listing_target_head(part))
     return variants
 
@@ -2211,7 +2221,7 @@ def _listing_target_phrases(query: str, retrieved_text: str) -> list[str]:
     for topic in _maintenance_topics_in_text(text, query):
         add(topic)
 
-    for line in re.split(r"[\n\r]+", text):
+    for line in _NEWLINES_RE.split(text):
         line = line.strip()
         if (
             len(line) < 4
@@ -2245,7 +2255,7 @@ def _listing_targets_anchored_in_text(
     anchor = (anchor_text or "").strip()
     if len(targets) < 2 or not anchor:
         return targets
-    lines = [line.strip() for line in re.split(r"[\n\r]+", anchor) if line.strip()]
+    lines = [line.strip() for line in _NEWLINES_RE.split(anchor) if line.strip()]
     return [
         t
         for t in targets
@@ -2273,7 +2283,7 @@ def _listing_targets_with_query_line_overlap(
     targets = _listing_targets_anchored_in_text(query, full_text, anchor_text=focus)
     if not targets:
         return []
-    lines = [line.strip() for line in re.split(r"[\n\r]+", focus_norm) if line.strip()]
+    lines = [line.strip() for line in _NEWLINES_RE.split(focus_norm) if line.strip()]
     return [
         t
         for t in targets
@@ -2377,7 +2387,7 @@ def _answer_has_multi_section_markdown(answer: str) -> bool:
     body = _answer_text_for_placement(answer)
     titles = [
         m.group(1).strip()
-        for m in re.finditer(r"\*\*([^*]+)\*\*", body)
+        for m in _BOLD_RE.finditer(body)
         if len(m.group(1).strip()) >= 4
     ]
     return len(titles) >= 2
@@ -2639,7 +2649,7 @@ def _answer_section_topics(answer: str) -> list[str]:
     body = _answer_text_for_placement(answer)
     topics: list[str] = []
     seen: set[str] = set()
-    for match in re.finditer(r"\*\*([^*]+)\*\*", body):
+    for match in _BOLD_RE.finditer(body):
         topic = match.group(1).strip()
         if len(topic) < 3 or topic in seen:
             continue
@@ -2987,7 +2997,7 @@ def filter_docs_cited_by_answer(
 
 def _answer_text_for_placement(answer: str) -> str:
     text = (answer or "").strip()
-    parts = re.split(r"\n###\s*References\b", text, maxsplit=1, flags=re.I)
+    parts = _REFERENCES_SPLIT_RE.split(text, maxsplit=1)
     return parts[0].strip()
 
 
@@ -3014,8 +3024,8 @@ def _subjects_from_machine_field_value(value: str, query: str) -> list[str]:
     if comps:
         return comps
     tail = re.split(r"保养周期", value, maxsplit=1)[0].strip()
-    tail = re.sub(r"\*\*([^*]+)\*\*", r"\1", tail).strip().rstrip("。")
-    tail = re.split(r"[（(]", tail, maxsplit=1)[0].strip()
+    tail = _BOLD_RE.sub(r"\1", tail).strip().rstrip("。")
+    tail = _PAREN_SPLIT_RE.split(tail, maxsplit=1)[0].strip()
     subj = _listing_target_head(tail)
     if (
         subj
@@ -3051,8 +3061,8 @@ def _infer_listing_machine_context(query: str, answer: str) -> str:
         if name not in q:
             continue
         for hint in cited:
-            compact_hint = re.sub(r"\s+", "", hint)
-            compact_name = re.sub(r"\s+", "", name)
+            compact_hint = _WS_RE.sub("", hint)
+            compact_name = _WS_RE.sub("", name)
             if compact_name in compact_hint or name in hint:
                 return name
         machine = _machine_from_section_title(name)
