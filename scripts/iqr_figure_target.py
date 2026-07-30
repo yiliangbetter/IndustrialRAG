@@ -484,13 +484,25 @@ def _component_spans_from_answer(answer: str) -> list[str]:
 
 
 def _is_component_listing_across_machines(query: str) -> bool:
-    """Cross-manual questions listing parts/components (e.g. Q17), not periods per line."""
+    """Cross-manual questions listing parts/components (e.g. Q17), not periods per line.
+
+    A query that names a *specific* known machine (e.g. Q11 "高速智能封边机的
+    保养中，哪些部件需要清理残胶") is a single-machine component question and
+    must NOT enter the cross-manual listing path — otherwise
+    ``_infer_listing_pairs_from_cited_chunks`` over-supplements from the pool
+    and returns far more figures than the answer actually lists.
+    """
     q = (query or "").strip()
     if not q:
         return False
-    return bool(
+    if not (
         re.search(r"部件|零件|组件", q) and re.search(r"哪些|有什么|有哪|各自", q)
-    )
+    ):
+        return False
+    # Single-machine query → not a cross-manual listing.
+    if resolve_machine_name(q):
+        return False
+    return True
 
 
 def _cited_manual_hints_from_answer(answer: str) -> set[str]:
