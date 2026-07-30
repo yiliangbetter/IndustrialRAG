@@ -25,6 +25,7 @@ from iqr_config import (
     _image_min_ref_align,
     _min_substantive_term_len,
 )
+from iqr_domain_schema import schema as _domain_schema
 from iqr_terms import (
     _action_focus_bigrams,
     _action_focus_text,
@@ -432,7 +433,7 @@ def _line_citation_overlap(answer_blob: str, line: str) -> float:
     line = (line or "").strip()
     if not line or _is_image_metadata_line(line) or _is_toc_or_directory_line(line):
         return 0.0
-    if line.startswith(("[图片]", "图片路径", "页码", "关联正文", "图注", "脚注")):
+    if line.startswith(tuple(["[图片]", *_domain_schema.image_block_fields])):
         return 0.0
     norm = _normalize_citation_blob(line)
     if len(norm) < 12:
@@ -466,7 +467,7 @@ def _chunk_citation_score(answer_blob: str, content: str) -> float:
     best = 0.0
     for line in content.splitlines():
         best = max(best, _line_citation_overlap(answer_blob, line))
-    for field in ("保养步骤", "保养内容", "保养周期"):
+    for field in _domain_schema.section_markers:
         for match in re.finditer(rf"{field}[：:]([^\n]+)", content):
             val = _normalize_citation_blob(match.group(1).strip())
             if len(val) >= 6:

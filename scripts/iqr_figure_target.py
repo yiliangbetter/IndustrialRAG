@@ -96,13 +96,24 @@ from iqr_anchor import (
     _supplement_cross_manual_figure_chunks,
 )
 from iqr_machine import known_machine_names, resolve_machine_name
+from iqr_domain_schema import schema as _domain_schema
 
 
-_MAINT_TOPIC_RE = re.compile(r"保养内容[：:]\s*([^\n]{2,48})", re.IGNORECASE)
+def _build_section_marker_re() -> re.Pattern[str]:
+    alt = "|".join(re.escape(m) for m in _domain_schema.section_markers)
+    return re.compile(rf"(?:{alt})[：:]\s*([^\n]{{2,48}})", re.IGNORECASE)
+
+
+def _build_cycle_label_re() -> re.Pattern[str]:
+    alt = "|".join(re.escape(m) for m in _domain_schema.section_markers)
+    return re.compile(rf"^(?:{alt})[：:].+$")
+
+
+_MAINT_TOPIC_RE = _build_section_marker_re()
 
 
 # Ingest / manual section templates (document structure, not product vocabulary).
-_GENERIC_CYCLE_LABEL_RE = re.compile(r"^保养周期[：:].+$")
+_GENERIC_CYCLE_LABEL_RE = _build_cycle_label_re()
 
 
 _MAINT_CYCLE_VALUE_RE = re.compile(r"^每.{1,16}(?:一次|保养一次|/次|一遍)$")
@@ -124,7 +135,7 @@ try:
         detect_table_filter_signal,
     )
 except ImportError:
-    _CATALOG_MODEL_MARKER = "本手册适用产品型号"
+    _CATALOG_MODEL_MARKER = _domain_schema.catalog_page_marker
 
     def detect_table_filter_signal(query: str, text: str) -> bool:  # type: ignore[misc]
         return False
@@ -474,7 +485,7 @@ def _answer_primary_listing_body(answer: str) -> str:
     """Answer body for listing spans; drop trailing digressions (e.g. 此外…)."""
     text = (answer or "").strip()
     text = _ANSWER_REF_RE.sub("", text)
-    for marker in ("此外", "另外", "同时", "除此之外"):
+    for marker in _domain_schema.paragraph_connectors:
         match = re.search(rf"(?:^|\n)\s*{marker}", text)
         if match:
             text = text[: match.start()]
@@ -576,20 +587,7 @@ def _cited_manual_pdf_stems(answer: str) -> list[str]:
 # generalizes to unseen labels (LLM answer wording is low-randomness, but new
 # field labels still follow these endings). Real components (压带轮 / 涂胶轴 /
 # 仿形靠模 / 电机散热风扇) end in none of them.
-_STRUCTURAL_LABEL_SUFFIXES = (
-    "周期",
-    "步骤",
-    "内容",
-    "方式",
-    "部位",
-    "部件",
-    "工具",
-    "标准",
-    "依据",
-    "要求",
-    "方法",
-    "说明",
-)
+_STRUCTURAL_LABEL_SUFFIXES = tuple(_domain_schema.structural_field_keys)
 
 
 def _is_answer_structural_label(span: str) -> bool:
@@ -703,7 +701,7 @@ def _components_from_machine_line_value(value: str, query: str) -> list[str]:
     for pat in _MACHINE_LINE_COMPONENT_PATTERNS:
         for match in re.finditer(pat, value):
             add(match.group(1))
-    if not out and "保养周期" not in value:
+    if not out and not any(m in value for m in _domain_schema.section_markers):
         for extra in _BOLD_RE.findall(value):
             add(extra)
     return out
@@ -718,7 +716,7 @@ def _is_machine_class_span(text: str) -> bool:
     not-yet-ingested machine whose name still ends with a known class suffix.
     """
     blob = (text or "").strip()
-    return "封边机" in blob or bool(re.search(r"(?:钻|中心)$", blob))
+    return any(s in blob for s in _domain_schema.machine_class_suffixes)
 
 
 def _machine_from_section_title(title: str) -> str:
@@ -732,7 +730,7 @@ def _machine_from_section_title(title: str) -> str:
         if name in title:
             return name
     if _is_machine_class_span(title):
-        return title.split("维护保养")[0].split(".pdf")[0].split(".PDF")[0].strip()
+        return _domain_schema.truncate_filename(title)
     return ""
 
 
@@ -815,7 +813,7 @@ def _machine_component_targets_from_answer(
         if field_match:
             field_name = (field_match.group(1) or field_match.group(2) or "").strip()
             value = field_match.group(3).strip()
-            if field_name in ("注", "备注") or re.fullmatch(r"注\d*", field_name):
+            if field_name in _domain_schema.footnote_labels or re.fullmatch(r"注\d*", field_name):
                 continue
             machine = _machine_from_section_title(field_name)
             if machine:
@@ -2739,7 +2737,7 @@ def _chunk_is_title_only(content: str) -> bool:
     norm = _normalize_citation_blob(text)
     if len(norm) <= 12:
         return True
-    if "保养步骤" in text or "保养内容" in text or "保养周期" in text:
+    if any(m in text for m in _domain_schema.section_markers):
         return False
     return len(norm) <= 24 and not re.search(r"[\d\.]+\s*\S", text)
 
@@ -2975,7 +2973,7 @@ def filter_docs_cited_by_answer(
                 meta["query_section_anchor"] = qsec_meta
             elif meta.get("mode") == "pending_query_section_anchor":
                 meta["query_section_anchor"] = qsec_meta
-    if re.search(r"开机前", query or "") and not span_keep:
+    if _domain_schema.matches_special_pattern(query or "") and not span_keep:
         kept = [
             doc
             for doc in kept
@@ -3023,7 +3021,7 @@ def _subjects_from_machine_field_value(value: str, query: str) -> list[str]:
     comps = _components_from_machine_line_value(value, query)
     if comps:
         return comps
-    tail = re.split(r"保养周期", value, maxsplit=1)[0].strip()
+    tail = re.split(r"|".join(re.escape(m) for m in _domain_schema.section_markers), value, maxsplit=1)[0].strip()
     tail = _BOLD_RE.sub(r"\1", tail).strip().rstrip("。")
     tail = _PAREN_SPLIT_RE.split(tail, maxsplit=1)[0].strip()
     subj = _listing_target_head(tail)
@@ -3337,7 +3335,7 @@ def _heading_before_image_block(context: str, path_match_start: int) -> str:
             continue
         if re.match(r"^\d+\.\d+(?:\.\d+)?\s+\S", line) and len(line) <= 80:
             return line
-        if line.startswith("保养") and "：" in line:
+        if any(line.startswith(m) for m in _domain_schema.section_markers) and "：" in line:
             continue
         # Unnumbered section titles (e.g. ``机床床身清洁``) often sit directly above figures.
         if (

@@ -1,0 +1,27 @@
+{
+  "domain": "industrial_equipment_maintenance",
+  "version": "1.0",
+
+  "section_markers": ["保养步骤", "保养内容", "保养周期"],
+
+  "structural_field_keys": [
+    "周期", "步骤", "内容", "方式", "部位",
+    "部件", "工具", "标准", "依据", "要求", "方法", "说明"
+  ],
+
+  "action_prefixes": ["清理", "检查", "更换", "调整", "清洁"],
+
+  "footnote_labels": ["注", "备注"],
+
+  "paragraph_connectors": ["此外", "另外", "同时", "除此之外"],
+
+  "filename_truncate_markers": ["维护保养"],
+
+  "special_query_patterns": ["开机前"],
+
+  "machine_class_suffixes": ["封边机", "钻", "中心"],
+
+  "catalog_page_marker": "本手册适用产品型号",
+
+  "image_block_fields": ["图片路径", "页码", "关联正文", "图注", "脚注"]
+}

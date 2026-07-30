@@ -15,6 +15,7 @@ from raganything.utils import (
     text_term_alignment_symmetric,
 )
 from iqr_config import _min_substantive_term_len
+from iqr_domain_schema import schema as _domain_schema
 
 
 def _normalize_query_for_match(query: str) -> str:
@@ -164,7 +165,11 @@ def _subject_from_machine_field_line(line: str) -> str:
     )
     if not m:
         return ""
-    tail = re.split(r"保养周期", m.group(1), maxsplit=1)[0].strip()
+    tail = re.split(
+        "|".join(re.escape(marker) for marker in _domain_schema.section_markers),
+        m.group(1),
+        maxsplit=1,
+    )[0].strip()
     tail = re.sub(r"\*\*([^*]+)\*\*", r"\1", tail).strip().rstrip("。")
     tail = re.split(r"[（(]", tail, maxsplit=1)[0].strip()
     return _listing_target_head(tail)
@@ -328,7 +333,7 @@ def _action_object_cjk(query: str) -> str:
         tail = how.group(1).strip()
         if len(tail) >= _min_substantive_term_len():
             cjk = tail
-    for prefix in ("清理", "检查", "更换", "调整", "清洁"):
+    for prefix in _domain_schema.action_prefixes:
         if cjk.startswith(prefix) and len(cjk) > len(prefix) + 2:
             cjk = cjk[len(prefix) :]
             break
