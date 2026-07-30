@@ -2,6 +2,7 @@
 
 Media path resolution, safety checks, and media-token encode/decode.
 """
+
 from __future__ import annotations
 
 import base64
@@ -66,5 +67,3 @@ def decode_media_token(token: str, media_root: Path) -> Path | None:
     if ".." in Path(rel).parts:
         return None
     return (media_root.resolve() / rel).resolve()
-
-

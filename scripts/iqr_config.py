@@ -2,6 +2,7 @@
 
 Environment-driven thresholds and limits for query-time image selection.
 """
+
 from __future__ import annotations
 
 import os
@@ -108,5 +109,3 @@ def _image_min_ref_align() -> float:
         return float(raw)
     except ValueError:
         return 0.28
-
-

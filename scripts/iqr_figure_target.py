@@ -3,6 +3,7 @@
 Figure-target extraction from answers: machine/component/listing targets,
 cited-manual hints, and citation-based doc filtering.
 """
+
 from __future__ import annotations
 
 import os
@@ -403,8 +404,7 @@ def _component_spans_from_answer(answer: str) -> list[str]:
     return [
         span
         for span in _answer_listing_spans(_answer_primary_listing_body(answer))
-        if not resolve_machine_name(span)
-        and not _is_answer_structural_label(span)
+        if not resolve_machine_name(span) and not _is_answer_structural_label(span)
     ]
 
 
@@ -694,7 +694,9 @@ def _machine_component_targets_from_answer(
         if field_match:
             field_name = (field_match.group(1) or field_match.group(2) or "").strip()
             value = field_match.group(3).strip()
-            if field_name in _domain_schema.footnote_labels or re.fullmatch(r"注\d*", field_name):
+            if field_name in _domain_schema.footnote_labels or re.fullmatch(
+                r"注\d*", field_name
+            ):
                 continue
             machine = _machine_from_section_title(field_name)
             if machine:
@@ -2902,7 +2904,11 @@ def _subjects_from_machine_field_value(value: str, query: str) -> list[str]:
     comps = _components_from_machine_line_value(value, query)
     if comps:
         return comps
-    tail = re.split(r"|".join(re.escape(m) for m in _domain_schema.section_markers), value, maxsplit=1)[0].strip()
+    tail = re.split(
+        r"|".join(re.escape(m) for m in _domain_schema.section_markers),
+        value,
+        maxsplit=1,
+    )[0].strip()
     tail = _BOLD_RE.sub(r"\1", tail).strip().rstrip("。")
     tail = _PAREN_SPLIT_RE.split(tail, maxsplit=1)[0].strip()
     subj = _listing_target_head(tail)
@@ -3204,7 +3210,10 @@ def _heading_before_image_block(context: str, path_match_start: int) -> str:
             continue
         if re.match(r"^\d+\.\d+(?:\.\d+)?\s+\S", line) and len(line) <= 80:
             return line
-        if any(line.startswith(m) for m in _domain_schema.section_markers) and "：" in line:
+        if (
+            any(line.startswith(m) for m in _domain_schema.section_markers)
+            and "：" in line
+        ):
             continue
         # Unnumbered section titles (e.g. ``机床床身清洁``) often sit directly above figures.
         if (
@@ -3306,5 +3315,3 @@ def _ref_matches_manual_hint(ref: dict[str, Any], manual_hint: str) -> bool:
         if _doc_matches_manual_hint({"file_path": val}, hint):
             return True
     return False
-
-

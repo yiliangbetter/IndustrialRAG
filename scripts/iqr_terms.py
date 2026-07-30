@@ -3,6 +3,7 @@
 Query/term utilities: normalization, subject needles, bigrams, and label
 matching.
 """
+
 from __future__ import annotations
 
 import os
@@ -195,6 +196,7 @@ def _line_spans_in_body(body: str) -> list[tuple[int, int, str]]:
 def _procedure_step_spans(answer: str) -> list[str]:
     """Bold titles from numbered procedure steps in the answer body."""
     from iqr_figure_target import _answer_text_for_placement
+
     body = _answer_text_for_placement(answer)
     spans: list[str] = []
     seen: set[str] = set()
@@ -377,6 +379,7 @@ def _query_primary_object_term(query: str) -> str:
 def _figure_matches_query_object(query: str, text: str) -> bool:
     """Query object must appear in figure text; no 开关-in-保护开关 substring hits."""
     from iqr_figure_target import _strict_object_image_gate
+
     blob = (text or "").strip()
     if not blob:
         return False
@@ -409,6 +412,7 @@ def _action_focus_bigrams(query: str, retrieved_text: str | None = None) -> set[
     """Bigrams for the query's concrete subject/action (not the device name echo)."""
     from iqr_store import _ranked_retrieval_lines
     from iqr_figure_target import _is_toc_or_directory_line
+
     focus: set[str] = set()
     for clause in _subject_action_clauses(query):
         snippet = clause[-16:] if len(clause) > 16 else clause
@@ -443,6 +447,7 @@ def _ref_passes_focus_bigram_gate(
     """Reject figures whose label only shares generic inspection bigrams with the query."""
     from iqr_align import _ref_effective_label
     from iqr_figure_target import _strict_object_image_gate
+
     label = _ref_effective_label(ref)
     if not label:
         return False
@@ -458,5 +463,3 @@ def _ref_passes_focus_bigram_gate(
     if not focus:
         return True
     return bool(focus & substantive_bigrams(blob))
-
-

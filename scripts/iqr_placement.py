@@ -3,6 +3,7 @@
 Inline image placement: semantic/caption placements, end fallback, and
 API image assembly.
 """
+
 from __future__ import annotations
 
 import re
@@ -546,5 +547,3 @@ def resolve_query_images(
         answer=answer,
     )
     return images, debug
-
-

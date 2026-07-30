@@ -3,6 +3,7 @@
 Reference/chunk alignment scoring: figure-ref align gates, subject/citation
 chunk scores, and answer-to-chunk citation overlap.
 """
+
 from __future__ import annotations
 
 import os
@@ -80,6 +81,7 @@ def _figure_ref_passes_align_gate(
     doc_content: str = "",
 ) -> bool:
     from iqr_anchor import _anchor_align_blob
+
     blob = _anchor_align_blob(anchor_text, query)
     if not blob.strip():
         return True
@@ -130,6 +132,7 @@ def _apply_unified_figure_debug(
     answer: str,
 ) -> None:
     from iqr_figure_target import _machine_targets_from_answer
+
     debug["image_selection"] = "unified_figure_targets"
     debug["unified_figure_targets"] = meta
     debug["chunk_locality"] = meta
@@ -178,8 +181,25 @@ def _ref_passes_image_align_gate(
     listing_source_text: str | None = None,
     retrieved_docs: list[dict[str, Any]] | None = None,
 ) -> bool:
-    from iqr_anchor import _image_anchor_mode, _pick_anchor_sections, _ref_anchored_in_retrieved_text, _ref_conflicts_anchor_sections, _ref_context_subject_aligns
-    from iqr_figure_target import _anchor_maintenance_spans, _answer_text_for_listing, _label_matches_listing_target, _listing_mode_active, _listing_targets_with_query_line_overlap, _maintenance_content_spans, _ref_aligns_answer_bullets_via_inline_context, _ref_aligns_for_multi_figure_listing, _ref_matches_figure_focus
+    from iqr_anchor import (
+        _image_anchor_mode,
+        _pick_anchor_sections,
+        _ref_anchored_in_retrieved_text,
+        _ref_conflicts_anchor_sections,
+        _ref_context_subject_aligns,
+    )
+    from iqr_figure_target import (
+        _anchor_maintenance_spans,
+        _answer_text_for_listing,
+        _label_matches_listing_target,
+        _listing_mode_active,
+        _listing_targets_with_query_line_overlap,
+        _maintenance_content_spans,
+        _ref_aligns_answer_bullets_via_inline_context,
+        _ref_aligns_for_multi_figure_listing,
+        _ref_matches_figure_focus,
+    )
+
     if source_hints and not _ref_matches_source_hints(ref, source_hints):
         return False
     text = (retrieved_text or "").strip()
@@ -314,7 +334,13 @@ def _query_aligned_figure_candidate_docs(
     answer: str | None = None,
     require_answer_gate: bool = False,
 ) -> list[dict[str, Any]]:
-    from iqr_figure_target import _answer_body_for_citation_match, _answer_weak_consistency_gate, _chunk_is_title_only, _chunk_is_toc_heavy
+    from iqr_figure_target import (
+        _answer_body_for_citation_match,
+        _answer_weak_consistency_gate,
+        _chunk_is_title_only,
+        _chunk_is_toc_heavy,
+    )
+
     q = (query or "").strip()
     if not q:
         return []
@@ -345,6 +371,7 @@ def _query_aligned_figure_candidate_docs(
 
 def _chunk_subject_score(query: str, content: str) -> float:
     from iqr_figure_target import _is_toc_or_directory_line
+
     needles = _query_subject_needles(query)
     if not content.strip() or not needles:
         return 0.0
@@ -373,6 +400,7 @@ def _chunk_subject_score(query: str, content: str) -> float:
 def _chunk_figure_context_aligns_query(query: str, content: str) -> bool:
     """Figure caption/context must align with the query action focus, not incidental terms."""
     from iqr_figure_target import _strict_object_image_gate
+
     focus = _action_focus_text(query)
     if not focus.strip():
         return False
@@ -402,9 +430,7 @@ def _chunk_figure_context_aligns_query(query: str, content: str) -> bool:
 _ANSWER_REF_RE = re.compile(r"###\s*References\b.*", re.I | re.S)
 
 
-_CITATION_PUNCT_RE = re.compile(
-    r"[\s!！?？。.，,~、；;：:" r"''（）()\[\]【】\-/／·]+"
-)
+_CITATION_PUNCT_RE = re.compile(r"[\s!！?？。.，,~、；;：:" r"''（）()\[\]【】\-/／·]+")
 
 
 def _normalize_citation_blob(text: str) -> str:
@@ -430,6 +456,7 @@ def _answer_chunk_term_overlap(answer_blob: str, content: str) -> float:
 @lru_cache(maxsize=16384)
 def _line_citation_overlap(answer_blob: str, line: str) -> float:
     from iqr_figure_target import _is_toc_or_directory_line
+
     line = (line or "").strip()
     if not line or _is_image_metadata_line(line) or _is_toc_or_directory_line(line):
         return 0.0
@@ -462,6 +489,7 @@ def _line_citation_overlap(answer_blob: str, line: str) -> float:
 @lru_cache(maxsize=4096)
 def _chunk_citation_score(answer_blob: str, content: str) -> float:
     from iqr_anchor import _section_ids_in_text
+
     if not answer_blob or not (content or "").strip():
         return 0.0
     best = 0.0
@@ -530,6 +558,7 @@ def _ref_aligns_with_retrieval_focus(
 def _ref_effective_label(ref: dict[str, Any]) -> str:
     from iqr_anchor import _is_section_number_heading, _strip_section_prefix
     from iqr_figure_target import _source_figure_label
+
     raw = _source_figure_label(ref) or str(ref.get("label") or "").strip()
     if _is_section_number_heading(raw):
         stripped = _strip_section_prefix(raw)
@@ -548,8 +577,17 @@ def _ref_aligns_with_query_label(
     align_source_text: str | None = None,
 ) -> bool:
     """Parser caption/footnote/section heading aligns with the query."""
-    from iqr_anchor import _is_section_number_heading, _ref_context_subject_aligns, _strip_section_prefix
-    from iqr_figure_target import _figure_label_matches_query, _is_generic_cycle_only_label, _ref_matches_figure_focus
+    from iqr_anchor import (
+        _is_section_number_heading,
+        _ref_context_subject_aligns,
+        _strip_section_prefix,
+    )
+    from iqr_figure_target import (
+        _figure_label_matches_query,
+        _is_generic_cycle_only_label,
+        _ref_matches_figure_focus,
+    )
+
     label = _ref_effective_label(ref)
     if len(label) < _min_substantive_term_len():
         return False
@@ -644,5 +682,3 @@ def _truncate_ref_text(text: str, limit: int) -> str:
     if len(text) <= limit:
         return text
     return text[:limit] + "…"
-
-
