@@ -643,7 +643,7 @@ async def run_cases(
                 try:
                     print(f"  caption: {c}", flush=True)
                 except UnicodeEncodeError:
-                    safe = str(c).encode("utf-8", errors="replace").decode("utf-8")
+                    safe = str(c).encode("ascii", errors="replace").decode("ascii")
                     print(f"  caption: {safe}", flush=True)
     finally:
         if own_rag:
