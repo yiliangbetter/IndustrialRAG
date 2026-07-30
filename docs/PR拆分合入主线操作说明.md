@@ -1,12 +1,12 @@
 # PR 拆分合入主线操作说明
 
-> **工作指导（长期保留）**：本文件是 `lhq-rag-dev` → `main` 拆 PR / 合入顺序的权威说明。  
-> **禁止**在「清理开发文档 / 误暂存文件」类提交中删除本文件。  
-> 须随 **PR-A / PR-B / PR-C / PR-D** 与 `lhq-rag-dev` 保留；合入 `main` 后继续留在主线，供后续 PR-B 及日常开发对照。  
+> **工作指导（长期保留）**：本文件是 `lhq-rag-dev` → `main` 拆 PR / 合入顺序的权威说明。
+> **禁止**在「清理开发文档 / 误暂存文件」类提交中删除本文件。
+> 须随 **PR-A / PR-B / PR-C / PR-D** 与 `lhq-rag-dev` 保留；合入 `main` 后继续留在主线，供后续 PR-B 及日常开发对照。
 > Agent / 协作者改代码、开 PR、拣文件前先读本文。
 
-> 适用分支：`lhq-rag-dev` → `main`  
-> 背景：单 PR 约 **+43,180 行**（`113 files`），超过 GitHub Copilot review 上限（约 2 万行），且与 `main` 存在 merge conflicts。  
+> 适用分支：`lhq-rag-dev` → `main`
+> 背景：单 PR 约 **+43,180 行**（`113 files`），超过 GitHub Copilot review 上限（约 2 万行），且与 `main` 存在 merge conflicts。
 > 策略：拆成 **4 个独立 PR**，每个 < 2 万行，按依赖顺序合入。
 >
 > **2026-07-27 更新**：`lhq-rag-dev` 已完成重组式重构（monolith → iqr_* 13 模块 + utils 5 子模块 + Domain Schema 外置），
@@ -691,8 +691,8 @@ A：批测脚本（`run_test_cases_report.py`、`run_web_path_*`、`bench_clarif
 
 > **状态：✅ 已完成（2026-07-27）**。下述流水线已实际执行，`lhq-rag-dev` 已包含全部重构结果。
 
-> 背景：`pr-a-core-engine` **不含** Web / 客户端 / 部分 hooks，无法做产品级全量回归。  
-> 瘦身适合直接改 PR-A；rerank / `utils` / `image_query_refs` 等大改需在全量树上验证。  
+> 背景：`pr-a-core-engine` **不含** Web / 客户端 / 部分 hooks，无法做产品级全量回归。
+> 瘦身适合直接改 PR-A；rerank / `utils` / `image_query_refs` 等大改需在全量树上验证。
 > **约定**：可等大改进 A（或紧跟 follow-up）后再合 #47 进 `main`；但瘦身结果必须先并进 `lhq-rag-dev`，否则大改不包含已瘦身状态。
 
 ### 11.1 工作类型与分支
@@ -760,12 +760,12 @@ flowchart LR
 
 ### 11.5 与「另开会话」的对应
 
-- **短会话 / 本 PR 急合前**：只做 §11.1 瘦身（在 `pr-a-core-engine`）。  
-- **另开会话**：先确认 §11.2 第 2 步已完成，再在 `lhq-rag-dev` 做 rerank / utils / image 大改，最后 §11.2 第 4 步拣回 A。  
+- **短会话 / 本 PR 急合前**：只做 §11.1 瘦身（在 `pr-a-core-engine`）。
+- **另开会话**：先确认 §11.2 第 2 步已完成，再在 `lhq-rag-dev` 做 rerank / utils / image 大改，最后 §11.2 第 4 步拣回 A。
 - 细节待办见 [`docs/PR47_下一步工作摘要.md`](PR47_下一步工作摘要.md)。
 
 ---
 
-*文档生成依据：2026-07-12 对 `lhq-rag-dev` 与 `origin/main` 的 diff 统计（`2665196` 起 `image_query_refs.py` 已剔除 legacy 死代码，较初版统计少约 2.1k 行）。*  
-*§十一补充：2026-07-25 PR-A 评审收尾与全量验证约定。*  
+*文档生成依据：2026-07-12 对 `lhq-rag-dev` 与 `origin/main` 的 diff 统计（`2665196` 起 `image_query_refs.py` 已剔除 legacy 死代码，较初版统计少约 2.1k 行）。*
+*§十一补充：2026-07-25 PR-A 评审收尾与全量验证约定。*
 *§二/三/五/七/十一 修订：2026-07-27——lhq 重组式重构完成，PR #47 拆为两次 push（A1-① raganything ~5K + A1-② iqr ~16K），A2 单独新 PR（pr-a2-schema，~3.6K）。批测脚本全部列入 PR-D。*

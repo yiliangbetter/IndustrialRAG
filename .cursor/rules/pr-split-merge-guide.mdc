@@ -32,9 +32,9 @@ alwaysApply: true
 
 ## 瘦身 ↔ 全量大改（摘要）
 
-1. 瘦身在 `pr-a-core-engine` → push #47（可暂不合 main）  
-2. `merge A → lhq-rag-dev` → 全量大改并测  
-3. cherry-pick / 拣文件回 `pr-a` → 再合 main  
+1. 瘦身在 `pr-a-core-engine` → push #47（可暂不合 main）
+2. `merge A → lhq-rag-dev` → 全量大改并测
+3. cherry-pick / 拣文件回 `pr-a` → 再合 main
 
 详见文档 **§十一**。
 
