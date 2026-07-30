@@ -118,6 +118,11 @@ _GENERIC_CYCLE_LABEL_RE = _build_cycle_label_re()
 
 _MAINT_CYCLE_VALUE_RE = re.compile(r"^每.{1,16}(?:一次|保养一次|/次|一遍)$")
 
+# Section-marker based split / content extraction (schema-driven).
+_SECTION_ALT = "|".join(re.escape(m) for m in _domain_schema.section_markers)
+_SECTION_MARKER_SPLIT_RE = re.compile(_SECTION_ALT)
+_SECTION_MARKER_CONTENT_RE = re.compile(rf"(?:{_SECTION_ALT})[：:]\s*([^\n]+)")
+
 # --- Frequently-used inline patterns (compiled once) ---
 _WS_RE = re.compile(r"\s+")
 _BOLD_RE = re.compile(r"\*\*([^*]+)\*\*")
@@ -211,7 +216,7 @@ def _ref_maintenance_topic(ref: dict[str, Any]) -> str:
     if not match:
         return ""
     topic = match.group(1).strip()
-    topic = re.split(r"保养步骤|保养周期", topic, maxsplit=1)[0].strip()
+    topic = _SECTION_MARKER_SPLIT_RE.split(topic, maxsplit=1)[0].strip()
     topic = _PERIOD_NL_SPLIT_RE.split(topic, maxsplit=1)[0].strip()[:32]
     return topic
 
@@ -406,7 +411,7 @@ def _maintenance_topics_in_text(text: str, query: str) -> list[str]:
     seen: set[str] = set()
     for match in _MAINT_TOPIC_RE.finditer(text or ""):
         topic = match.group(1).strip()
-        topic = re.split(r"保养步骤|保养周期", topic, maxsplit=1)[0].strip()
+        topic = _SECTION_MARKER_SPLIT_RE.split(topic, maxsplit=1)[0].strip()
         topic = _PERIOD_NL_SPLIT_RE.split(topic, maxsplit=1)[0].strip()[:32]
         if len(topic) < 4:
             continue
@@ -1202,7 +1207,7 @@ def _machine_bullet_subject_variants(line: str) -> list[str]:
     if not m:
         return variants
     body = _BOLD_RE.sub(r"\1", m.group(1).strip())
-    body = re.split(r"保养周期", body, maxsplit=1)[0].strip().rstrip("。")
+    body = _SECTION_MARKER_SPLIT_RE.split(body, maxsplit=1)[0].strip().rstrip("。")
     for inner in re.findall(r"[（(]([^）)]+)[）)]", body):
         add(_listing_target_head(inner))
     for part in _PAREN_SPLIT_RE.split(body, maxsplit=1):
@@ -2419,7 +2424,7 @@ def _ref_maint_section_id(
 
 def _maintenance_content_spans(text: str) -> list[str]:
     spans: list[str] = []
-    for match in re.finditer(r"保养内容[：:]\s*([^\n\r。；;]+)", text or ""):
+    for match in _SECTION_MARKER_CONTENT_RE.finditer(text or ""):
         span = match.group(1).strip()
         if len(span) >= 3:
             spans.append(span)
@@ -3420,7 +3425,7 @@ def _maintenance_content_label_for_ref(
         content = _doc_content(doc)
         if path_name not in content:
             continue
-        match = re.search(r"保养内容[：:]\s*([^\n]+)", content)
+        match = _SECTION_MARKER_CONTENT_RE.search(content)
         if match:
             return match.group(1).strip()
     return ""

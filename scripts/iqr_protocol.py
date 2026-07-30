@@ -9,6 +9,12 @@ import re
 from pathlib import Path
 from typing import Any, NamedTuple
 from raganything.utils import text_term_alignment_symmetric
+from iqr_domain_schema import schema as _domain_schema
+
+
+_SECTION_MARKER_SPLIT_RE = re.compile(
+    "|".join(re.escape(m) for m in _domain_schema.section_markers)
+)
 
 
 _IMAGE_EXT_GROUP = r"(?:jpg|jpeg|png|gif|webp|bmp|tif|tiff)"
@@ -156,7 +162,7 @@ def _maintenance_topic_from_text(text: str) -> str:
         return ""
     topic = match.group(1).strip()
     topic = re.split(r"\s*\d+\.\d+", topic, maxsplit=1)[0].strip()
-    topic = re.split(r"保养步骤|保养周期", topic, maxsplit=1)[0].strip()
+    topic = _SECTION_MARKER_SPLIT_RE.split(topic, maxsplit=1)[0].strip()
     topic = re.split(r"[。\n]", topic, maxsplit=1)[0].strip()
     return topic[:32]
 
