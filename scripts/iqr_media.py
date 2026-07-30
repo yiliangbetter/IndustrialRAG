@@ -64,6 +64,13 @@ def decode_media_token(token: str, media_root: Path) -> Path | None:
         rel = base64.urlsafe_b64decode(token + pad).decode("utf-8")
     except (ValueError, UnicodeDecodeError):
         return None
-    if ".." in Path(rel).parts:
+    rel_path = Path(rel)
+    if ".." in rel_path.parts or rel_path.is_absolute():
         return None
-    return (media_root.resolve() / rel).resolve()
+    resolved = (media_root.resolve() / rel_path).resolve()
+    # Guard against path traversal: ensure result stays under media_root
+    try:
+        resolved.relative_to(media_root.resolve())
+    except ValueError:
+        return None
+    return resolved
