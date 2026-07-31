@@ -176,45 +176,87 @@ class ProcessorMixin:
             lines.append(f"{prefix} {body}".strip() if prefix else body)
         return "\n".join(lines)
 
+    @staticmethod
+    def _coerce_textish(value: Any) -> str:
+        """Normalize MinerU/Docling string or list text fields to a single string."""
+        if value is None:
+            return ""
+        if isinstance(value, str):
+            return value.strip()
+        if isinstance(value, list):
+            return "\n".join(str(x) for x in value if x).strip()
+        return str(value).strip()
+
     def _plaintext_from_mineru_blocks(self, items: List[Dict[str, Any]]) -> str:
-        """Recover plaintext from MinerU v2 paragraph/title/list/table/image blocks."""
+        """Recover plaintext from MinerU v1/v2 and Docling text/table/equation/image blocks.
+
+        Used when multimodal processors are skipped (text-first KG / embedding-only) so
+        table bodies, equations, and captions are not silently dropped from the index.
+        """
         parts: List[str] = []
         for item in items:
             if not isinstance(item, dict):
                 continue
             block_type = item.get("type")
             content = item.get("content")
+            s = ""
 
             if block_type == "text" and isinstance(item.get("text"), str):
                 s = item["text"].strip()
-                if s:
-                    parts.append(s)
-                continue
-
-            if not isinstance(content, dict):
-                continue
-
-            if block_type == "paragraph":
-                s = self._mineru_span_text(content.get("paragraph_content"))
-            elif block_type == "title":
-                s = self._mineru_span_text(content.get("title_content"))
-            elif block_type == "list":
-                s = self._mineru_list_items_text(content.get("list_items"))
             elif block_type == "table":
-                s = (content.get("html") or "").strip()
+                if isinstance(content, dict):
+                    s = (content.get("html") or "").strip()
+                if not s:
+                    s = self._coerce_textish(item.get("table_body"))
+                caps = item.get("table_caption")
+                if not caps and isinstance(content, dict):
+                    caps = content.get("table_caption")
+                cap_text = self._coerce_textish(caps)
+                if cap_text and s:
+                    s = f"{cap_text}\n{s}"
+                elif cap_text:
+                    s = cap_text
+            elif block_type in ("equation", "equation_interline", "equation_inline"):
+                if isinstance(content, dict):
+                    s = self._mineru_span_text(
+                        content.get("math_content") or content.get("equation_content")
+                    )
+                if not s:
+                    s = self._coerce_textish(item.get("latex")) or self._coerce_textish(
+                        item.get("text")
+                    )
             elif block_type == "image":
-                caps = content.get("image_caption") or []
-                if isinstance(caps, list):
-                    s = " ".join(str(x) for x in caps if x).strip()
-                else:
-                    s = str(caps).strip()
-            else:
-                s = ""
+                caps = item.get("image_caption") or item.get("img_caption")
+                if not caps and isinstance(content, dict):
+                    caps = content.get("image_caption")
+                s = self._coerce_textish(caps)
+            elif isinstance(content, dict):
+                if block_type == "paragraph":
+                    s = self._mineru_span_text(content.get("paragraph_content"))
+                elif block_type == "title":
+                    s = self._mineru_span_text(content.get("title_content"))
+                elif block_type == "list":
+                    s = self._mineru_list_items_text(content.get("list_items"))
+                elif block_type == "code":
+                    s = self._coerce_textish(
+                        content.get("code_content") or content.get("code_body")
+                    )
 
             if s:
                 parts.append(s)
 
         return "\n\n".join(parts)
+
+    def _text_content_for_skipped_multimodal(
+        self,
+        text_content: str,
+        content_list: List[Dict[str, Any]],
+    ) -> str:
+        """Prefer full-block plaintext harvest when multimodal processors will not run."""
+        harvested = self._plaintext_from_mineru_blocks(content_list)
+        if harvested.strip():
+            return harvested
+        return text_content
 
     async def _insert_text_content_embedding_only(
         self, text_content: str, file_ref: str, doc_id: str
@@ -1720,6 +1762,11 @@ class ProcessorMixin:
             text_content, multimodal_items = separate_content(content_list)
 
             if self.config.allow_embedding_only_ingestion:
+                # Embedding-only skips multimodal processors; fold table/equation/
+                # caption text into the chunk stream so mixed docs are not truncated.
+                text_content = self._text_content_for_skipped_multimodal(
+                    text_content, content_list
+                )
                 if file_name is None:
                     file_name = self._get_file_reference(file_path)
                 await self._insert_text_content_embedding_only(
@@ -2185,6 +2232,17 @@ class ProcessorMixin:
                 if isinstance(candidate, str) and candidate.strip():
                     text_parts.append(candidate.strip())
             text_content = "\n\n".join(text_parts)
+
+        # When multimodal processors will not run, fold table/equation/caption text
+        # into the text stream. Otherwise mixed docs keep only type=text prose and
+        # mark multimodal_processed=True, permanently dropping table bodies.
+        will_skip_multimodal = (
+            self.config.allow_embedding_only_ingestion or skip_multimodal_processing
+        )
+        if will_skip_multimodal:
+            text_content = self._text_content_for_skipped_multimodal(
+                text_content, normalized_content_list
+            )
 
         # Step 1.5: Set content source for context extraction in multimodal processing
         if hasattr(self, "set_content_source_for_context") and multimodal_items:
