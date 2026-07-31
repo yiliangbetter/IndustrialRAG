@@ -1,5 +1,6 @@
 """Regression tests for multimodal belongs_to relation wiring."""
 
+import pytest
 from lightrag.utils import compute_mdhash_id
 
 from raganything.processor import ProcessorMixin
@@ -40,7 +41,8 @@ def _table_chunk_id(description: str, original_item: dict) -> str:
     return compute_mdhash_id(formatted, prefix="chunk-")
 
 
-def test_batch_add_belongs_to_links_extracted_entities_to_modal_entity():
+@pytest.mark.asyncio
+async def test_batch_add_belongs_to_links_extracted_entities_to_modal_entity():
     processor = _make_processor()
     original_item = {
         "type": "table",
@@ -72,7 +74,7 @@ def test_batch_add_belongs_to_links_extracted_entities_to_modal_entity():
         )
     ]
 
-    enhanced = processor._batch_add_belongs_to_relations_type_aware(
+    enhanced = await processor._batch_add_belongs_to_relations_type_aware(
         chunk_results, multimodal_data_list
     )
 
@@ -91,7 +93,8 @@ def test_batch_add_belongs_to_links_extracted_entities_to_modal_entity():
     assert (modal_name, modal_name) not in maybe_edges
 
 
-def test_batch_add_belongs_to_skips_chunks_without_modal_mapping():
+@pytest.mark.asyncio
+async def test_batch_add_belongs_to_skips_chunks_without_modal_mapping():
     processor = _make_processor()
     chunk_results = [
         (
@@ -100,7 +103,7 @@ def test_batch_add_belongs_to_skips_chunks_without_modal_mapping():
         )
     ]
 
-    enhanced = processor._batch_add_belongs_to_relations_type_aware(
+    enhanced = await processor._batch_add_belongs_to_relations_type_aware(
         chunk_results,
         [
             {
