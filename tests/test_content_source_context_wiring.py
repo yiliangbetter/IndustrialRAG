@@ -6,6 +6,7 @@ image/table/equation entities. RAGAnything helpers must fan out to all
 processors and refresh extractors when context config changes.
 """
 
+import atexit
 from types import SimpleNamespace
 from unittest.mock import MagicMock
 
@@ -16,6 +17,13 @@ pytest.importorskip("lightrag")
 from raganything.config import RAGAnythingConfig
 from raganything.modalprocessors import BaseModalProcessor
 from raganything.raganything import RAGAnything
+
+
+def _rag_for_test(working_dir: str) -> RAGAnything:
+    """Build RAGAnything without leaving a noisy atexit finalize hook."""
+    rag = RAGAnything(config=RAGAnythingConfig(working_dir=working_dir))
+    atexit.unregister(rag.close)
+    return rag
 
 
 class ConcreteProcessor(BaseModalProcessor):
@@ -72,13 +80,13 @@ class TestBaseModalProcessorContentSource:
 
 class TestRAGAnythingContextWiring:
     def test_set_content_source_for_context_noop_without_processors(self):
-        rag = RAGAnything(config=RAGAnythingConfig(working_dir="/tmp/rag-test-ctx"))
+        rag = _rag_for_test("/tmp/rag-test-ctx")
         # modal_processors empty by default before init
         rag.set_content_source_for_context([{"type": "text", "text": "x"}], "minerU")
         assert rag.modal_processors == {}
 
     def test_set_content_source_for_context_applies_to_all_processors(self):
-        rag = RAGAnything(config=RAGAnythingConfig(working_dir="/tmp/rag-test-ctx2"))
+        rag = _rag_for_test("/tmp/rag-test-ctx2")
         image = ConcreteProcessor()
         table = ConcreteProcessor()
         failing = ConcreteProcessor()
@@ -99,7 +107,7 @@ class TestRAGAnythingContextWiring:
         failing.set_content_source.assert_called_once_with(source, "text_chunks")
 
     def test_update_context_config_updates_known_keys_and_propagates_extractor(self):
-        rag = RAGAnything(config=RAGAnythingConfig(working_dir="/tmp/rag-test-ctx3"))
+        rag = _rag_for_test("/tmp/rag-test-ctx3")
         rag.config.context_window = 1
         rag.lightrag = SimpleNamespace(tokenizer=object())
         new_extractor = object()
