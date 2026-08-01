@@ -414,33 +414,38 @@ async def async_main() -> None:
     )
     parse_extra = _mineru_parse_kwargs(config.parser)
 
-    await _ingest_folder(
-        rag,
-        config,
-        logger,
-        input_folder=input_folder,
-        parser_output_dir=args.parser_output_dir,
-        parse_method=args.parse_method,
-        parse_extra=parse_extra,
-        recursive=args.recursive,
-        limit=args.limit,
-        skip_multimodal=args.skip_multimodal,
-    )
-    await rag.finalize_storages()
-
-    if args.ingest_only:
-        return
-
-    if args.query.strip():
-        ans = await rag.aquery(
-            args.query.strip(),
-            mode=args.query_mode,
-            vlm_enhanced=False,
+    # Keep storages open through query/chat. finalize_storages() closes
+    # Neo4j/Postgres clients; aquery does not recreate them unless ensure runs
+    # after a FINALIZED→CREATED reopen. Prefer deferring finalize until exit.
+    try:
+        await _ingest_folder(
+            rag,
+            config,
+            logger,
+            input_folder=input_folder,
+            parser_output_dir=args.parser_output_dir,
+            parse_method=args.parse_method,
+            parse_extra=parse_extra,
+            recursive=args.recursive,
+            limit=args.limit,
+            skip_multimodal=args.skip_multimodal,
         )
-        print(ans or "", flush=True)
-        return
 
-    await _interactive_loop(rag, args.query_mode)
+        if args.ingest_only:
+            return
+
+        if args.query.strip():
+            ans = await rag.aquery(
+                args.query.strip(),
+                mode=args.query_mode,
+                vlm_enhanced=False,
+            )
+            print(ans or "", flush=True)
+            return
+
+        await _interactive_loop(rag, args.query_mode)
+    finally:
+        await rag.finalize_storages()
 
 
 def main() -> None:

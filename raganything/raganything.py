@@ -258,6 +258,29 @@ class RAGAnything(QueryMixin, ProcessorMixin, BatchMixin):
             else:
                 self.logger.warning(f"Unknown config parameter: {key}")
 
+    async def _reopen_storages_if_finalized(self) -> None:
+        """Reopen LightRAG storages after finalize_storages() closed them.
+
+        ``initialize_storages()`` is a no-op once status is FINALIZED, while
+        Neo4j/Postgres backends null out their clients on finalize. Reset to
+        CREATED and initialize again so post-finalize queries can run.
+        """
+        if self.lightrag is None:
+            return
+        status = getattr(self.lightrag, "_storages_status", None)
+        if getattr(status, "name", None) != "FINALIZED":
+            return
+
+        from lightrag.base import StoragesStatus
+
+        self.logger.info(
+            "LightRAG storages were finalized; reopening for further use"
+        )
+        self.lightrag._storages_status = StoragesStatus.CREATED
+        await self.lightrag.initialize_storages()
+        if self.parse_cache is not None:
+            await self.parse_cache.initialize()
+
     async def _ensure_lightrag_initialized(self):
         """Ensure LightRAG instance is initialized, create if necessary"""
         try:
@@ -298,11 +321,12 @@ class RAGAnything(QueryMixin, ProcessorMixin, BatchMixin):
                     self.logger.debug("Inherited embedding_func from LightRAG instance")
 
                 try:
-                    # Ensure LightRAG storages are initialized
-                    if (
-                        not hasattr(self.lightrag, "_storages_status")
-                        or self.lightrag._storages_status.name != "INITIALIZED"
-                    ):
+                    # Ensure LightRAG storages are initialized (incl. FINALIZED reopen).
+                    await self._reopen_storages_if_finalized()
+                    status = getattr(self.lightrag, "_storages_status", None)
+                    status_name = getattr(status, "name", None)
+
+                    if status_name != "INITIALIZED":
                         self.logger.info(
                             "Initializing storages for pre-provided LightRAG instance"
                         )

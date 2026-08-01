@@ -122,6 +122,10 @@ class QueryMixin:
                 "No LightRAG instance available. Please process documents first or provide a pre-initialized LightRAG instance."
             )
 
+        # Reopen Neo4j/PG clients if finalize_storages() already ran. Avoid the
+        # full init path here so query-only use does not require a parser CLI.
+        await self._reopen_storages_if_finalized()
+
         # Check if VLM enhanced query should be used
         vlm_enhanced = kwargs.pop("vlm_enhanced", None)
 
