@@ -64,7 +64,9 @@ def _make_processor(*, records=None, modal_processors=None, max_parallel_insert=
         {
             "doc_status": FakeDocStatusStorage(records),
             "max_parallel_insert": max_parallel_insert,
-            "tokenizer": type("Tok", (), {"encode": staticmethod(lambda text: [1, 2])})(),
+            "tokenizer": type(
+                "Tok", (), {"encode": staticmethod(lambda text: [1, 2])}
+            )(),
         },
     )()
     return processor
@@ -244,8 +246,13 @@ async def test_batch_orchestration_filters_unknown_and_failed_items():
     assert len(convert_calls) == 1
     assert len(convert_calls[0]) == 1
     assert convert_calls[0][0]["content_type"] == "table"
-    assert any("No processor found for type: unknown" in w for w in processor.logger.warnings)
-    assert any("Error generating description for image item" in e for e in processor.logger.errors)
+    assert any(
+        "No processor found for type: unknown" in w for w in processor.logger.warnings
+    )
+    assert any(
+        "Error generating description for image item" in e
+        for e in processor.logger.errors
+    )
 
 
 @pytest.mark.asyncio

@@ -50,9 +50,10 @@ def _make_processor(*, use_full_path=False):
             "full_relations": object(),
             "entity_chunks": object(),
             "relation_chunks": object(),
-            "_insert_done": fake_insert_done,
         },
     )()
+    # Assign on the instance so Python does not bind an implicit self.
+    processor.lightrag._insert_done = fake_insert_done
     return processor
 
 
