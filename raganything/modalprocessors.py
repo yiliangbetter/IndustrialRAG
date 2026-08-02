@@ -13,9 +13,21 @@ import re
 import json
 import time
 import base64
-from typing import Dict, Any, Tuple, List
+import contextvars
+from typing import Dict, Any, Tuple, List, Optional
 from pathlib import Path
 from dataclasses import dataclass
+
+# Per-task content source for context extraction. Shared modal processors are
+# reused across concurrent process_document_complete calls; instance attributes
+# alone cross-wire Doc A captions with Doc B's surrounding text when
+# max_workers > 1 (as advertised in README process_folder_complete examples).
+_content_source_var: contextvars.ContextVar[Optional[Any]] = contextvars.ContextVar(
+    "raganything_content_source", default=None
+)
+_content_format_var: contextvars.ContextVar[str] = contextvars.ContextVar(
+    "raganything_content_format", default="auto"
+)
 
 from lightrag.utils import (
     logger,
@@ -410,9 +422,21 @@ class BaseModalProcessor:
             content_source: Source content for context extraction
             content_format: Format of content source ("minerU", "text_chunks", "auto")
         """
+        # Keep instance attrs for single-threaded / backward-compatible callers.
         self.content_source = content_source
         self.content_format = content_format
+        # Task-local binding so concurrent folder ingest cannot overwrite a
+        # sibling document's source while multimodal context is still reading.
+        _content_source_var.set(content_source)
+        _content_format_var.set(content_format)
         logger.info(f"Content source set with format: {content_format}")
+
+    def _resolve_content_source(self) -> Tuple[Any, str]:
+        """Prefer task-local content source; fall back to instance attributes."""
+        source = _content_source_var.get()
+        if source is not None:
+            return source, _content_format_var.get()
+        return self.content_source, self.content_format
 
     def _get_context_for_item(self, item_info: Dict[str, Any]) -> str:
         """Get context for current processing item
@@ -423,12 +447,13 @@ class BaseModalProcessor:
         Returns:
             Context text for the item
         """
-        if not self.content_source:
+        content_source, content_format = self._resolve_content_source()
+        if not content_source:
             return ""
 
         try:
             context = self.context_extractor.extract_context(
-                self.content_source, item_info, self.content_format
+                content_source, item_info, content_format
             )
             if context:
                 logger.debug(
