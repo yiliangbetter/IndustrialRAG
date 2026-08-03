@@ -18,6 +18,7 @@ from raganything.utils import (
     insert_text_content,
     insert_text_content_with_multimodal_content,
     get_processor_for_type,
+    join_text_field,
 )
 import asyncio
 from lightrag.utils import compute_mdhash_id
@@ -1170,10 +1171,12 @@ class ProcessorMixin:
                     "image_footnote", original_item.get("img_footnote", [])
                 )
 
+                captions_text = join_text_field(captions)
+                footnotes_text = join_text_field(footnotes)
                 return PROMPTS["image_chunk"].format(
                     image_path=image_path,
-                    captions=", ".join(captions) if captions else "None",
-                    footnotes=", ".join(footnotes) if footnotes else "None",
+                    captions=captions_text if captions_text else "None",
+                    footnotes=footnotes_text if footnotes_text else "None",
                     enhanced_caption=description,
                 )
 
@@ -1182,13 +1185,15 @@ class ProcessorMixin:
                 table_caption = original_item.get("table_caption", [])
                 table_body = original_item.get("table_body", "")
                 table_footnote = original_item.get("table_footnote", [])
+                table_caption_text = join_text_field(table_caption)
+                table_footnote_text = join_text_field(table_footnote)
 
                 return PROMPTS["table_chunk"].format(
                     table_img_path=table_img_path,
-                    table_caption=", ".join(table_caption) if table_caption else "None",
+                    table_caption=table_caption_text if table_caption_text else "None",
                     table_body=table_body,
-                    table_footnote=", ".join(table_footnote)
-                    if table_footnote
+                    table_footnote=table_footnote_text
+                    if table_footnote_text
                     else "None",
                     enhanced_caption=description,
                 )

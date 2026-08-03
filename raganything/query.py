@@ -17,6 +17,7 @@ from raganything.utils import (
     get_processor_for_type,
     encode_image_to_base64,
     validate_image_file,
+    join_text_field,
 )
 
 
@@ -526,10 +527,12 @@ class QueryMixin:
         parts = []
         if image_path:
             parts.append(f"Image path: {image_path}")
-        if captions:
-            parts.append(f"Image captions: {', '.join(captions)}")
-        if footnotes:
-            parts.append(f"Image footnotes: {', '.join(footnotes)}")
+        captions_text = join_text_field(captions)
+        footnotes_text = join_text_field(footnotes)
+        if captions_text:
+            parts.append(f"Image captions: {captions_text}")
+        if footnotes_text:
+            parts.append(f"Image footnotes: {footnotes_text}")
 
         return "; ".join(parts) if parts else "Image content information incomplete"
 

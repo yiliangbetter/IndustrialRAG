@@ -1743,6 +1743,155 @@ class DoclingParser(Parser):
                 )
         return content_list, md_content
 
+    def _resolve_docling_text_refs(
+        self,
+        refs: Any,
+        docling_content: Optional[Dict[str, Any]],
+    ) -> List[str]:
+        """Resolve Docling caption/footnote refs (or plain strings) to text list."""
+        if refs is None:
+            return []
+        if isinstance(refs, str):
+            text = refs.strip()
+            return [text] if text else []
+        if not isinstance(refs, list):
+            text = str(refs).strip()
+            return [text] if text else []
+
+        resolved: List[str] = []
+        for ref in refs:
+            if isinstance(ref, str):
+                text = ref.strip()
+                if text:
+                    resolved.append(text)
+                continue
+            if not isinstance(ref, dict):
+                continue
+
+            inline = ref.get("text") or ref.get("orig")
+            if inline and str(inline).strip():
+                resolved.append(str(inline).strip())
+                continue
+
+            tag = ref.get("$ref")
+            if not tag or not docling_content:
+                continue
+            ref_parts = str(tag).split("/")
+            if len(ref_parts) < 3:
+                self.logger.warning(
+                    f"Unexpected caption/footnote $ref format: {tag!r}"
+                )
+                continue
+            section, index = ref_parts[1], ref_parts[2]
+            try:
+                item = docling_content[section][int(index)]
+            except (KeyError, ValueError, IndexError, TypeError) as e:
+                self.logger.warning(f"Could not resolve caption/footnote $ref {tag!r}: {e}")
+                continue
+            if not isinstance(item, dict):
+                continue
+            text = item.get("text") or item.get("orig") or ""
+            if str(text).strip():
+                resolved.append(str(text).strip())
+        return resolved
+
+    def _docling_caption_fields(
+        self,
+        block: Dict[str, Any],
+        docling_content: Optional[Dict[str, Any]],
+    ) -> Tuple[List[str], List[str]]:
+        """Normalize Docling captions/footnotes to MinerU-style list[str]."""
+        captions = self._resolve_docling_text_refs(
+            block.get("captions"), docling_content
+        )
+        if not captions:
+            # Legacy/fixture field used by some exporters and unit tests
+            captions = self._resolve_docling_text_refs(
+                block.get("caption"), docling_content
+            )
+
+        footnotes = self._resolve_docling_text_refs(
+            block.get("footnotes"), docling_content
+        )
+        if not footnotes:
+            footnotes = self._resolve_docling_text_refs(
+                block.get("footnote"), docling_content
+            )
+        return captions, footnotes
+
+    @staticmethod
+    def _grid_to_markdown(grid: List[List[str]]) -> str:
+        if not grid:
+            return ""
+        width = max(len(row) for row in grid)
+        normalized = [list(row) + [""] * (width - len(row)) for row in grid]
+        if width == 0:
+            return ""
+
+        def _fmt(row: List[str]) -> str:
+            return "| " + " | ".join(row) + " |"
+
+        if len(normalized) == 1:
+            return _fmt(normalized[0])
+        lines = [
+            _fmt(normalized[0]),
+            "| " + " | ".join("---" for _ in range(width)) + " |",
+        ]
+        for row in normalized[1:]:
+            lines.append(_fmt(row))
+        return "\n".join(lines)
+
+    def _table_body_from_docling_data(self, data: Any) -> str:
+        """Convert Docling table ``data`` (TableData dict / grid / string) to text."""
+        if data is None:
+            return ""
+        if isinstance(data, str):
+            return data.strip()
+        if isinstance(data, list):
+            rows: List[List[str]] = []
+            for row in data:
+                if isinstance(row, list):
+                    rows.append(
+                        ["" if cell is None else str(cell).replace("\n", " ") for cell in row]
+                    )
+                else:
+                    rows.append([str(row).replace("\n", " ")])
+            return self._grid_to_markdown(rows)
+        if not isinstance(data, dict):
+            return str(data)
+
+        cells = data.get("table_cells") or []
+        num_rows = int(data.get("num_rows") or 0)
+        num_cols = int(data.get("num_cols") or 0)
+        if isinstance(cells, list):
+            for cell in cells:
+                if not isinstance(cell, dict):
+                    continue
+                num_rows = max(num_rows, int(cell.get("end_row_offset_idx") or 0))
+                num_cols = max(num_cols, int(cell.get("end_col_offset_idx") or 0))
+        if num_rows > 0 and num_cols > 0 and isinstance(cells, list):
+            grid = [["" for _ in range(num_cols)] for _ in range(num_rows)]
+            for cell in cells:
+                if not isinstance(cell, dict):
+                    continue
+                text = str(cell.get("text") or "").replace("\n", " ").strip()
+                row_start = int(cell.get("start_row_offset_idx") or 0)
+                row_end = int(cell.get("end_row_offset_idx") or (row_start + 1))
+                col_start = int(cell.get("start_col_offset_idx") or 0)
+                col_end = int(cell.get("end_col_offset_idx") or (col_start + 1))
+                for row_idx in range(row_start, min(row_end, num_rows)):
+                    for col_idx in range(col_start, min(col_end, num_cols)):
+                        grid[row_idx][col_idx] = text
+            return self._grid_to_markdown(grid)
+
+        # Last resort: concatenate available cell texts
+        texts = [
+            str(cell.get("text")).replace("\n", " ").strip()
+            for cell in cells
+            if isinstance(cell, dict) and cell.get("text")
+        ]
+        return " | ".join(t for t in texts if t)
+
     def read_from_block_recursive(
         self,
         block,
@@ -1755,12 +1904,18 @@ class DoclingParser(Parser):
         content_list = []
         if not block.get("children"):
             cnt += 1
-            content_list.append(self.read_from_block(block, type, output_dir, cnt, num))
+            content_list.append(
+                self.read_from_block(
+                    block, type, output_dir, cnt, num, docling_content
+                )
+            )
         else:
             if type not in ["groups", "body"]:
                 cnt += 1
                 content_list.append(
-                    self.read_from_block(block, type, output_dir, cnt, num)
+                    self.read_from_block(
+                        block, type, output_dir, cnt, num, docling_content
+                    )
                 )
             members = block["children"]
             for member in members:
@@ -1793,7 +1948,13 @@ class DoclingParser(Parser):
         return content_list
 
     def read_from_block(
-        self, block, type: str, output_dir: Path, cnt: int, num: str
+        self,
+        block,
+        type: str,
+        output_dir: Path,
+        cnt: int,
+        num: str,
+        docling_content: Optional[Dict[str, Any]] = None,
     ) -> Dict[str, Any]:
         if type == "texts":
             if block["label"] == "formula":
@@ -1811,6 +1972,7 @@ class DoclingParser(Parser):
                     "page_idx": cnt // 10,
                 }
         elif type == "pictures":
+            captions, footnotes = self._docling_caption_fields(block, docling_content)
             try:
                 base64_uri = block["image"]["uri"]
                 # base64 data URIs have the form "data:<mime>;base64,<data>"
@@ -1826,32 +1988,37 @@ class DoclingParser(Parser):
                 return {
                     "type": "image",
                     "img_path": str(image_path.resolve()),  # Convert to absolute path
-                    "image_caption": block.get("caption", ""),
-                    "image_footnote": block.get("footnote", ""),
+                    # MinerU-compatible list[str] so downstream join sites stay intact
+                    "image_caption": captions,
+                    "image_footnote": footnotes,
                     "page_idx": cnt // 10,
                 }
             except Exception as e:
                 self.logger.warning(f"Failed to process image {num}: {e}")
+                failed_caption = ", ".join(captions) if captions else ""
                 return {
                     "type": "text",
-                    "text": f"[Image processing failed: {block.get('caption', '')}]",
+                    "text": f"[Image processing failed: {failed_caption}]",
                     "page_idx": cnt // 10,
                 }
         else:
+            captions, footnotes = self._docling_caption_fields(block, docling_content)
             try:
                 return {
                     "type": "table",
                     "img_path": "",
-                    "table_caption": block.get("caption", ""),
-                    "table_footnote": block.get("footnote", ""),
-                    "table_body": block.get("data", []),
+                    "table_caption": captions,
+                    "table_footnote": footnotes,
+                    # Docling TableData is a dict of cells; store readable text for KG/chunks
+                    "table_body": self._table_body_from_docling_data(block.get("data")),
                     "page_idx": cnt // 10,
                 }
             except Exception as e:
                 self.logger.warning(f"Failed to process table {num}: {e}")
+                failed_caption = ", ".join(captions) if captions else ""
                 return {
                     "type": "text",
-                    "text": f"[Table processing failed: {block.get('caption', '')}]",
+                    "text": f"[Table processing failed: {failed_caption}]",
                     "page_idx": cnt // 10,
                 }
 

@@ -28,6 +28,7 @@ from lightrag.operate import extract_entities, merge_nodes_and_edges
 
 # Import prompt templates
 from raganything.prompt import PROMPTS
+from raganything.utils import join_text_field
 
 
 @dataclass
@@ -224,14 +225,16 @@ class ContextExtractor:
             return text
 
         elif item_type == "image" and self.config.include_captions:
-            captions = item.get("image_caption", item.get("img_caption", []))
+            captions = join_text_field(
+                item.get("image_caption", item.get("img_caption", []))
+            )
             if captions:
-                return f"[Image: {', '.join(captions)}]"
+                return f"[Image: {captions}]"
 
         elif item_type == "table" and self.config.include_captions:
-            captions = item.get("table_caption", [])
+            captions = join_text_field(item.get("table_caption", []))
             if captions:
-                return f"[Table: {', '.join(captions)}]"
+                return f"[Table: {captions}]"
 
         return ""
 
@@ -992,10 +995,12 @@ class ImageModalProcessor(BaseModalProcessor):
                 "image_footnote", content_data.get("img_footnote", [])
             )
 
+            captions_text = join_text_field(captions)
+            footnotes_text = join_text_field(footnotes)
             modal_chunk = PROMPTS["image_chunk"].format(
                 image_path=image_path,
-                captions=", ".join(captions) if captions else "None",
-                footnotes=", ".join(footnotes) if footnotes else "None",
+                captions=captions_text if captions_text else "None",
+                footnotes=footnotes_text if footnotes_text else "None",
                 enhanced_caption=enhanced_caption,
             )
 
@@ -1186,11 +1191,15 @@ class TableModalProcessor(BaseModalProcessor):
             table_footnote = content_data.get("table_footnote", [])
 
             # Build complete table content
+            table_caption_text = join_text_field(table_caption)
+            table_footnote_text = join_text_field(table_footnote)
             modal_chunk = PROMPTS["table_chunk"].format(
                 table_img_path=table_img_path,
-                table_caption=", ".join(table_caption) if table_caption else "None",
+                table_caption=table_caption_text if table_caption_text else "None",
                 table_body=table_body,
-                table_footnote=", ".join(table_footnote) if table_footnote else "None",
+                table_footnote=table_footnote_text
+                if table_footnote_text
+                else "None",
                 enhanced_caption=enhanced_caption,
             )
 

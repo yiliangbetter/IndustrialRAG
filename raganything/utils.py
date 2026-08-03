@@ -10,6 +10,25 @@ from pathlib import Path
 from lightrag.utils import logger
 
 
+def join_text_field(value: Any, sep: str = ", ") -> str:
+    """Join caption/footnote-like fields without character-splitting strings.
+
+    Downstream chunk builders historically assumed MinerU list[str] captions and
+    used ``", ".join(value)``. Docling (and some callers) may supply a plain
+    string; joining that iterates characters and permanently corrupts stored
+    multimodal text.
+    """
+    if value is None:
+        return ""
+    if isinstance(value, str):
+        return value.strip()
+    if isinstance(value, (list, tuple)):
+        parts = [str(item).strip() for item in value if item is not None and str(item).strip()]
+        return sep.join(parts)
+    text = str(value).strip()
+    return text
+
+
 def separate_content(
     content_list: List[Dict[str, Any]],
 ) -> Tuple[str, List[Dict[str, Any]]]:
