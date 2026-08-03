@@ -39,7 +39,7 @@ from typing import Any
 from dotenv import load_dotenv
 from fastapi import FastAPI, File, HTTPException, UploadFile
 from fastapi.middleware.cors import CORSMiddleware
-from fastapi.responses import FileResponse, RedirectResponse, StreamingResponse
+from fastapi.responses import FileResponse, HTMLResponse, JSONResponse, RedirectResponse, StreamingResponse
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel, Field
 
@@ -660,6 +660,140 @@ app.add_middleware(
     allow_methods=["*"],
     allow_headers=["*"],
 )
+
+# ----------------------------------------------------------------------
+# Optional access-key gate (for LAN sharing / public tunnels).
+# Enabled when RAG_WEB_ACCESS_KEY is non-empty. Share links as
+# ``http://<host>:<port>/?key=<密钥>``; a cookie keeps the session open.
+# ----------------------------------------------------------------------
+
+_AUTH_COOKIE = "rag_web_auth"
+
+
+def _access_key() -> str:
+    return (os.getenv("RAG_WEB_ACCESS_KEY") or "").strip()
+
+
+def _auth_cookie_value(key: str) -> str:
+    import hashlib
+    import hmac
+
+    return hmac.new(key.encode("utf-8"), b"nanxing-rag-web", hashlib.sha256).hexdigest()
+
+
+_LOGIN_HTML = """<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1" />
+<title>访问验证 - 南兴知识库问答助手</title>
+<style>
+body { font-family: "Segoe UI", "Microsoft YaHei", system-ui, sans-serif;
+       background: #f0f2f5; display: flex; align-items: center;
+       justify-content: center; min-height: 100vh; margin: 0; }
+.card { background: #fff; border: 1px solid #d8dee6; border-radius: 12px;
+        padding: 2rem; width: min(360px, 88vw); box-shadow: 0 8px 24px rgba(0,0,0,.08); }
+h1 { font-size: 1.15rem; margin: 0 0 .35rem; }
+p { color: #5c6b7a; font-size: .92rem; margin: 0 0 1.1rem; }
+input { width: 100%; box-sizing: border-box; padding: .6rem .7rem;
+        border: 1px solid #d8dee6; border-radius: 8px; font-size: 16px; }
+button { margin-top: .8rem; width: 100%; padding: .6rem; border: none;
+         border-radius: 8px; background: #2e9e4f; color: #fff;
+         font-size: 1rem; font-weight: 600; cursor: pointer; }
+</style>
+</head>
+<body>
+<form class="card" method="get" action="/">
+  <h1>南兴知识库问答助手</h1>
+  <p>该服务已启用访问密钥保护，请输入密钥后继续。</p>
+  <input type="password" name="key" placeholder="访问密钥" autofocus required />
+  <button type="submit">进入</button>
+</form>
+</body>
+</html>
+"""
+
+
+def _request_cookies(scope: dict) -> dict:
+    from http.cookies import SimpleCookie
+
+    for name, value in scope.get("headers", []):
+        if name == b"cookie":
+            jar: SimpleCookie = SimpleCookie(value.decode("latin-1"))
+            return {k: m.value for k, m in jar.items()}
+    return {}
+
+
+def _request_key_param(scope: dict) -> str:
+    from urllib.parse import parse_qs
+
+    qs = parse_qs(scope.get("query_string", b"").decode("latin-1"))
+    return (qs.get("key") or [""])[0].strip()
+
+
+def _remove_key_param(scope: dict) -> str:
+    from urllib.parse import parse_qsl, urlencode
+
+    pairs = [
+        (k, v)
+        for k, v in parse_qsl(scope.get("query_string", b"").decode("latin-1"))
+        if k != "key"
+    ]
+    qs = urlencode(pairs)
+    return scope.get("path", "/") + (f"?{qs}" if qs else "")
+
+
+class AccessKeyGate:
+    """Pure-ASGI gate: require RAG_WEB_ACCESS_KEY before any non-static route."""
+
+    def __init__(self, app):
+        self.app = app
+
+    async def __call__(self, scope, receive, send):
+        import hmac
+
+        if scope.get("type") != "http":
+            await self.app(scope, receive, send)
+            return
+        key = _access_key()
+        if not key:
+            await self.app(scope, receive, send)
+            return
+        path = scope.get("path", "")
+        if path.startswith("/static/"):
+            await self.app(scope, receive, send)
+            return
+
+        cookie = _request_cookies(scope).get(_AUTH_COOKIE, "")
+        if cookie and hmac.compare_digest(cookie, _auth_cookie_value(key)):
+            await self.app(scope, receive, send)
+            return
+
+        provided = _request_key_param(scope)
+        if provided and hmac.compare_digest(provided, key):
+            resp = RedirectResponse(_remove_key_param(scope), status_code=302)
+            resp.set_cookie(
+                _AUTH_COOKIE,
+                _auth_cookie_value(key),
+                max_age=30 * 24 * 3600,
+                httponly=True,
+                samesite="lax",
+            )
+            await resp(scope, receive, send)
+            return
+
+        if path.startswith("/api/"):
+            resp = JSONResponse(
+                {"detail": "需要访问密钥：请用带 ?key=<密钥> 的链接打开页面。"},
+                status_code=401,
+            )
+            await resp(scope, receive, send)
+            return
+        resp = HTMLResponse(_LOGIN_HTML, status_code=401)
+        await resp(scope, receive, send)
+
+
+app.add_middleware(AccessKeyGate)
 
 if (_WEB_DIR / "static").is_dir():
     app.mount("/static", StaticFiles(directory=_WEB_DIR / "static"), name="static")
@@ -1672,15 +1806,19 @@ if __name__ == "__main__":
 
     host = (os.getenv("RAG_WEB_HOST") or "127.0.0.1").strip()
     port = int((os.getenv("RAG_WEB_PORT") or "8765").strip())
+    share_key = _access_key()
+    key_suffix = f"?key={share_key}" if share_key else ""
     print(f"Open http://{host}:{port}/ in your browser", flush=True)
+    if share_key:
+        print(f"访问密钥已启用：分享链接需带 ?key=<密钥>；未验证时页面与 API 均不可用", flush=True)
     if host in ("127.0.0.1", "localhost"):
         print(
             "手机访问：当前仅监听本机。请设置 RAG_WEB_HOST=0.0.0.0 后重启，"
-            "再用手机浏览器打开 http://<本机局域网IP>:" f"{port}/",
+            "再用手机浏览器打开 http://<本机局域网IP>:" f"{port}/{key_suffix}",
             flush=True,
         )
     else:
         lan_ip = _detect_lan_ip()
         if lan_ip:
-            print(f"手机访问（同一局域网）：http://{lan_ip}:{port}/", flush=True)
+            print(f"手机访问（同一局域网）：http://{lan_ip}:{port}/{key_suffix}", flush=True)
     uvicorn.run(app, host=host, port=port, reload=False)
