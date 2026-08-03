@@ -607,6 +607,29 @@ body.ingest-terminal-open .ingest-terminal-dot {
   font-weight: 600;
 }
 
+/* Mobile-only brand / status indicators in the chat header (hidden on desktop). */
+.chat-mobile-logo {
+  display: none;
+}
+
+.mobile-status-dot {
+  display: none;
+  width: 0.6rem;
+  height: 0.6rem;
+  border-radius: 50%;
+  margin-left: 0.45rem;
+  background: #9ca3af;
+  flex-shrink: 0;
+}
+
+.mobile-status-dot.status-ok {
+  background: var(--accent);
+}
+
+.mobile-status-dot.status-bad {
+  background: var(--danger);
+}
+
 .messages {
   flex: 1 1 auto;
   min-height: 0;
@@ -1076,20 +1099,119 @@ button.clarify-option:disabled,
   flex-wrap: wrap;
 }
 
-@media (max-width: 768px) {
+/* ------------------------------------------------------------------ */
+/* Mobile portrait layout (phone): chat-only, bottom composer.        */
+/* ------------------------------------------------------------------ */
+@media (max-width: 768px), (max-height: 520px) and (orientation: portrait) {
   .app {
     grid-template-columns: 1fr;
-    grid-template-rows: auto minmax(0, 1fr);
+    grid-template-rows: minmax(0, 1fr);
   }
 
+  /* 灌库与安装向导暂不在手机端提供，整栏隐藏 */
   .sidebar {
-    max-height: 38vh;
-    border-right: none;
-    border-bottom: 1px solid var(--border);
+    display: none;
   }
 
-  .chat {
-    min-height: 0;
-    overflow: hidden;
+  .chat-header {
+    padding: 0.6rem 0.9rem;
+    padding-top: calc(0.6rem + env(safe-area-inset-top, 0px));
+    gap: 0.5rem;
+  }
+
+  .chat-header h2 {
+    font-size: 1.05rem;
+  }
+
+  .chat-mobile-logo {
+    display: block;
+    width: 1.9rem;
+    height: 1.9rem;
+    object-fit: contain;
+    border-radius: 6px;
+    flex-shrink: 0;
+  }
+
+  .mobile-status-dot {
+    display: inline-block;
+  }
+
+  .messages {
+    padding: 0.8rem 0.7rem 1rem;
+    gap: 0.75rem;
+  }
+
+  .msg {
+    max-width: 100%;
+    padding: 0.7rem 0.8rem;
+    font-size: 1rem;
+    border-radius: 12px;
+  }
+
+  /* 宽表格/代码块在气泡内横向滚动，不撑破竖屏 */
+  .msg.has-structure .assistant-body {
+    min-width: 0;
+    max-width: 100%;
+    overflow-x: auto;
+    -webkit-overflow-scrolling: touch;
+  }
+
+  .markdown-body table {
+    display: block;
+    overflow-x: auto;
+    max-width: 100%;
+  }
+
+  .markdown-body pre {
+    white-space: pre-wrap;
+    word-break: break-word;
+  }
+
+  .related-images-grid {
+    grid-template-columns: repeat(2, 1fr);
+    gap: 0.5rem;
+  }
+
+  .inline-answer-figure {
+    max-width: 100%;
+  }
+
+  .thinking-text {
+    max-height: 10rem;
+  }
+
+  button.clarify-option {
+    font-size: 1.05rem;
+    padding: 0.75rem 0.85rem;
+  }
+
+  .composer {
+    padding: 0.6rem 0.7rem;
+    padding-bottom: calc(0.6rem + env(safe-area-inset-bottom, 0px));
+    gap: 0.5rem;
+  }
+
+  .composer textarea {
+    /* >=16px 避免 iOS 聚焦时自动缩放页面 */
+    font-size: 16px;
+    min-height: 2.75rem;
+    max-height: 7rem;
+    padding: 0.55rem 0.75rem;
+  }
+
+  .composer .btn.primary {
+    align-self: stretch;
+    min-width: 4rem;
+    padding: 0 1rem;
+    font-size: 1.05rem;
+  }
+
+  .ingest-terminal-backdrop {
+    padding: 0.5rem;
+  }
+
+  .ingest-terminal-panel {
+    width: 100vw;
+    max-height: 92vh;
   }
 }

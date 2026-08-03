@@ -1040,6 +1040,7 @@ async function refreshStatus() {
     syncIngestStateFromServer(h, setup);
     $("#meta-ready").textContent = h.ready ? "是" : "否";
     $("#meta-ready").className = h.ready ? "status-ok" : "status-bad";
+    setMobileStatusDot(h.ready);
     syncKnowledgeBasePathFields(h);
     $("#meta-mode").textContent = h.query_mode || "—";
     if ($("#meta-multimodal")) {
@@ -1075,7 +1076,17 @@ async function refreshStatus() {
     $("#meta-error").textContent = String(e);
     $("#meta-error").classList.remove("hidden");
     btnSend.disabled = true;
+    setMobileStatusDot(false);
   }
+}
+
+/** Sync the compact status dot shown in the chat header on mobile. */
+function setMobileStatusDot(ready) {
+  const dot = document.getElementById("mobile-status-dot");
+  if (!dot) return;
+  dot.classList.toggle("status-ok", !!ready);
+  dot.classList.toggle("status-bad", !ready);
+  dot.title = ready ? "服务就绪" : "服务未就绪";
 }
 
 function parseSseLines(buffer, onEvent) {

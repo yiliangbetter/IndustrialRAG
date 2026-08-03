@@ -2,9 +2,9 @@
 <html lang="zh-CN">
   <head>
     <meta charset="UTF-8" />
-    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover" />
     <title>南兴知识库问答助手</title>
-    <link rel="stylesheet" href="/static/styles.css?v=20260617e" />
+    <link rel="stylesheet" href="/static/styles.css?v=20260803a" />
   </head>
   <body>
     <div class="app">
@@ -137,7 +137,19 @@
 
       <main class="chat">
         <header class="chat-header">
-          <h2>对话</h2>
+          <img
+            class="chat-mobile-logo"
+            src="/static/images/nanxing-logo.png"
+            alt="南兴装备"
+          />
+          <h2>
+            南兴知识库问答
+            <span
+              class="mobile-status-dot"
+              id="mobile-status-dot"
+              title="服务状态"
+            ></span>
+          </h2>
           <button type="button" class="btn ghost" id="btn-clear" title="清空对话">
             清空
           </button>
@@ -152,6 +164,7 @@
             id="query-input"
             rows="2"
             placeholder="输入问题，Enter 发送，Shift+Enter 换行…"
+            enterkeyhint="send"
             required
           ></textarea>
           <button type="submit" class="btn primary" id="btn-send">发送</button>
@@ -161,6 +174,6 @@
     <script src="/static/vendor/marked.min.js"></script>
     <script src="/static/vendor/purify.min.js"></script>
     <script src="/static/ingest_ui.js?v=20260617c"></script>
-    <script src="/static/app.js?v=20260625a"></script>
+    <script src="/static/app.js?v=20260803a"></script>
   </body>
 </html>

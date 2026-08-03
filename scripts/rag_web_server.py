@@ -1643,10 +1643,44 @@ async def api_ingest_stream(files: list[UploadFile] = File(...)):
     )
 
 
+def _detect_lan_ip() -> str | None:
+    """Best-effort detection of the machine's LAN IPv4 (for phone access hints)."""
+    import socket
+
+    try:
+        with socket.socket(socket.AF_INET, socket.SOCK_DGRAM) as s:
+            s.settimeout(0.5)
+            s.connect(("8.8.8.8", 80))
+            ip = s.getsockname()[0]
+        if ip and not ip.startswith("127."):
+            return ip
+    except OSError:
+        pass
+    try:
+        addrs = socket.getaddrinfo(socket.gethostname(), None, socket.AF_INET)
+        for addr in addrs:
+            ip = addr[4][0]
+            if ip and not ip.startswith("127."):
+                return ip
+    except OSError:
+        pass
+    return None
+
+
 if __name__ == "__main__":
     import uvicorn
 
     host = (os.getenv("RAG_WEB_HOST") or "127.0.0.1").strip()
     port = int((os.getenv("RAG_WEB_PORT") or "8765").strip())
     print(f"Open http://{host}:{port}/ in your browser", flush=True)
+    if host in ("127.0.0.1", "localhost"):
+        print(
+            "手机访问：当前仅监听本机。请设置 RAG_WEB_HOST=0.0.0.0 后重启，"
+            "再用手机浏览器打开 http://<本机局域网IP>:" f"{port}/",
+            flush=True,
+        )
+    else:
+        lan_ip = _detect_lan_ip()
+        if lan_ip:
+            print(f"手机访问（同一局域网）：http://{lan_ip}:{port}/", flush=True)
     uvicorn.run(app, host=host, port=port, reload=False)
