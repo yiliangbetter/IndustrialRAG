@@ -4,7 +4,7 @@
     <meta charset="UTF-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover" />
     <title>南兴知识库问答助手</title>
-    <link rel="stylesheet" href="/static/styles.css?v=20260803a" />
+    <link rel="stylesheet" href="/static/styles.css?v=20260803b" />
   </head>
   <body>
     <div class="app">
@@ -150,6 +150,13 @@
               title="服务状态"
             ></span>
           </h2>
+          <label
+            class="mobile-debug-toggle"
+            title="保存查询调试日志（JSON dump 到 logs/query_dumps/）"
+          >
+            <input type="checkbox" id="mobile-query-debug-dump" />
+            <span>日志</span>
+          </label>
           <button type="button" class="btn ghost" id="btn-clear" title="清空对话">
             清空
           </button>
@@ -174,6 +181,6 @@
     <script src="/static/vendor/marked.min.js"></script>
     <script src="/static/vendor/purify.min.js"></script>
     <script src="/static/ingest_ui.js?v=20260617c"></script>
-    <script src="/static/app.js?v=20260803a"></script>
+    <script src="/static/app.js?v=20260803b"></script>
   </body>
 </html>

@@ -23,6 +23,7 @@ const ingestLog = $("#ingest-log");
 const enableMultimodal = $("#enable-multimodal");
 const multimodalHint = $("#multimodal-hint");
 const queryDebugDump = $("#query-debug-dump");
+const mobileQueryDebugDump = $("#mobile-query-debug-dump");
 const queryDebugHint = $("#query-debug-hint");
 const kbBaseDir = $("#kb-base-dir");
 const btnKbApply = $("#btn-kb-apply");
@@ -905,17 +906,42 @@ function renderQueryDebugHint(data) {
 }
 
 async function refreshQueryDebugPanel() {
-  if (!queryDebugDump) return;
+  if (!queryDebugDump && !mobileQueryDebugDump) return;
   try {
     const data = await fetchQueryDebugStatus();
     if (!queryDebugSyncBusy) {
-      queryDebugDump.checked = Boolean(data.enabled);
+      if (queryDebugDump) queryDebugDump.checked = Boolean(data.enabled);
+      if (mobileQueryDebugDump) mobileQueryDebugDump.checked = Boolean(data.enabled);
     }
     renderQueryDebugHint(data);
   } catch {
     if (queryDebugHint) {
       queryDebugHint.textContent = "无法读取调试开关状态。";
     }
+  }
+}
+
+/** Shared toggle handler for desktop sidebar checkbox and mobile header pill. */
+async function toggleQueryDebugDump(sourceEl) {
+  if (!sourceEl || queryDebugSyncBusy) return;
+  const enabled = sourceEl.checked;
+  queryDebugSyncBusy = true;
+  try {
+    const res = await fetch("/api/dev/query-debug", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ enabled }),
+    });
+    const data = await res.json().catch(() => ({}));
+    if (!res.ok) throw new Error(data.detail || data.message || `HTTP ${res.status}`);
+    renderQueryDebugHint(data);
+    appendMessage("system", data.message || (enabled ? "已开启查询调试日志。" : "已关闭查询调试日志。"));
+  } catch (err) {
+    sourceEl.checked = !enabled;
+    appendMessage("system", `调试开关保存失败：${err.message || err}`);
+  } finally {
+    queryDebugSyncBusy = false;
+    refreshQueryDebugPanel();
   }
 }
 
@@ -1659,26 +1685,12 @@ enableMultimodal?.addEventListener("change", async () => {
   }
 });
 
-queryDebugDump?.addEventListener("change", async () => {
-  if (queryDebugSyncBusy) return;
-  const enabled = queryDebugDump.checked;
-  queryDebugSyncBusy = true;
-  try {
-    const res = await fetch("/api/dev/query-debug", {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ enabled }),
-    });
-    const data = await res.json().catch(() => ({}));
-    if (!res.ok) throw new Error(data.detail || data.message || `HTTP ${res.status}`);
-    renderQueryDebugHint(data);
-    appendMessage("system", data.message || (enabled ? "已开启查询调试日志。" : "已关闭查询调试日志。"));
-  } catch (err) {
-    queryDebugDump.checked = !enabled;
-    appendMessage("system", `调试开关保存失败：${err.message || err}`);
-  } finally {
-    queryDebugSyncBusy = false;
-  }
+queryDebugDump?.addEventListener("change", () => {
+  void toggleQueryDebugDump(queryDebugDump);
+});
+
+mobileQueryDebugDump?.addEventListener("change", () => {
+  void toggleQueryDebugDump(mobileQueryDebugDump);
 });
 
 btnKbApply?.addEventListener("click", () => {

@@ -630,6 +630,38 @@ body.ingest-terminal-open .ingest-terminal-dot {
   background: var(--danger);
 }
 
+/* Mobile-only query-debug-dump toggle in the chat header. */
+.mobile-debug-toggle {
+  display: none;
+}
+
+.mobile-debug-toggle input {
+  position: absolute;
+  opacity: 0;
+  pointer-events: none;
+}
+
+.mobile-debug-toggle span {
+  display: inline-flex;
+  align-items: center;
+  padding: 0.3rem 0.7rem;
+  border-radius: 999px;
+  border: 1px solid var(--border);
+  background: var(--bg-elevated);
+  color: var(--text-muted);
+  font-size: 0.88rem;
+  line-height: 1.2;
+  cursor: pointer;
+  user-select: none;
+}
+
+.mobile-debug-toggle input:checked + span {
+  border-color: var(--accent);
+  background: var(--accent-light);
+  color: var(--accent-dim);
+  font-weight: 600;
+}
+
 .messages {
   flex: 1 1 auto;
   min-height: 0;
@@ -1134,6 +1166,16 @@ button.clarify-option:disabled,
 
   .mobile-status-dot {
     display: inline-block;
+  }
+
+  .mobile-debug-toggle {
+    display: inline-flex;
+    margin-left: auto;
+    align-items: center;
+  }
+
+  .chat-header .btn.ghost {
+    margin-left: 0.4rem;
   }
 
   .messages {
