@@ -264,6 +264,7 @@ class BatchParser:
         successful_files = []
         failed_files = []
         errors = {}
+        future_to_file = {}
 
         # Create progress bar if requested
         pbar = None
@@ -274,49 +275,72 @@ class BatchParser:
                 unit="file",
             )
 
+        # Do not use ThreadPoolExecutor as a context manager: on TimeoutError its
+        # __exit__ calls shutdown(wait=True), which blocks until hung workers finish
+        # and defeats timeout_per_file. Shut down with wait=False instead.
+        executor = ThreadPoolExecutor(max_workers=self.max_workers)
         try:
-            with ThreadPoolExecutor(max_workers=self.max_workers) as executor:
-                # Submit all tasks
-                future_to_file = {
-                    executor.submit(
-                        self.process_single_file,
-                        file_path,
-                        output_dir,
-                        parse_method,
-                        **kwargs,
-                    ): file_path
-                    for file_path in supported_files
-                }
+            future_to_file = {
+                executor.submit(
+                    self.process_single_file,
+                    file_path,
+                    output_dir,
+                    parse_method,
+                    **kwargs,
+                ): file_path
+                for file_path in supported_files
+            }
+            pending = set(future_to_file)
 
-                # Process completed tasks
-                for future in as_completed(
-                    future_to_file, timeout=self.timeout_per_file
-                ):
-                    success, file_path, error_msg = future.result()
+            # Restart as_completed after each completion so timeout_per_file is a
+            # per-wait budget (next file), not a single deadline for the whole batch.
+            while pending:
+                try:
+                    for future in as_completed(
+                        pending, timeout=self.timeout_per_file
+                    ):
+                        pending.discard(future)
+                        success, file_path, error_msg = future.result()
 
-                    if success:
-                        successful_files.append(file_path)
-                    else:
+                        if success:
+                            successful_files.append(file_path)
+                        else:
+                            failed_files.append(file_path)
+                            errors[file_path] = error_msg
+
+                        if pbar:
+                            pbar.update(1)
+                        break
+                except TimeoutError as e:
+                    self.logger.error(
+                        f"Batch processing timed out after {self.timeout_per_file}s "
+                        f"waiting for a file: {e}"
+                    )
+                    for future in list(pending):
+                        file_path = future_to_file[future]
                         failed_files.append(file_path)
-                        errors[file_path] = error_msg
-
-                    if pbar:
-                        pbar.update(1)
-
-        except Exception as e:
-            self.logger.error(f"Batch processing failed: {str(e)}")
-            # Mark remaining files as failed
-            for future in future_to_file:
-                if not future.done():
-                    file_path = future_to_file[future]
-                    failed_files.append(file_path)
-                    errors[file_path] = f"Processing interrupted: {str(e)}"
-                    if pbar:
-                        pbar.update(1)
-
+                        errors[file_path] = (
+                            f"Timed out after {self.timeout_per_file}s"
+                        )
+                        future.cancel()
+                        if pbar:
+                            pbar.update(1)
+                    pending.clear()
+                except Exception as e:
+                    self.logger.error(f"Batch processing failed: {str(e)}")
+                    for future in list(pending):
+                        if not future.done():
+                            file_path = future_to_file[future]
+                            failed_files.append(file_path)
+                            errors[file_path] = f"Processing interrupted: {str(e)}"
+                            future.cancel()
+                            if pbar:
+                                pbar.update(1)
+                    pending.clear()
         finally:
             if pbar:
                 pbar.close()
+            executor.shutdown(wait=False, cancel_futures=True)
 
         processing_time = time.time() - start_time
 
