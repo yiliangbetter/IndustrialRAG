@@ -93,6 +93,24 @@ class TestGetAvailableLanguages:
         assert "zh" in langs
 
 
+class TestNormalizeLanguageCode:
+    def test_non_string_raises_type_error(self):
+        with pytest.raises(TypeError, match="non-empty string"):
+            set_prompt_language(None)  # type: ignore[arg-type]
+        with pytest.raises(TypeError, match="non-empty string"):
+            register_prompt_language(123, {"IMAGE_ANALYSIS_SYSTEM": "x"})  # type: ignore[arg-type]
+
+    def test_empty_or_whitespace_raises_value_error(self):
+        with pytest.raises(ValueError, match="non-empty string"):
+            set_prompt_language("")
+        with pytest.raises(ValueError, match="non-empty string"):
+            set_prompt_language("   ")
+
+    def test_strips_whitespace_before_lookup(self):
+        set_prompt_language("  zh  ")
+        assert get_prompt_language() == "zh"
+
+
 class TestAtomicPromptSwitches:
     def test_set_and_reset_use_atomic_swap(self, monkeypatch):
         class FakePrompts:
