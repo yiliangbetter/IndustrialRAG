@@ -510,8 +510,11 @@ class QueryMixin:
         captions = content.get("image_caption", content.get("img_caption", []))
         footnotes = content.get("image_footnote", content.get("img_footnote", []))
 
-        if image_path and Path(image_path).exists():
-            # If image exists, use vision model to generate description
+        # Require a real image file (extension, size, no symlink) before reading.
+        # Without this check, aquery_with_multimodal could base64-encode arbitrary
+        # local files (e.g. /etc/passwd) and send them to the external VLM.
+        if image_path and validate_image_file(image_path):
+            # If image exists and is safe, use vision model to generate description
             image_base64 = processor._encode_image_to_base64(image_path)
             if image_base64:
                 prompt = PROMPTS["QUERY_IMAGE_DESCRIPTION"]

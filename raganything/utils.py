@@ -65,8 +65,18 @@ def encode_image_to_base64(image_path: str) -> str:
 
     Returns:
         str: Base64 encoded string, empty string if encoding fails
+
+    Note:
+        Refuses non-images, symlinks, missing files, and oversized files so
+        callers cannot accidentally base64-encode arbitrary local secrets
+        (e.g. ``/etc/passwd``) and forward them to an external VLM.
     """
     try:
+        if not validate_image_file(image_path):
+            logger.error(
+                f"Refusing to encode unsafe or non-image path: {image_path}"
+            )
+            return ""
         with open(image_path, "rb") as image_file:
             encoded_string = base64.b64encode(image_file.read()).decode("utf-8")
         return encoded_string

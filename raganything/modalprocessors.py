@@ -28,6 +28,7 @@ from lightrag.operate import extract_entities, merge_nodes_and_edges
 
 # Import prompt templates
 from raganything.prompt import PROMPTS
+from raganything.utils import validate_image_file
 
 
 @dataclass
@@ -842,8 +843,17 @@ class ImageModalProcessor(BaseModalProcessor):
         super().__init__(lightrag, modal_caption_func, context_extractor)
 
     def _encode_image_to_base64(self, image_path: str) -> str:
-        """Encode image to base64"""
+        """Encode image to base64.
+
+        Rejects non-image paths, symlinks, and oversized files before reading so
+        multimodal ingest cannot exfiltrate arbitrary local files to the VLM.
+        """
         try:
+            if not validate_image_file(image_path):
+                logger.error(
+                    f"Refusing to encode unsafe or non-image path: {image_path}"
+                )
+                return ""
             with open(image_path, "rb") as image_file:
                 encoded_string = base64.b64encode(image_file.read()).decode("utf-8")
             return encoded_string
