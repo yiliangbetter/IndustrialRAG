@@ -28,13 +28,16 @@ import os
 import sys
 import platform
 import hashlib
+import ipaddress
 import json
 import argparse
 import base64
+import socket
 import subprocess
 import tempfile
 import logging
 import time
+import urllib.error
 import urllib.parse
 import urllib.request
 import shutil
@@ -78,6 +81,12 @@ class Parser:
     # Class-level logger
     logger = logging.getLogger(__name__)
 
+    # Docling (and any parser using _download_file) may fetch remote documents.
+    # Restrict schemes/hosts and cap size to prevent SSRF and disk-fill DoS.
+    ALLOWED_DOWNLOAD_SCHEMES = frozenset({"http", "https"})
+    MAX_DOWNLOAD_BYTES = 100 * 1024 * 1024  # 100 MiB
+    DEFAULT_DOCLING_TIMEOUT = 600  # seconds; MinerU already supports timeouts
+
     @staticmethod
     def _is_url(path: str) -> bool:
         """Check if the path is a URL."""
@@ -87,18 +96,62 @@ class Parser:
         except ValueError:
             return False
 
+    @staticmethod
+    def _assert_public_hostname(hostname: str) -> None:
+        """Reject hostnames that resolve to non-public addresses (SSRF guard)."""
+        if not hostname:
+            raise ValueError("URL hostname is empty")
+        try:
+            addrinfos = socket.getaddrinfo(hostname, None)
+        except socket.gaierror as exc:
+            raise ValueError(f"Cannot resolve host {hostname!r}: {exc}") from exc
+        if not addrinfos:
+            raise ValueError(f"Cannot resolve host {hostname!r}")
+        for info in addrinfos:
+            ip = ipaddress.ip_address(info[4][0])
+            if not ip.is_global:
+                raise ValueError(
+                    f"Blocked non-public address for host {hostname!r}: {ip}"
+                )
+
+    @classmethod
+    def _validate_download_url(cls, url: str) -> urllib.parse.ParseResult:
+        """Allow only http(s) URLs whose host resolves to a public address."""
+        parsed = urllib.parse.urlparse(url)
+        scheme = (parsed.scheme or "").lower()
+        if scheme not in cls.ALLOWED_DOWNLOAD_SCHEMES:
+            raise ValueError(
+                f"Unsupported URL scheme {scheme!r}. "
+                f"Only {sorted(cls.ALLOWED_DOWNLOAD_SCHEMES)} are allowed."
+            )
+        hostname = parsed.hostname
+        if not hostname:
+            raise ValueError("URL must include a hostname")
+        cls._assert_public_hostname(hostname)
+        return parsed
+
+    class _SafeRedirectHandler(urllib.request.HTTPRedirectHandler):
+        """Re-validate every redirect target against the download URL policy."""
+
+        def redirect_request(self, req, fp, code, msg, headers, newurl):
+            new_req = super().redirect_request(req, fp, code, msg, headers, newurl)
+            if new_req is not None:
+                Parser._validate_download_url(new_req.full_url)
+            return new_req
+
     def _download_file(self, url: str) -> Path:
         """
         Download a file from a URL to a temporary file.
         Attempts to preserve the file extension from the URL or Content-Type header.
+
+        Security: only http(s) to public hosts; redirects re-validated; size capped.
         """
         tmp_path = None
         response = None
         try:
             self.logger.info(f"Downloading file from URL: {url}")
 
-            # Parse URL to get path and extension
-            parsed_url = urllib.parse.urlparse(url)
+            parsed_url = self._validate_download_url(url)
             path = Path(parsed_url.path)
             suffix = path.suffix if path.suffix else ""
 
@@ -111,8 +164,9 @@ class Parser:
                 },
             )
 
+            opener = urllib.request.build_opener(self._SafeRedirectHandler)
             # Open connection to get headers (with an explicit timeout to prevent hanging)
-            response = urllib.request.urlopen(req, timeout=30)
+            response = opener.open(req, timeout=30)
 
             # If no extension in URL, try Content-Type header
             if not suffix:
@@ -129,14 +183,37 @@ class Parser:
                             f"Inferred file extension '{suffix}' from Content-Type: {content_type}"
                         )
 
+            content_length = response.headers.get("Content-Length")
+            if content_length:
+                try:
+                    declared = int(content_length)
+                except ValueError:
+                    declared = -1
+                if declared > self.MAX_DOWNLOAD_BYTES:
+                    raise RuntimeError(
+                        f"Remote file Content-Length {declared} exceeds "
+                        f"max download size of {self.MAX_DOWNLOAD_BYTES} bytes"
+                    )
+
             # Create a temporary file with the correct extension
             fd, tmp_path = tempfile.mkstemp(suffix=suffix)
             os.close(fd)
             tmp_path = Path(tmp_path)
 
-            # Download the file content
+            # Download the file content with a hard size cap
+            total = 0
             with open(tmp_path, "wb") as out_file:
-                shutil.copyfileobj(response, out_file)
+                while True:
+                    chunk = response.read(64 * 1024)
+                    if not chunk:
+                        break
+                    total += len(chunk)
+                    if total > self.MAX_DOWNLOAD_BYTES:
+                        raise RuntimeError(
+                            f"Download exceeded max size of "
+                            f"{self.MAX_DOWNLOAD_BYTES} bytes"
+                        )
+                    out_file.write(chunk)
 
             self.logger.info(
                 f"Downloaded to temporary file: {tmp_path} ({tmp_path.stat().st_size} bytes)"
@@ -145,9 +222,9 @@ class Parser:
 
         except Exception as e:
             # Clean up temp file if it was created
-            if tmp_path and tmp_path.exists():
+            if tmp_path and Path(tmp_path).exists():
                 try:
-                    tmp_path.unlink()
+                    Path(tmp_path).unlink()
                     self.logger.debug(
                         f"Cleaned up temporary file after failed download: {tmp_path}"
                     )
@@ -157,7 +234,9 @@ class Parser:
                     )
 
             self.logger.error(f"Failed to download file from {url}: {e}")
-            raise RuntimeError(f"Failed to download file from {url}: {e}")
+            if isinstance(e, (ValueError, RuntimeError, urllib.error.URLError)):
+                raise RuntimeError(f"Failed to download file from {url}: {e}") from e
+            raise RuntimeError(f"Failed to download file from {url}: {e}") from e
         finally:
             if response:
                 response.close()
@@ -1648,6 +1727,12 @@ class DoclingParser(Parser):
 
         # Handle and validate environment variables
         custom_env = kwargs.pop("env", None)
+        # Finite default prevents indefinite hangs (LibreOffice/MinerU already time out).
+        # Pass timeout=None to disable.
+        if "timeout" in kwargs:
+            timeout = kwargs.pop("timeout")
+        else:
+            timeout = self.DEFAULT_DOCLING_TIMEOUT
 
         # Validate env if provided
         if custom_env is not None:
@@ -1673,6 +1758,7 @@ class DoclingParser(Parser):
                 "encoding": "utf-8",
                 "errors": "ignore",
                 "env": env,
+                "timeout": timeout,
             }
 
             # Hide console window on Windows
@@ -1683,6 +1769,14 @@ class DoclingParser(Parser):
             self.logger.info("Docling command executed successfully")
             if result.stdout:
                 self.logger.debug(f"JSON and Markdown cmd output: {result.stdout}")
+        except subprocess.TimeoutExpired as e:
+            self.logger.error(
+                f"Docling timed out after {timeout}s for input: {input_path}"
+            )
+            raise TimeoutError(
+                f"Docling did not finish within {timeout}s. "
+                "Pass a larger timeout=... to _run_docling_command / parse_* if needed."
+            ) from e
         except subprocess.CalledProcessError as e:
             self.logger.error(f"Error running docling command: {e}")
             if e.stderr:

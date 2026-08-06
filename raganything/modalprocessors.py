@@ -28,6 +28,7 @@ from lightrag.operate import extract_entities, merge_nodes_and_edges
 
 # Import prompt templates
 from raganything.prompt import PROMPTS
+from raganything.utils import resolve_equation_fields
 
 
 @dataclass
@@ -1288,8 +1289,7 @@ class EquationModalProcessor(BaseModalProcessor):
             else:
                 content_data = modal_content
 
-            equation_text = content_data.get("text")
-            equation_format = content_data.get("text_format", "")
+            equation_text, equation_format = resolve_equation_fields(content_data)
 
             # Extract context for current item
             context = ""
@@ -1369,8 +1369,7 @@ class EquationModalProcessor(BaseModalProcessor):
             else:
                 content_data = modal_content
 
-            equation_text = content_data.get("text")
-            equation_format = content_data.get("text_format", "")
+            equation_text, equation_format = resolve_equation_fields(content_data)
 
             # Build complete equation content
             modal_chunk = PROMPTS["equation_chunk"].format(

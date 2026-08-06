@@ -17,6 +17,7 @@ from raganything.utils import (
     get_processor_for_type,
     encode_image_to_base64,
     validate_image_file,
+    resolve_equation_fields,
 )
 
 
@@ -537,7 +538,8 @@ class QueryMixin:
         self, processor, content: Dict[str, Any]
     ) -> str:
         """Generate table description for query"""
-        table_data = content.get("table_data", "")
+        # Query examples use table_data; content-list / ingest schema uses table_body.
+        table_data = content.get("table_data") or content.get("table_body") or ""
         table_caption = content.get("table_caption", "")
 
         prompt = PROMPTS["QUERY_TABLE_ANALYSIS"].format(
@@ -554,7 +556,7 @@ class QueryMixin:
         self, processor, content: Dict[str, Any]
     ) -> str:
         """Generate equation description for query"""
-        latex = content.get("latex", "")
+        latex, _format = resolve_equation_fields(content)
         equation_caption = content.get("equation_caption", "")
 
         prompt = PROMPTS["QUERY_EQUATION_ANALYSIS"].format(

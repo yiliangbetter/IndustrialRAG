@@ -18,6 +18,7 @@ from raganything.utils import (
     insert_text_content,
     insert_text_content_with_multimodal_content,
     get_processor_for_type,
+    resolve_equation_fields,
 )
 import asyncio
 from lightrag.utils import compute_mdhash_id
@@ -116,8 +117,12 @@ class ProcessorMixin:
                     content_hash_data.append(f"image:{item['img_path']}")
                 elif item.get("type") == "table" and item.get("table_body"):
                     content_hash_data.append(f"table:{item['table_body']}")
-                elif item.get("type") == "equation" and item.get("text"):
-                    content_hash_data.append(f"equation:{item['text']}")
+                elif item.get("type") == "equation":
+                    equation_text, _ = resolve_equation_fields(item)
+                    if equation_text:
+                        content_hash_data.append(f"equation:{equation_text}")
+                    else:
+                        content_hash_data.append(str(item))
                 else:
                     # For other types, use string representation
                     content_hash_data.append(str(item))
@@ -1194,8 +1199,7 @@ class ProcessorMixin:
                 )
 
             elif content_type == "equation":
-                equation_text = original_item.get("text", "")
-                equation_format = original_item.get("text_format", "")
+                equation_text, equation_format = resolve_equation_fields(original_item)
 
                 return PROMPTS["equation_chunk"].format(
                     equation_text=equation_text,

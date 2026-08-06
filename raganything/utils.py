@@ -56,6 +56,27 @@ def separate_content(
     return text_content, multimodal_items
 
 
+def resolve_equation_fields(content_data: Dict[str, Any]) -> Tuple[str, str]:
+    """
+    Resolve equation body and format from content-list / query payloads.
+
+    Documented insert schema puts the formula in ``latex`` and a prose
+    description in ``text``. Parser output (MinerU/Docling) stores the formula
+    in ``text`` with optional ``text_format``. Prefer ``latex`` when present so
+    documented API payloads are not silently analyzed as prose-only.
+    """
+    if not isinstance(content_data, dict):
+        return "", ""
+    latex = content_data.get("latex")
+    text = content_data.get("text")
+    text_format = content_data.get("text_format") or ""
+    if latex is not None and str(latex).strip():
+        return str(latex), (text_format or "latex")
+    if text is not None:
+        return str(text), str(text_format)
+    return "", str(text_format)
+
+
 def encode_image_to_base64(image_path: str) -> str:
     """
     Encode image file to base64 string

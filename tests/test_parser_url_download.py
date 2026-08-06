@@ -39,25 +39,42 @@ def test_is_url(value, expected):
 
 def _fake_response(*, body: bytes = b"%PDF-1.4 fake", content_type: str = ""):
     response = MagicMock()
-    response.headers.get.return_value = content_type
-    response.read = io.BytesIO(body).read
+    response.headers.get.side_effect = lambda key, default="": (
+        content_type if key == "Content-Type" else default
+    )
+    buf = io.BytesIO(body)
+
+    def _read(n=-1):
+        return buf.read(n)
+
+    response.read = _read
     response.close = MagicMock()
     return response
+
+
+def _patch_opener(response):
+    opener = MagicMock()
+    opener.open.return_value = response
+    return patch("urllib.request.build_opener", return_value=opener), opener
 
 
 def test_download_file_uses_extension_from_url_path(tmp_path):
     parser = Parser()
     response = _fake_response()
+    opener_patch, opener = _patch_opener(response)
 
-    with patch("urllib.request.urlopen", return_value=response) as mock_open:
+    with (
+        opener_patch,
+        patch.object(Parser, "_assert_public_hostname"),
+    ):
         downloaded = parser._download_file("https://example.com/docs/report.pdf")
 
     try:
         assert downloaded.suffix == ".pdf"
         assert downloaded.exists()
         assert downloaded.read_bytes() == b"%PDF-1.4 fake"
-        mock_open.assert_called_once()
-        _, kwargs = mock_open.call_args
+        opener.open.assert_called_once()
+        _, kwargs = opener.open.call_args
         assert kwargs.get("timeout") == 30, "must pass an explicit timeout"
     finally:
         if downloaded.exists():
@@ -67,8 +84,12 @@ def test_download_file_uses_extension_from_url_path(tmp_path):
 def test_download_file_infers_extension_from_content_type(tmp_path):
     parser = Parser()
     response = _fake_response(content_type="application/pdf; charset=utf-8")
+    opener_patch, _ = _patch_opener(response)
 
-    with patch("urllib.request.urlopen", return_value=response):
+    with (
+        opener_patch,
+        patch.object(Parser, "_assert_public_hostname"),
+    ):
         downloaded = parser._download_file("https://example.com/download?id=123")
 
     try:
@@ -94,9 +115,11 @@ def test_download_file_cleans_up_temp_on_failure():
     response.headers.get.return_value = ""
     response.read.side_effect = OSError("connection reset")
     response.close = MagicMock()
+    opener_patch, _ = _patch_opener(response)
 
     with (
-        patch("urllib.request.urlopen", return_value=response),
+        opener_patch,
+        patch.object(Parser, "_assert_public_hostname"),
         patch("tempfile.mkstemp", side_effect=tracking_mkstemp),
     ):
         with pytest.raises(RuntimeError, match="Failed to download"):
@@ -112,7 +135,7 @@ def test_download_file_cleans_up_temp_on_failure():
 
 
 def test_download_file_cleans_up_temp_on_urlopen_failure():
-    """When urlopen itself fails, no temp file should be created or leaked."""
+    """When opener.open itself fails, no temp file should be created or leaked."""
     parser = Parser()
     created: list[Path] = []
 
@@ -123,8 +146,12 @@ def test_download_file_cleans_up_temp_on_urlopen_failure():
         created.append(Path(name))
         return fd, name
 
+    opener = MagicMock()
+    opener.open.side_effect = TimeoutError("stalled")
+
     with (
-        patch("urllib.request.urlopen", side_effect=TimeoutError("stalled")),
+        patch("urllib.request.build_opener", return_value=opener),
+        patch.object(Parser, "_assert_public_hostname"),
         patch("tempfile.mkstemp", side_effect=tracking_mkstemp),
     ):
         with pytest.raises(RuntimeError, match="Failed to download"):
@@ -132,3 +159,59 @@ def test_download_file_cleans_up_temp_on_urlopen_failure():
 
     for p in created:
         assert not p.exists(), f"temp file {p} leaked"
+
+
+@pytest.mark.parametrize(
+    "url",
+    [
+        "ftp://example.com/x.pdf",
+        "file://localhost/etc/passwd",
+        "gopher://evil/x",
+        "http://127.0.0.1/secret.pdf",
+        "http://localhost/secret.pdf",
+        "http://169.254.169.254/latest/meta-data/",
+        "http://10.0.0.5/internal.pdf",
+    ],
+)
+def test_download_file_blocks_ssrf_targets(url):
+    parser = Parser()
+    with pytest.raises(RuntimeError, match="Failed to download"):
+        parser._download_file(url)
+
+
+def test_download_file_rejects_oversized_content_length():
+    parser = Parser()
+    response = MagicMock()
+    response.headers.get.side_effect = lambda key, default="": (
+        str(Parser.MAX_DOWNLOAD_BYTES + 1) if key == "Content-Length" else default
+    )
+    response.read = MagicMock(return_value=b"")
+    response.close = MagicMock()
+    opener_patch, _ = _patch_opener(response)
+
+    with (
+        opener_patch,
+        patch.object(Parser, "_assert_public_hostname"),
+    ):
+        with pytest.raises(RuntimeError, match="Content-Length|max download size"):
+            parser._download_file("https://example.com/huge.pdf")
+
+
+def test_download_file_enforces_stream_size_cap():
+    parser = Parser()
+    # Stream more than the cap in chunks
+    oversized = b"x" * (64 * 1024)
+    chunks = [oversized] * ((Parser.MAX_DOWNLOAD_BYTES // len(oversized)) + 2)
+    response = MagicMock()
+    response.headers.get.return_value = ""
+    response.read = MagicMock(side_effect=chunks + [b""])
+    response.close = MagicMock()
+    opener_patch, _ = _patch_opener(response)
+
+    with (
+        opener_patch,
+        patch.object(Parser, "_assert_public_hostname"),
+        patch.object(Parser, "MAX_DOWNLOAD_BYTES", 100_000),
+    ):
+        with pytest.raises(RuntimeError, match="exceeded max size"):
+            parser._download_file("https://example.com/stream.pdf")
