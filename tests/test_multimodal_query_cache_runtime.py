@@ -175,8 +175,9 @@ async def test_multimodal_cache_miss_upserts_and_persists():
         vlm_enhanced=False,
     )
 
+    # Production always forwards system_prompt (even None) into the key kwargs.
     expected_key = dummy._generate_multimodal_cache_key(
-        "What is the age?", CONTENT, "hybrid"
+        "What is the age?", CONTENT, "hybrid", system_prompt=None, vlm_enhanced=False
     )
     assert result == "fresh-answer"
     assert cache.requested_keys == [expected_key]
