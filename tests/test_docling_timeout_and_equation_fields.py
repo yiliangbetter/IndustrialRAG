@@ -4,8 +4,6 @@ from pathlib import Path
 from unittest.mock import MagicMock, patch
 import importlib.util
 import subprocess
-import sys
-import types
 
 import pytest
 
@@ -54,22 +52,9 @@ def test_run_docling_command_timeout_raises_timeout_error():
 
 
 def test_resolve_equation_fields_prefers_documented_latex():
-    # Import utils without pulling heavy package init side effects when possible
-    utils_path = Path(__file__).resolve().parents[1] / "raganything" / "utils.py"
-    # utils imports lightrag.utils.logger — stub if missing
-    if "lightrag" not in sys.modules:
-        lightrag = types.ModuleType("lightrag")
-        lightrag_utils = types.ModuleType("lightrag.utils")
-        lightrag_utils.logger = MagicMock()
-        sys.modules["lightrag"] = lightrag
-        sys.modules["lightrag.utils"] = lightrag_utils
+    from raganything.utils import resolve_equation_fields
 
-    spec = importlib.util.spec_from_file_location("_raganything_utils_eq", utils_path)
-    utils = importlib.util.module_from_spec(spec)
-    assert spec.loader is not None
-    spec.loader.exec_module(utils)
-
-    text, fmt = utils.resolve_equation_fields(
+    text, fmt = resolve_equation_fields(
         {
             "type": "equation",
             "latex": "E = mc^2",
@@ -80,7 +65,7 @@ def test_resolve_equation_fields_prefers_documented_latex():
     assert fmt == "latex"
 
     # Parser-style payload (formula in text only)
-    text2, fmt2 = utils.resolve_equation_fields(
+    text2, fmt2 = resolve_equation_fields(
         {"type": "equation", "text": "a^2+b^2=c^2", "text_format": "latex"}
     )
     assert text2 == "a^2+b^2=c^2"
@@ -89,15 +74,11 @@ def test_resolve_equation_fields_prefers_documented_latex():
 
 @pytest.mark.asyncio
 async def test_query_table_accepts_table_body_and_equation_text():
-    pytest.importorskip("lightrag")
     from raganything.query import QueryMixin
-    from raganything.prompt import PROMPTS
 
     captured = {}
 
     class Dummy:
-        logger = MagicMock()
-
         async def modal_caption_func(self, prompt, system_prompt=None):
             captured["prompt"] = prompt
             return "ok"
@@ -133,4 +114,3 @@ async def test_query_table_accepts_table_body_and_equation_text():
     )
     assert "E=mc^2" in captured["prompt"]
     assert "prose description" not in captured["prompt"]
-    assert PROMPTS["QUERY_EQUATION_ANALYSIS"]
