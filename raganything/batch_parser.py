@@ -6,6 +6,7 @@ with progress reporting and error handling.
 """
 
 import asyncio
+import functools
 import logging
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from pathlib import Path
@@ -359,17 +360,20 @@ class BatchParser:
         Returns:
             BatchProcessingResult with processing statistics
         """
-        # Run the sync version in a thread pool
-        loop = asyncio.get_event_loop()
+        # run_in_executor only accepts *args for the callable; bind parser
+        # kwargs with partial so options like backend/lang do not TypeError.
+        loop = asyncio.get_running_loop()
         return await loop.run_in_executor(
             None,
-            self.process_batch,
-            file_paths,
-            output_dir,
-            parse_method,
-            recursive,
-            dry_run,
-            **kwargs,
+            functools.partial(
+                self.process_batch,
+                file_paths,
+                output_dir,
+                parse_method,
+                recursive,
+                dry_run,
+                **kwargs,
+            ),
         )
 
 
