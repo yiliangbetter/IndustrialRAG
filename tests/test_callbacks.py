@@ -102,6 +102,49 @@ class TestCallbackManager:
         # Should not raise — errors are logged and swallowed
         mgr.dispatch("on_parse_start", file_path="test.pdf")
 
+    def test_dispatch_isolation_continues_after_callback_error(self):
+        class ErrorCallback(ProcessingCallback):
+            def on_parse_start(self, **kw):
+                raise RuntimeError("callback error")
+
+        mgr = CallbackManager()
+        good_before = RecordingCallback()
+        good_after = RecordingCallback()
+        mgr.register(good_before)
+        mgr.register(ErrorCallback())
+        mgr.register(good_after)
+
+        mgr.dispatch("on_parse_start", file_path="test.pdf")
+
+        assert good_before.events == [("parse_start", "test.pdf")]
+        assert good_after.events == [("parse_start", "test.pdf")]
+
+    def test_dispatch_uses_snapshot_when_callback_unregisters_peer(self):
+        mgr = CallbackManager()
+        survivor = RecordingCallback()
+        removed = RecordingCallback()
+
+        class UnregisterCallback(ProcessingCallback):
+            def on_parse_start(self, **kw):
+                mgr.unregister(removed)
+
+        mgr.register(UnregisterCallback())
+        mgr.register(removed)
+        mgr.register(survivor)
+
+        mgr.dispatch("on_parse_start", file_path="snap.pdf")
+
+        # Snapshot iteration still delivers to the peer removed mid-dispatch.
+        assert removed.events == [("parse_start", "snap.pdf")]
+        assert survivor.events == [("parse_start", "snap.pdf")]
+
+        mgr.dispatch("on_parse_start", file_path="after.pdf")
+        assert removed.events == [("parse_start", "snap.pdf")]
+        assert survivor.events == [
+            ("parse_start", "snap.pdf"),
+            ("parse_start", "after.pdf"),
+        ]
+
     def test_dispatch_unknown_event(self):
         mgr = CallbackManager()
         cb = RecordingCallback()
@@ -158,13 +201,19 @@ class TestMetricsCallback:
         m.on_document_complete(file_path="b.pdf")
         m.on_document_error(file_path="c.pdf", error="parse failed", stage="parsing")
         m.on_query_complete(query="test", duration_seconds=0.3)
+        m.on_query_error(query="bad", error="timeout")
 
         assert m.metrics["documents_processed"] == 2
         assert m.metrics["documents_failed"] == 1
         assert m.metrics["total_content_blocks"] == 15
         assert m.metrics["total_multimodal_items"] == 3
         assert m.metrics["queries_executed"] == 1
-        assert len(m.metrics["errors"]) == 1
+        assert len(m.metrics["errors"]) == 2
+        assert m.metrics["errors"][1] == {
+            "file": None,
+            "error": "timeout",
+            "stage": "query",
+        }
 
     def test_summary(self):
         m = MetricsCallback()
@@ -172,6 +221,14 @@ class TestMetricsCallback:
         summary = m.summary()
         assert "Documents processed" in summary
         assert "1" in summary
+
+    def test_summary_includes_errors(self):
+        m = MetricsCallback()
+        m.on_document_error(file_path="bad.pdf", error="boom", stage="parse")
+        summary = m.summary()
+        assert "Errors" in summary
+        assert "bad.pdf" in summary
+        assert "boom" in summary
 
     def test_reset(self):
         m = MetricsCallback()
