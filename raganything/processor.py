@@ -555,16 +555,32 @@ class ProcessorMixin:
                 self.logger.info(
                     "Detected Office or HTML document, using parser for Office/HTML..."
                 )
-                office_parse_kwargs = {k: v for k, v in kwargs.items() if k != "method"}
-                effective_method = parse_method or self.config.parse_method
-                if effective_method is not None:
-                    office_parse_kwargs["method"] = effective_method
-                content_list = await asyncio.to_thread(
-                    doc_parser.parse_office_doc,
-                    doc_path=file_path,
-                    output_dir=output_dir,
-                    **office_parse_kwargs,
-                )
+                html_exts = {".html", ".htm", ".xhtml"}
+                # DoclingParser.parse_office_doc rejects non-office suffixes;
+                # route HTML to parse_html when the parser provides it.
+                if ext in html_exts and hasattr(doc_parser, "parse_html"):
+                    html_parse_kwargs = {
+                        k: v for k, v in kwargs.items() if k != "method"
+                    }
+                    content_list = await asyncio.to_thread(
+                        doc_parser.parse_html,
+                        html_path=file_path,
+                        output_dir=output_dir,
+                        **html_parse_kwargs,
+                    )
+                else:
+                    office_parse_kwargs = {
+                        k: v for k, v in kwargs.items() if k != "method"
+                    }
+                    effective_method = parse_method or self.config.parse_method
+                    if effective_method is not None:
+                        office_parse_kwargs["method"] = effective_method
+                    content_list = await asyncio.to_thread(
+                        doc_parser.parse_office_doc,
+                        doc_path=file_path,
+                        output_dir=output_dir,
+                        **office_parse_kwargs,
+                    )
             else:
                 # For other or unknown formats, use generic parser
                 self.logger.info(
