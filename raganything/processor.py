@@ -18,6 +18,8 @@ from raganything.utils import (
     insert_text_content,
     insert_text_content_with_multimodal_content,
     get_processor_for_type,
+    snapshot_kg_recovery_anchors,
+    union_kg_recovery_anchors,
 )
 import asyncio
 from lightrag.utils import compute_mdhash_id
@@ -893,6 +895,12 @@ class ProcessorMixin:
             pipeline_status = await get_namespace_data("pipeline_status")
             pipeline_status_lock = get_pipeline_status_lock()
 
+            prior_entities, prior_relations = await snapshot_kg_recovery_anchors(
+                self.lightrag.full_entities,
+                self.lightrag.full_relations,
+                doc_id,
+            )
+
             await merge_nodes_and_edges(
                 chunk_results=all_chunk_results,
                 knowledge_graph_inst=self.lightrag.chunk_entity_relation_graph,
@@ -910,6 +918,14 @@ class ProcessorMixin:
                 current_file_number=1,
                 total_files=1,
                 file_path=file_name,
+            )
+
+            await union_kg_recovery_anchors(
+                self.lightrag.full_entities,
+                self.lightrag.full_relations,
+                doc_id,
+                prior_entities,
+                prior_relations,
             )
 
             await self.lightrag._insert_done()
@@ -1499,6 +1515,15 @@ class ProcessorMixin:
         # Use full path or basename based on config
         file_ref = self._get_file_reference(file_path)
 
+        # Phase 0 of merge_nodes_and_edges replaces full_entities/full_relations
+        # with candidates from this multimodal chunk_results batch only. Snapshot
+        # text-pipeline + multimodal-main anchors and union them back afterward.
+        prior_entities, prior_relations = await snapshot_kg_recovery_anchors(
+            self.lightrag.full_entities,
+            self.lightrag.full_relations,
+            doc_id,
+        )
+
         await merge_nodes_and_edges(
             chunk_results=enhanced_chunk_results,
             knowledge_graph_inst=self.lightrag.chunk_entity_relation_graph,
@@ -1516,6 +1541,14 @@ class ProcessorMixin:
             current_file_number=1,
             total_files=1,
             file_path=file_ref,
+        )
+
+        await union_kg_recovery_anchors(
+            self.lightrag.full_entities,
+            self.lightrag.full_relations,
+            doc_id,
+            prior_entities,
+            prior_relations,
         )
 
         await self.lightrag._insert_done()

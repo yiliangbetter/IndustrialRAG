@@ -5,9 +5,105 @@ Contains helper functions for content separation, text insertion, and other util
 """
 
 import base64
-from typing import Dict, List, Any, Tuple
+from copy import deepcopy
+from typing import Dict, List, Any, Optional, Tuple
 from pathlib import Path
 from lightrag.utils import logger
+
+
+async def snapshot_kg_recovery_anchors(
+    full_entities_storage,
+    full_relations_storage,
+    doc_id: Optional[str],
+) -> Tuple[Optional[Dict[str, Any]], Optional[Dict[str, Any]]]:
+    """Snapshot ``full_entities`` / ``full_relations`` rows for a document.
+
+    LightRAG ``merge_nodes_and_edges`` Phase 0 replaces these recovery anchors
+    with candidates from the *current* ``chunk_results`` only. Multimodal merge
+    must restore any pre-existing text / multimodal-main anchors afterward.
+    """
+    if not doc_id:
+        return None, None
+
+    prior_entities = None
+    prior_relations = None
+    if full_entities_storage is not None:
+        prior_entities = await full_entities_storage.get_by_id(doc_id)
+        if prior_entities is not None:
+            prior_entities = deepcopy(prior_entities)
+    if full_relations_storage is not None:
+        prior_relations = await full_relations_storage.get_by_id(doc_id)
+        if prior_relations is not None:
+            prior_relations = deepcopy(prior_relations)
+    return prior_entities, prior_relations
+
+
+async def union_kg_recovery_anchors(
+    full_entities_storage,
+    full_relations_storage,
+    doc_id: Optional[str],
+    prior_entities: Optional[Dict[str, Any]],
+    prior_relations: Optional[Dict[str, Any]],
+) -> None:
+    """Union prior KG recovery anchors into post-merge rows and flush.
+
+    Mirrors LightRAG's ``_union_doc_recovery_anchors`` so multimodal merge does
+    not silently drop text-pipeline or multimodal-main entity/relation anchors
+    needed for document purge / integrity repair.
+    """
+    if not doc_id:
+        return
+
+    if full_entities_storage is not None and prior_entities is not None:
+        current = await full_entities_storage.get_by_id(doc_id) or {}
+        prior_names = {
+            name
+            for name in (prior_entities.get("entity_names") or [])
+            if isinstance(name, str) and name
+        }
+        current_names = {
+            name
+            for name in (current.get("entity_names") or [])
+            if isinstance(name, str) and name
+        }
+        union_names = sorted(prior_names | current_names)
+        merged_entities = {
+            **prior_entities,
+            **current,
+            "entity_names": union_names,
+            "count": len(union_names),
+        }
+        await full_entities_storage.upsert({doc_id: merged_entities})
+        await full_entities_storage.index_done_callback()
+
+    if full_relations_storage is not None and prior_relations is not None:
+        current = await full_relations_storage.get_by_id(doc_id) or {}
+
+        def _as_pair(pair: Any) -> Optional[Tuple[str, str]]:
+            if not isinstance(pair, (list, tuple)) or len(pair) != 2:
+                return None
+            src, tgt = pair[0], pair[1]
+            if isinstance(src, str) and src and isinstance(tgt, str) and tgt:
+                return (src, tgt)
+            return None
+
+        prior_raw = prior_relations.get("relation_pairs") or []
+        current_raw = current.get("relation_pairs") or []
+        prior_pairs = {
+            p for p in (_as_pair(pair) for pair in prior_raw) if p is not None
+        }
+        current_pairs = {
+            p for p in (_as_pair(pair) for pair in current_raw) if p is not None
+        }
+        union_pairs = sorted(prior_pairs | current_pairs)
+        merged_relations = {
+            **prior_relations,
+            **current,
+            "relation_pairs": [list(pair) for pair in union_pairs],
+            "count": len(union_pairs),
+        }
+        await full_relations_storage.upsert({doc_id: merged_relations})
+        await full_relations_storage.index_done_callback()
 
 
 def separate_content(
