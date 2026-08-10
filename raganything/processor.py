@@ -167,54 +167,117 @@ class ProcessorMixin:
             return ""
         lines: List[str] = []
         for it in list_items:
+            # MinerU 3 legacy content_list.json uses list[str]; v2 nested uses dict spans.
+            if isinstance(it, str):
+                if it.strip():
+                    lines.append(it.strip())
+                continue
             if not isinstance(it, dict):
                 continue
             prefix = it.get("prefix") or ""
             body = self._mineru_span_text(it.get("item_content"))
             if not body:
+                # Some list payloads store the line directly under "text".
+                body = self._mineru_span_text(it.get("text"))
+            if not body:
                 continue
             lines.append(f"{prefix} {body}".strip() if prefix else body)
         return "\n".join(lines)
 
+    @staticmethod
+    def _coerce_textish(value: Any) -> str:
+        """Normalize string or list text fields to a single string."""
+        if value is None:
+            return ""
+        if isinstance(value, str):
+            return value.strip()
+        if isinstance(value, list):
+            parts = [str(x).strip() for x in value if x is not None and str(x).strip()]
+            return "\n".join(parts)
+        return str(value).strip()
+
     def _plaintext_from_mineru_blocks(self, items: List[Dict[str, Any]]) -> str:
-        """Recover plaintext from MinerU v2 paragraph/title/list/table/image blocks."""
+        """Recover plaintext from MinerU v1/v2 blocks, including list/code/chart.
+
+        Used when multimodal processors are skipped (text-first KG / embedding-only)
+        so MinerU 3 ``list`` / ``code`` / ``chart`` blocks are not silently dropped.
+        """
         parts: List[str] = []
         for item in items:
             if not isinstance(item, dict):
                 continue
             block_type = item.get("type")
             content = item.get("content")
+            s = ""
 
             if block_type == "text" and isinstance(item.get("text"), str):
                 s = item["text"].strip()
-                if s:
-                    parts.append(s)
-                continue
-
-            if not isinstance(content, dict):
-                continue
-
-            if block_type == "paragraph":
-                s = self._mineru_span_text(content.get("paragraph_content"))
-            elif block_type == "title":
-                s = self._mineru_span_text(content.get("title_content"))
             elif block_type == "list":
-                s = self._mineru_list_items_text(content.get("list_items"))
-            elif block_type == "table":
-                s = (content.get("html") or "").strip()
-            elif block_type == "image":
-                caps = content.get("image_caption") or []
-                if isinstance(caps, list):
-                    s = " ".join(str(x) for x in caps if x).strip()
+                if isinstance(content, dict):
+                    s = self._mineru_list_items_text(content.get("list_items"))
+                if not s:
+                    s = self._mineru_list_items_text(item.get("list_items"))
+            elif block_type == "code":
+                if isinstance(content, dict):
+                    s = self._coerce_textish(
+                        content.get("code_content") or content.get("code_body")
+                    )
+                    cap = self._coerce_textish(
+                        content.get("code_caption") or content.get("algorithm_caption")
+                    )
                 else:
-                    s = str(caps).strip()
-            else:
-                s = ""
+                    s = self._coerce_textish(
+                        item.get("code_body") or item.get("code_content")
+                    )
+                    cap = self._coerce_textish(item.get("code_caption"))
+                if cap and s:
+                    s = f"{cap}\n{s}"
+                elif cap:
+                    s = cap
+            elif block_type == "chart":
+                if isinstance(content, dict):
+                    s = self._coerce_textish(content.get("content"))
+                    cap = self._coerce_textish(
+                        content.get("chart_caption") or content.get("image_caption")
+                    )
+                else:
+                    s = self._coerce_textish(item.get("content"))
+                    cap = self._coerce_textish(
+                        item.get("chart_caption") or item.get("image_caption")
+                    )
+                if cap and s:
+                    s = f"{cap}\n{s}"
+                elif cap:
+                    s = cap
+            elif isinstance(content, dict):
+                if block_type == "paragraph":
+                    s = self._mineru_span_text(content.get("paragraph_content"))
+                elif block_type == "title":
+                    s = self._mineru_span_text(content.get("title_content"))
+                elif block_type == "table":
+                    s = (content.get("html") or "").strip()
+                elif block_type == "image":
+                    caps = content.get("image_caption") or []
+                    if isinstance(caps, list):
+                        s = " ".join(str(x) for x in caps if x).strip()
+                    else:
+                        s = str(caps).strip()
 
             if s:
                 parts.append(s)
 
         return "\n\n".join(parts)
+
+    def _text_content_for_skipped_multimodal(
+        self,
+        text_content: str,
+        content_list: List[Dict[str, Any]],
+    ) -> str:
+        """Prefer full-block plaintext harvest when multimodal processors will not run."""
+        harvested = self._plaintext_from_mineru_blocks(content_list)
+        if harvested.strip():
+            return harvested
+        return text_content
 
     async def _insert_text_content_embedding_only(
         self, text_content: str, file_ref: str, doc_id: str
@@ -1722,6 +1785,11 @@ class ProcessorMixin:
             if self.config.allow_embedding_only_ingestion:
                 if file_name is None:
                     file_name = self._get_file_reference(file_path)
+                # Multimodal processors will not run — fold list/code/chart (and other
+                # recoverable blocks) into the text stream before embedding insert.
+                text_content = self._text_content_for_skipped_multimodal(
+                    text_content, content_list
+                )
                 await self._insert_text_content_embedding_only(
                     text_content=text_content, file_ref=file_name, doc_id=doc_id
                 )
@@ -2185,6 +2253,14 @@ class ProcessorMixin:
                 if isinstance(candidate, str) and candidate.strip():
                     text_parts.append(candidate.strip())
             text_content = "\n\n".join(text_parts)
+
+        # When multimodal processors will not run, always fold recoverable non-text
+        # blocks (MinerU 3 list/code/chart, v2 nested prose, etc.) into the text
+        # stream — even if type=text prose already made text_content non-empty.
+        if self.config.allow_embedding_only_ingestion or skip_multimodal_processing:
+            text_content = self._text_content_for_skipped_multimodal(
+                text_content, normalized_content_list
+            )
 
         # Step 1.5: Set content source for context extraction in multimodal processing
         if hasattr(self, "set_content_source_for_context") and multimodal_items:
