@@ -78,7 +78,9 @@ class TestImageParseResponse:
         assert caption == raw
         assert entity["entity_name"] == "Forced"
         assert entity["entity_type"] == "image"
-        assert entity["summary"] == raw
+        # Fallback summaries truncate long raw responses at 100 chars.
+        assert entity["summary"] == raw[:100] + "..."
+        assert len(raw) > 100
 
     def test_incomplete_entity_info_falls_back_with_hash_name(self):
         proc = _as_processor(ImageModalProcessor)
