@@ -6,7 +6,7 @@ errors return a 2-tuple fallback rather than aborting batch stage-1 ingest.
 #75 changes soft-fallback to fail-closed and is intentionally not required.
 """
 
-from unittest.mock import AsyncMock
+from unittest.mock import AsyncMock, MagicMock
 
 import pytest
 from lightrag.utils import compute_mdhash_id
@@ -63,23 +63,24 @@ async def test_table_generate_description_only_soft_fallback_hashes_entity_name(
 
 
 @pytest.mark.asyncio
-async def test_table_generate_description_only_soft_fallback_on_format_error():
-    """Brace-rich table_body that breaks .format() must soft-fallback, not raise."""
+async def test_table_generate_description_only_soft_fallback_on_context_error():
+    """Context extraction failures must soft-fallback before the LLM is called."""
     proc = _make_table(AsyncMock())
-    # Unescaped braces in table_body cause str.format KeyError/ValueError.
+    proc._get_context_for_item = MagicMock(side_effect=RuntimeError("context broken"))
     modal_content = {
-        "table_body": "| template | {unclosed | value |",
-        "table_caption": ["Broken"],
+        "table_body": "| rpm | 1500 |",
+        "table_caption": ["Speed"],
     }
 
     caption, entity = await proc.generate_description_only(
         modal_content=modal_content,
         content_type="table",
-        entity_name="Broken Table",
+        item_info={"page_idx": 1, "index": 0},
+        entity_name="Speed Table",
     )
 
     assert caption == str(modal_content)
-    assert entity["entity_name"] == "Broken Table"
+    assert entity["entity_name"] == "Speed Table"
     assert entity["entity_type"] == "table"
     assert entity["summary"].startswith("Table content:")
     proc.modal_caption_func.assert_not_awaited()

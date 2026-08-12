@@ -1,22 +1,66 @@
 """BatchParser.process_batch mid-batch interrupt marking.
 
-When as_completed / the executor loop raises a non-timeout error, pending
-futures must be recorded as failed with a clear interrupt message. Without
-this, operators can treat incomplete batches as clean success.
+When the as_completed loop raises, pending futures must be recorded as failed
+with a clear interrupt message. Without this, incomplete batches can look like
+clean success.
 
 Distinct from #93 (timeout hang) and #110 (CLI / process_single_file).
+
+These tests mock ThreadPoolExecutor so shutdown does not race with the
+interrupt handler; they exercise the marking logic itself.
 """
 
 from __future__ import annotations
 
-import threading
-from pathlib import Path
 from unittest.mock import MagicMock
 
 import pytest
 
 import raganything.batch_parser as batch_parser_module
 from raganything.batch_parser import BatchParser
+
+
+class _PendingFuture:
+    def __init__(self, file_path: str):
+        self.file_path = file_path
+        self._done = False
+
+    def done(self) -> bool:
+        return self._done
+
+    def result(self):
+        raise AssertionError("pending future should not be awaited")
+
+
+class _CompletedFuture:
+    def __init__(self, file_path: str, success: bool = True, error: str | None = None):
+        self.file_path = file_path
+        self._done = True
+        self._success = success
+        self._error = error
+
+    def done(self) -> bool:
+        return self._done
+
+    def result(self):
+        return self._success, self.file_path, self._error
+
+
+class _FakeExecutor:
+    def __init__(self, *args, **kwargs):
+        self.submitted = []
+
+    def __enter__(self):
+        return self
+
+    def __exit__(self, exc_type, exc, tb):
+        return False
+
+    def submit(self, fn, file_path, *args, **kwargs):
+        # process_batch submits process_single_file(file_path, ...)
+        future = _PendingFuture(file_path)
+        self.submitted.append(future)
+        return future
 
 
 @pytest.fixture
@@ -41,7 +85,9 @@ def batch_parser(monkeypatch):
     return bp
 
 
-def test_process_batch_marks_pending_files_on_interrupt(batch_parser, tmp_path, monkeypatch):
+def test_process_batch_marks_pending_files_on_interrupt(
+    batch_parser, tmp_path, monkeypatch
+):
     """Pending workers must appear in failed_files with Processing interrupted."""
     files = []
     for name in ("a.pdf", "b.pdf"):
@@ -50,26 +96,14 @@ def test_process_batch_marks_pending_files_on_interrupt(batch_parser, tmp_path, 
         files.append(str(path))
     out = tmp_path / "out"
 
-    started = threading.Barrier(3)  # 2 workers + main after submit
-    release = threading.Event()
-
-    def blocking_process(file_path, output_dir, parse_method="auto", **kwargs):
-        started.wait(timeout=5)
-        release.wait(timeout=5)
-        return True, file_path, None
-
-    batch_parser.process_single_file = blocking_process
+    monkeypatch.setattr(batch_parser_module, "ThreadPoolExecutor", _FakeExecutor)
 
     def raise_interrupt(futures, timeout=None):
-        # Let workers enter process_single_file so futures stay not-done.
-        started.wait(timeout=5)
         raise RuntimeError("executor exploded")
 
     monkeypatch.setattr(batch_parser_module, "as_completed", raise_interrupt)
 
     result = batch_parser.process_batch(files, str(out), parse_method="auto")
-
-    release.set()  # unblock any remaining workers for clean shutdown
 
     assert result.total_files == 2
     assert result.successful_files == []
@@ -93,25 +127,18 @@ def test_process_batch_interrupt_preserves_already_completed(
     out = tmp_path / "out"
     done_path, pending_path = files
 
-    release_pending = threading.Event()
-    completed_first = threading.Event()
+    completed = _CompletedFuture(done_path, success=True)
+    pending = _PendingFuture(pending_path)
+    submit_map = {done_path: completed, pending_path: pending}
 
-    def selective_process(file_path, output_dir, parse_method="auto", **kwargs):
-        if Path(file_path).name == "done.pdf":
-            completed_first.set()
-            return True, file_path, None
-        completed_first.wait(timeout=5)
-        release_pending.wait(timeout=5)
-        return True, file_path, None
+    class SelectiveExecutor(_FakeExecutor):
+        def submit(self, fn, file_path, *args, **kwargs):
+            return submit_map[file_path]
 
-    batch_parser.process_single_file = selective_process
-
-    real_as_completed = batch_parser_module.as_completed
+    monkeypatch.setattr(batch_parser_module, "ThreadPoolExecutor", SelectiveExecutor)
 
     def as_completed_then_interrupt(futures, timeout=None):
-        # Yield the first completed future, then raise on the next iteration.
-        gen = real_as_completed(futures, timeout=timeout)
-        yield next(gen)
+        yield completed
         raise RuntimeError("interrupted after first")
 
     monkeypatch.setattr(
@@ -119,8 +146,6 @@ def test_process_batch_interrupt_preserves_already_completed(
     )
 
     result = batch_parser.process_batch(files, str(out))
-
-    release_pending.set()
 
     assert done_path in result.successful_files
     assert pending_path in result.failed_files
