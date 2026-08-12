@@ -93,6 +93,43 @@ class TestGetAvailableLanguages:
         assert "zh" in langs
 
 
+class TestZhLazyLoadRegistry:
+    """Lazy zh registration side effects (distinct from normalize / concurrency)."""
+
+    def test_first_zh_switch_populates_registry(self):
+        prompt_manager_module._PROMPT_LANGUAGES.pop("zh", None)
+        assert "zh" not in prompt_manager_module._PROMPT_LANGUAGES
+
+        set_prompt_language("zh")
+
+        assert "zh" in prompt_manager_module._PROMPT_LANGUAGES
+        assert get_prompt_language() == "zh"
+        from raganything.prompts_zh import PROMPTS_ZH
+
+        assert prompt_manager_module._PROMPT_LANGUAGES["zh"] is PROMPTS_ZH
+
+    def test_second_zh_switch_does_not_reimport(self, monkeypatch):
+        # Ensure zh is already registered so the lazy path is skipped.
+        from raganything.prompts_zh import PROMPTS_ZH
+
+        prompt_manager_module._PROMPT_LANGUAGES["zh"] = PROMPTS_ZH
+
+        calls = {"count": 0}
+        real_lazy = prompt_manager_module._lazy_load_language
+
+        def counting_lazy(lang):
+            calls["count"] += 1
+            return real_lazy(lang)
+
+        monkeypatch.setattr(prompt_manager_module, "_lazy_load_language", counting_lazy)
+
+        set_prompt_language("zh")
+        set_prompt_language("zh")
+
+        assert calls["count"] == 0
+        assert get_prompt_language() == "zh"
+
+
 class TestAtomicPromptSwitches:
     def test_set_and_reset_use_atomic_swap(self, monkeypatch):
         class FakePrompts:
