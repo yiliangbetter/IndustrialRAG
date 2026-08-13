@@ -29,7 +29,6 @@ from iqr_config import (
     _image_min_ref_align,
     _min_substantive_term_len,
 )
-from iqr_domain_schema import schema as _domain_schema
 from iqr_terms import (
     _listing_target_head,
     _normalize_label_key,
@@ -1124,9 +1123,6 @@ def _anchor_chunks_by_query_section(
     pool_primary = text_from_retrieved_docs(pool)
     if _retrieval_prefers_catalog_field(q, pool_primary):
         meta["reason"] = "catalog_query"
-        return out, meta
-    if _domain_schema.matches_special_pattern(q) and not _is_listing_scope_query(q):
-        meta["reason"] = "preflight_query"
         return out, meta
     if not _pool_has_query_aligned_figure_chunks(q, pool):
         meta["reason"] = "no_query_aligned_figure_in_pool"
