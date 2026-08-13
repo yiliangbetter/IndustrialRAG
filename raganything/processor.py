@@ -103,7 +103,18 @@ class ProcessorMixin:
         """
         from lightrag.utils import compute_mdhash_id
 
-        # Extract key content for ID generation
+        def _field_sig(value: Any) -> str:
+            if value is None:
+                return ""
+            if isinstance(value, (list, tuple)):
+                return "|".join(
+                    str(part).strip() for part in value if part not in (None, "")
+                )
+            return str(value).strip()
+
+        # Extract key content for ID generation. Multimodal identity must include
+        # captions/latex: LightRAG skips already-processed doc_ids, and
+        # _process_multimodal_content returns early when multimodal_processed.
         content_hash_data = []
 
         for item in content_list:
@@ -113,11 +124,29 @@ class ProcessorMixin:
                     content_hash_data.append(item["text"].strip())
                 # For other content types, use key identifiers
                 elif item.get("type") == "image" and item.get("img_path"):
-                    content_hash_data.append(f"image:{item['img_path']}")
+                    caption = item.get("image_caption", item.get("img_caption"))
+                    footnote = item.get("image_footnote", item.get("img_footnote"))
+                    content_hash_data.append(
+                        "image:"
+                        f"{item['img_path']}:"
+                        f"{_field_sig(caption)}:"
+                        f"{_field_sig(footnote)}"
+                    )
                 elif item.get("type") == "table" and item.get("table_body"):
-                    content_hash_data.append(f"table:{item['table_body']}")
-                elif item.get("type") == "equation" and item.get("text"):
-                    content_hash_data.append(f"equation:{item['text']}")
+                    content_hash_data.append(
+                        "table:"
+                        f"{item['table_body']}:"
+                        f"{_field_sig(item.get('table_caption'))}:"
+                        f"{_field_sig(item.get('table_footnote'))}"
+                    )
+                elif item.get("type") == "equation" and (
+                    item.get("text") or item.get("latex")
+                ):
+                    content_hash_data.append(
+                        "equation:"
+                        f"{_field_sig(item.get('text'))}:"
+                        f"{_field_sig(item.get('latex'))}"
+                    )
                 else:
                     # For other types, use string representation
                     content_hash_data.append(str(item))
