@@ -12,12 +12,21 @@ from typing import Dict, List, Any, Tuple, Optional
 from pathlib import Path
 
 from raganything.base import DocStatus
+from raganything.machine_derive import derive_machine_from_docname
 from raganything.parser import MineruParser, MineruExecutionError, get_parser
 from raganything.utils import (
     separate_content,
+    build_image_ref_block,
+    coalesce_parts_for_embedding_ingest,
+    anchor_context_for_image,
+    plan_text_image_assignments,
+    flatten_image_refs_for_skip_multimodal,
     insert_text_content,
     insert_text_content_with_multimodal_content,
     get_processor_for_type,
+    compute_ingest_chunk_id,
+    resolve_image_caption,
+    resolve_image_footnote,
 )
 import asyncio
 from lightrag.utils import compute_mdhash_id
@@ -144,14 +153,16 @@ class ProcessorMixin:
                 normalized.append(item)
         return normalized
 
-    def _mineru_span_text(self, node: Any) -> str:
+    def _mineru_span_text(self, node: Any, _depth: int = 0) -> str:
         """Extract plain text from nested MinerU span trees (title_content, paragraph_content, etc.)."""
+        if _depth > 64:
+            return ""
         if node is None:
             return ""
         if isinstance(node, str):
             return node.strip()
         if isinstance(node, list):
-            parts = [self._mineru_span_text(x) for x in node]
+            parts = [self._mineru_span_text(x, _depth + 1) for x in node]
             return " ".join(p for p in parts if p).strip()
         if isinstance(node, dict):
             if node.get("type") == "text" and isinstance(node.get("content"), str):
@@ -159,7 +170,7 @@ class ProcessorMixin:
             if isinstance(node.get("text"), str):
                 return str(node["text"]).strip()
             if "content" in node:
-                return self._mineru_span_text(node["content"])
+                return self._mineru_span_text(node["content"], _depth + 1)
         return ""
 
     def _mineru_list_items_text(self, list_items: Any) -> str:
@@ -216,25 +227,161 @@ class ProcessorMixin:
 
         return "\n\n".join(parts)
 
+    def _flatten_table_text_for_skip_multimodal(
+        self, items: List[Dict[str, Any]]
+    ) -> str:
+        """Collect table bodies for text-only ingest when multimodal stage is skipped.
+
+        ``separate_content`` only merges ``type=='text'``; ``type=='table'`` blocks go to
+        ``multimodal_items`` and are never inserted if ``skip_multimodal_processing`` is True.
+        """
+        parts: List[str] = []
+        for item in items:
+            if not isinstance(item, dict) or item.get("type") != "table":
+                continue
+            body = item.get("table_body")
+            if isinstance(body, str) and body.strip():
+                parts.append(body.strip())
+                continue
+            content = item.get("content")
+            if isinstance(content, dict):
+                html = (content.get("html") or "").strip()
+                if html:
+                    parts.append(html)
+        if not parts:
+            return ""
+        return "\n\n".join(f"[Table]\n{t}" for t in parts)
+
+    @staticmethod
+    def _preceding_text_caption(parts: List[str], max_len: int = 400) -> str:
+        """Nearest prior non-table, non-image text block (document order)."""
+        for prev in reversed(parts):
+            ps = (prev or "").strip()
+            if not ps or ps.startswith("[Table]") or ps.startswith("[图片]"):
+                continue
+            return ps[:max_len]
+        return ""
+
+    def _table_text_from_item(self, item: Dict[str, Any]) -> str:
+        body = item.get("table_body")
+        if isinstance(body, str) and body.strip():
+            return body.strip()
+        content = item.get("content")
+        if isinstance(content, dict):
+            html = (content.get("html") or "").strip()
+            if html:
+                return html
+        return ""
+
+    def _build_document_parts_for_ingest(
+        self, items: List[Dict[str, Any]]
+    ) -> List[str]:
+        """Document-order blocks for ingest; each ``[Table]`` block is one part."""
+        text_image_assignments = plan_text_image_assignments(items)
+        claimed_image_indices = set(text_image_assignments.values())
+        parts: List[str] = []
+        for idx, item in enumerate(items):
+            if not isinstance(item, dict):
+                continue
+            block_type = item.get("type")
+
+            if block_type == "image":
+                if idx in claimed_image_indices:
+                    continue
+                img_path = (item.get("img_path") or "").strip()
+                if img_path:
+                    caption = resolve_image_caption(items, idx)
+                    footnote = resolve_image_footnote(items, idx)
+                    page_idx = item.get("page_idx")
+                    context = anchor_context_for_image(items, idx)
+                    parts.append(
+                        build_image_ref_block(
+                            img_path=img_path,
+                            page_idx=page_idx if isinstance(page_idx, int) else None,
+                            caption=caption,
+                            footnote=footnote,
+                            context=context,
+                        )
+                    )
+                else:
+                    chunk = self._plaintext_from_mineru_blocks([item])
+                    if chunk.strip():
+                        parts.append(chunk.strip())
+                continue
+
+            if block_type == "table":
+                table_text = self._table_text_from_item(item)
+                if table_text:
+                    caption = self._preceding_text_caption(parts)
+                    if caption:
+                        parts.append(f"{caption}\n\n[Table]\n{table_text}")
+                    else:
+                        parts.append(f"[Table]\n{table_text}")
+                continue
+
+            if block_type == "equation":
+                eq = item.get("text") or item.get("equation_text") or ""
+                if isinstance(eq, str) and eq.strip():
+                    parts.append(eq.strip())
+                continue
+
+            chunk = self._plaintext_from_mineru_blocks([item])
+            if not chunk.strip() and block_type == "text":
+                text = item.get("text")
+                if isinstance(text, str):
+                    chunk = text.strip()
+            if not chunk.strip():
+                continue
+
+            block = chunk.strip()
+            if idx in text_image_assignments:
+                image_idx = text_image_assignments[idx]
+                image_item = items[image_idx]
+                img_path = (image_item.get("img_path") or "").strip()
+                if img_path:
+                    caption = resolve_image_caption(items, image_idx)
+                    footnote = resolve_image_footnote(items, image_idx)
+                    page_idx = image_item.get("page_idx")
+                    context = anchor_context_for_image(
+                        items, image_idx, anchor_text_index=idx
+                    )
+                    block = f"{block}\n\n" + build_image_ref_block(
+                        img_path=img_path,
+                        page_idx=page_idx if isinstance(page_idx, int) else None,
+                        caption=caption,
+                        footnote=footnote,
+                        context=context,
+                    )
+            parts.append(block)
+
+        return parts
+
+    def _build_text_with_inline_image_refs(self, items: List[Dict[str, Any]]) -> str:
+        """Walk content_list in document order; place image refs next to surrounding text."""
+        return "\n\n".join(self._build_document_parts_for_ingest(items))
+
     async def _insert_text_content_embedding_only(
-        self, text_content: str, file_ref: str, doc_id: str
+        self,
+        text_content: str,
+        file_ref: str,
+        doc_id: str,
+        *,
+        document_parts: List[str] | None = None,
     ) -> None:
         """Insert text chunks directly into vector/text storages without LLM extraction."""
-        if not text_content.strip():
+        if not text_content.strip() and not document_parts:
             await self._mark_multimodal_processing_complete(doc_id)
             return
 
-        raw_chunks = [
-            chunk.strip() for chunk in text_content.split("\n\n") if chunk.strip()
-        ]
+        raw_chunks = coalesce_parts_for_embedding_ingest(
+            document_parts, text_content=text_content
+        )
         if not raw_chunks:
-            raw_chunks = [text_content.strip()]
+            raw_chunks = [(text_content or "").strip()]
 
         chunk_data = {}
         for idx, chunk_text in enumerate(raw_chunks):
-            chunk_id = compute_mdhash_id(
-                f"{doc_id}:{idx}:{chunk_text}", prefix="chunk-"
-            )
+            chunk_id = compute_ingest_chunk_id(doc_id, idx, chunk_text)
             try:
                 tokens = len(self.lightrag.tokenizer.encode(chunk_text))
             except Exception:
@@ -245,6 +392,7 @@ class ProcessorMixin:
                 "full_doc_id": doc_id,
                 "chunk_order_index": idx,
                 "file_path": file_ref,
+                "machine": derive_machine_from_docname(file_ref),
                 "llm_cache_list": [],
             }
 
@@ -271,6 +419,29 @@ class ProcessorMixin:
         )
         await self.lightrag.doc_status.index_done_callback()
         await self.lightrag._insert_done()
+
+    async def _persist_table_matrix_index(
+        self,
+        *,
+        doc_id: str,
+        file_ref: str,
+        document_parts: List[str] | None,
+    ) -> None:
+        from raganything.table_matrix import (
+            persist_table_matrix_after_ingest,
+            table_matrix_ingest_enabled,
+        )
+        from raganything.utils import compute_table_aware_ingest_segments
+
+        if not table_matrix_ingest_enabled() or not document_parts:
+            return
+        segments = compute_table_aware_ingest_segments(self.lightrag, document_parts)
+        await persist_table_matrix_after_ingest(
+            self.lightrag,
+            full_doc_id=doc_id,
+            file_path=file_ref,
+            ingest_segments=segments,
+        )
 
     async def _get_cached_result(
         self, cache_key: str, file_path: Path, parse_method: str = None, **kwargs
@@ -1085,7 +1256,7 @@ class ProcessorMixin:
 
         # Stage 5: Add belongs_to relations (multimodal-specific)
         enhanced_chunk_results = await self._batch_add_belongs_to_relations_type_aware(
-            chunk_results, multimodal_data_list
+            chunk_results, multimodal_data_list, doc_id
         )
 
         # Stage 6: Use LightRAG's batch merge
@@ -1116,7 +1287,9 @@ class ProcessorMixin:
             )
 
             # Generate chunk_id
-            chunk_id = compute_mdhash_id(formatted_chunk_content, prefix="chunk-")
+            chunk_id = compute_ingest_chunk_id(
+                doc_id, chunk_order_index, formatted_chunk_content
+            )
 
             # Calculate tokens
             tokens = len(self.lightrag.tokenizer.encode(formatted_chunk_content))
@@ -1131,6 +1304,7 @@ class ProcessorMixin:
                 "full_doc_id": doc_id,
                 "chunk_order_index": chunk_order_index,
                 "file_path": file_ref,
+                "machine": derive_machine_from_docname(file_ref),
                 "llm_cache_list": [],  # LightRAG will populate this field
                 # Multimodal-specific metadata
                 "is_multimodal": True,
@@ -1275,7 +1449,9 @@ class ProcessorMixin:
             )
 
             # Generate chunk_id using the formatted content (same as in _convert_to_lightrag_chunks)
-            chunk_id = compute_mdhash_id(formatted_chunk_content, prefix="chunk-")
+            chunk_id = compute_ingest_chunk_id(
+                doc_id, data["chunk_order_index"], formatted_chunk_content
+            )
 
             # Generate entity_id using LightRAG's standard format
             entity_id = compute_mdhash_id(entity_name, prefix="ent-")
@@ -1420,7 +1596,10 @@ class ProcessorMixin:
         return chunk_results
 
     async def _batch_add_belongs_to_relations_type_aware(
-        self, chunk_results: List[Tuple], multimodal_data_list: List[Dict[str, Any]]
+        self,
+        chunk_results: List[Tuple],
+        multimodal_data_list: List[Dict[str, Any]],
+        doc_id: str,
     ) -> List[Tuple]:
         """Add belongs_to relations for multimodal entities"""
         # Create mapping from chunk_id to modal_entity_name
@@ -1436,7 +1615,9 @@ class ProcessorMixin:
             formatted_chunk_content = self._apply_chunk_template(
                 content_type, original_item, description
             )
-            chunk_id = compute_mdhash_id(formatted_chunk_content, prefix="chunk-")
+            chunk_id = compute_ingest_chunk_id(
+                doc_id, data["chunk_order_index"], formatted_chunk_content
+            )
 
             chunk_to_modal_entity[chunk_id] = data["entity_info"]["entity_name"]
             chunk_to_file_path[chunk_id] = data.get("file_path", "multimodal_content")
@@ -2175,16 +2356,66 @@ class ProcessorMixin:
 
         # Step 1: Separate text and multimodal content
         text_content, multimodal_items = separate_content(normalized_content_list)
+        document_parts: List[str] | None = None
 
-        if not text_content.strip():
-            text_content = self._plaintext_from_mineru_blocks(normalized_content_list)
-        if not text_content.strip():
-            text_parts = []
-            for item in normalized_content_list:
-                candidate = item.get("text")
-                if isinstance(candidate, str) and candidate.strip():
-                    text_parts.append(candidate.strip())
-            text_content = "\n\n".join(text_parts)
+        if skip_multimodal_processing:
+            document_parts = self._build_document_parts_for_ingest(
+                normalized_content_list
+            )
+            inline_text = "\n\n".join(document_parts)
+            if inline_text.strip():
+                text_content = inline_text
+                img_count = inline_text.count("[图片]")
+                if img_count:
+                    self.logger.info(
+                        "skip_multimodal_processing: inline-indexed %d image ref(s) "
+                        "in document order",
+                        img_count,
+                    )
+            else:
+                if not text_content.strip():
+                    text_content = self._plaintext_from_mineru_blocks(
+                        normalized_content_list
+                    )
+                if not text_content.strip():
+                    text_parts = []
+                    for item in normalized_content_list:
+                        candidate = item.get("text")
+                        if isinstance(candidate, str) and candidate.strip():
+                            text_parts.append(candidate.strip())
+                    text_content = "\n\n".join(text_parts)
+                table_blob = self._flatten_table_text_for_skip_multimodal(
+                    normalized_content_list
+                )
+                if table_blob:
+                    if text_content.strip():
+                        text_content = text_content.strip() + "\n\n" + table_blob
+                    else:
+                        text_content = table_blob
+                image_blob = flatten_image_refs_for_skip_multimodal(
+                    normalized_content_list
+                )
+                if image_blob:
+                    if text_content.strip():
+                        text_content = text_content.strip() + "\n\n" + image_blob
+                    else:
+                        text_content = image_blob
+            if not document_parts and text_content.strip():
+                document_parts = [
+                    p.strip() for p in text_content.split("\n\n") if p.strip()
+                ]
+        else:
+            if not text_content.strip():
+                text_content = self._plaintext_from_mineru_blocks(
+                    normalized_content_list
+                )
+            if not text_content.strip():
+                text_parts = []
+                for item in normalized_content_list:
+                    candidate = item.get("text")
+                    if isinstance(candidate, str) and candidate.strip():
+                        text_parts.append(candidate.strip())
+                text_content = "\n\n".join(text_parts)
 
         # Step 1.5: Set content source for context extraction in multimodal processing
         if hasattr(self, "set_content_source_for_context") and multimodal_items:
@@ -2198,7 +2429,10 @@ class ProcessorMixin:
         # Step 2: Insert pure text content with all parameters
         if self.config.allow_embedding_only_ingestion:
             await self._insert_text_content_embedding_only(
-                text_content=text_content, file_ref=file_ref, doc_id=doc_id
+                text_content=text_content,
+                file_ref=file_ref,
+                doc_id=doc_id,
+                document_parts=document_parts,
             )
             self.logger.info(
                 "Embedding-only ingestion enabled: inserted text-only chunks from content list."
@@ -2230,6 +2464,7 @@ class ProcessorMixin:
                 split_by_character=split_by_character,
                 split_by_character_only=split_by_character_only,
                 ids=doc_id,
+                document_parts=document_parts if skip_multimodal_processing else None,
             )
             if callback_manager is not None:
                 insert_duration = time.time() - insert_start
@@ -2241,6 +2476,11 @@ class ProcessorMixin:
                 )
             if skip_multimodal_processing:
                 await self._mark_multimodal_processing_complete(doc_id)
+                await self._persist_table_matrix_index(
+                    doc_id=doc_id,
+                    file_ref=file_ref,
+                    document_parts=document_parts,
+                )
                 self.logger.info(
                     "skip_multimodal_processing=True: text ingested via LightRAG; "
                     "skipping multimodal batch for this document."

@@ -28,6 +28,7 @@ from lightrag.operate import extract_entities, merge_nodes_and_edges
 
 # Import prompt templates
 from raganything.prompt import PROMPTS
+from raganything.utils import compute_ingest_chunk_id
 
 
 @dataclass
@@ -473,7 +474,11 @@ class BaseModalProcessor:
     ) -> Tuple[str, Dict[str, Any]]:
         """Create entity and text chunk"""
         # Create chunk
-        chunk_id = compute_mdhash_id(str(modal_chunk), prefix="chunk-")
+        chunk_id = compute_ingest_chunk_id(
+            doc_id if doc_id else file_path,
+            chunk_order_index,
+            str(modal_chunk),
+        )
         tokens = len(self.tokenizer.encode(modal_chunk))
 
         # Use provided doc_id or generate one from chunk_id for backward compatibility

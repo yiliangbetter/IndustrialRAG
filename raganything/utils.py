@@ -1,59 +1,151 @@
 """
 Utility functions for RAGAnything
 
-Contains helper functions for content separation, text insertion, and other utilities
+Facade module: generic helpers live here; term alignment, image-text
+pairing, ingest coalescing and insertion were split into text_align,
+image_context, ingest_coalesce and ingest_insert (stage-1 refactor, see
+docs/utils_refactor_schema_induction.md). All previous public and
+private names remain importable from raganything.utils.
 """
 
 import base64
-from typing import Dict, List, Any, Tuple
 from pathlib import Path
+
 from lightrag.utils import logger
 
-
-def separate_content(
-    content_list: List[Dict[str, Any]],
-) -> Tuple[str, List[Dict[str, Any]]]:
-    """
-    Separate text content and multimodal content
-
-    Args:
-        content_list: Content list from MinerU parsing
-
-    Returns:
-        (text_content, multimodal_items): Pure text content and multimodal items list
-    """
-    text_parts = []
-    multimodal_items = []
-
-    for item in content_list:
-        content_type = item.get("type", "text")
-
-        if content_type == "text":
-            # Text content
-            text = item.get("text", "")
-            if text.strip():
-                text_parts.append(text)
-        else:
-            # Multimodal content (image, table, equation, etc.)
-            multimodal_items.append(item)
-
-    # Merge all text content
-    text_content = "\n\n".join(text_parts)
-
-    logger.info("Content separation complete:")
-    logger.info(f"  - Text content length: {len(text_content)} characters")
-    logger.info(f"  - Multimodal items count: {len(multimodal_items)}")
-
-    # Count multimodal types
-    modal_types = {}
-    for item in multimodal_items:
-        modal_type = item.get("type", "unknown")
-        modal_types[modal_type] = modal_types.get(modal_type, 0) + 1
-
-    if modal_types:
-        logger.info(f"  - Multimodal type distribution: {modal_types}")
-
-    return text_content, multimodal_items
+from .text_align import (  # noqa: F401
+    _COALESCE_HEADING_MAX_CHARS,
+    _SECTION_HEADING_LINE_RE,
+    _SHORT_LABEL_ANCHOR_RUN_LEN,
+    _SHORT_LABEL_MAX_LEN,
+    _SHORT_LABEL_MIN_SHARED_BIGRAMS,
+    _best_focus_subspan,
+    _best_overlap_cjk_run,
+    _focus_midsection_bigram_hits,
+    _focus_run_for_bag,
+    _is_section_heading_line,
+    _join_caption_field,
+    _longest_cjk_run,
+    discriminative_terms,
+    image_label_text,
+    label_bigram_coverage,
+    short_label_bag_aligns,
+    substantive_bigrams,
+    text_term_alignment,
+    text_term_alignment_symmetric,
+)
+from .image_context import (  # noqa: F401
+    _ABOVE_IMAGE_DISTANCE_PENALTY,
+    _BBOX_MATCH_MAX_DIST,
+    _BULLET_PREFIX_RE,
+    _CAPTION_INFER_MAX_GAP,
+    _CAPTION_INFER_MAX_LEN,
+    _CAPTION_INFER_WINDOW,
+    _LABEL_ALIGN_MIN,
+    _READING_ORDER_IMAGE_WINDOW,
+    _TEXT_AFTER_IMAGE_PENALTY,
+    _TEXT_BEFORE_IMAGE_BONUS,
+    _anchor_pairing_priority,
+    _bbox_bottom,
+    _bbox_center,
+    _bbox_top,
+    _layout_distance_for_text_image_pair,
+    _looks_like_section_heading,
+    _text_image_layout_distance,
+    anchor_context_for_image,
+    best_image_for_text_item,
+    context_text_for_image,
+    image_label_for_item,
+    infer_figure_label_from_layout,
+    neighbor_context_text,
+    plan_text_image_assignments,
+    resolve_image_caption,
+    resolve_image_footnote,
+    separate_content,
+)
+from .ingest_coalesce import (  # noqa: F401
+    _COALESCE_HEADING_LOOKAHEAD,
+    _COALESCE_IMAGE_LOOKAHEAD,
+    _COALESCE_METADATA_LOOKAHEAD,
+    _FIELD_KEY_RE,
+    _IMAGE_REF_MARKER,
+    _INGEST_IMAGE_PATH_RE,
+    _INGEST_SEGMENT_DELIMITER,
+    _SCHEMA_MIN_KEYS,
+    _SCHEMA_MIN_REPEAT,
+    _TABLE_INGEST_MARKER,
+    _TABLE_ROW_RE,
+    _assemble_record_section_segments,
+    _best_heading_body_score_before,
+    _coalesce_immediate_text_image_segments,
+    _coalesce_sub_parts_by_section,
+    _collect_record_section_parts,
+    _context_from_ref_segment,
+    _dedupe_key_for_image_segment,
+    _explode_overmerged_segments,
+    _follows_record_subsection,
+    _has_backward_procedure_for_heading,
+    _heading_body_merge_score,
+    _image_label_from_ref_segment,
+    _image_match_text_from_ref_segment,
+    _ingest_chunk_token_size,
+    _is_image_ref_segment,
+    _is_orphan_heading_segment,
+    _is_orphan_record_field_segment,
+    _is_orphan_record_metadata_only_segment,
+    _is_thin_section_lead_segment,
+    _line_field_key,
+    _lookahead_pair_text_image_segments,
+    _merge_orphan_heading_segments,
+    _merge_orphan_record_metadata_segments,
+    _merge_thin_section_with_following_figure,
+    _merge_trailing_orphan_headings_backward,
+    _merge_trailing_procedure_into_preceding,
+    _merge_unheaded_fields_with_heading_sections,
+    _part_starts_section_heading,
+    _preceding_section_accepts_trailing_fields,
+    _record_section_step_closed,
+    _record_step_alignment,
+    _section_heading_needs_field_merge,
+    _segment_field_keys,
+    _segment_first_line,
+    _segment_has_field_line,
+    _segment_has_inline_image,
+    _segment_has_initiator,
+    _segment_has_closer,
+    _segment_has_record_body,
+    _segment_has_record_cycle,
+    _segment_starts_new_section,
+    _segment_token_count,
+    _should_collect_record_subsection,
+    _split_block_at_trailing_orphan_heading,
+    _split_image_blocks_in_segment,
+    _split_multi_image_segments,
+    _split_overmerged_record_segment,
+    _split_sub_parts_at_section_heading_boundaries,
+    _split_table_html_segment,
+    _split_text_by_token_size,
+    DocFieldSchema,
+    build_image_ref_block,
+    build_table_aware_ingest_segments,
+    coalesce_parts_for_embedding_ingest,
+    coalesce_text_image_segments,
+    compute_table_aware_ingest_segments,
+    flatten_image_refs_for_skip_multimodal,
+    induce_field_schema,
+    prepare_table_aware_ingest_segments,
+    table_aware_ingest_enabled,
+)
+from .ingest_insert import (  # noqa: F401
+    _resolve_ingest_segments,
+    _status_field,
+    compute_ingest_chunk_id,
+    get_processor_for_type,
+    get_processor_supports,
+    insert_doc_scoped_text_content,
+    insert_text_content,
+    insert_text_content_with_multimodal_content,
+)
 
 
 def encode_image_to_base64(image_path: str) -> str:
@@ -141,138 +233,3 @@ def validate_image_file(image_path: str, max_size_mb: int = 50) -> bool:
     except Exception as e:
         logger.error(f"Error validating image file {image_path}: {e}")
         return False
-
-
-async def insert_text_content(
-    lightrag,
-    input: str | list[str],
-    split_by_character: str | None = None,
-    split_by_character_only: bool = False,
-    ids: str | list[str] | None = None,
-    file_paths: str | list[str] | None = None,
-):
-    """
-    Insert pure text content into LightRAG
-
-    Args:
-        lightrag: LightRAG instance
-        input: Single document string or list of document strings
-        split_by_character: if split_by_character is not None, split the string by character, if chunk longer than
-        chunk_token_size, it will be split again by token size.
-        split_by_character_only: if split_by_character_only is True, split the string by character only, when
-        split_by_character is None, this parameter is ignored.
-        ids: single string of the document ID or list of unique document IDs, if not provided, MD5 hash IDs will be generated
-        file_paths: single string of the file path or list of file paths, used for citation
-    """
-    logger.info("Starting text content insertion into LightRAG...")
-
-    # Use LightRAG's insert method with all parameters
-    await lightrag.ainsert(
-        input=input,
-        file_paths=file_paths,
-        split_by_character=split_by_character,
-        split_by_character_only=split_by_character_only,
-        ids=ids,
-    )
-
-    logger.info("Text content insertion complete")
-
-
-async def insert_text_content_with_multimodal_content(
-    lightrag,
-    input: str | list[str],
-    multimodal_content: list[dict[str, any]] | None = None,
-    split_by_character: str | None = None,
-    split_by_character_only: bool = False,
-    ids: str | list[str] | None = None,
-    file_paths: str | list[str] | None = None,
-    scheme_name: str | None = None,
-):
-    """
-    Insert pure text content into LightRAG
-
-    Args:
-        lightrag: LightRAG instance
-        input: Single document string or list of document strings
-        multimodal_content: Multimodal content list (optional)
-        split_by_character: if split_by_character is not None, split the string by character, if chunk longer than
-        chunk_token_size, it will be split again by token size.
-        split_by_character_only: if split_by_character_only is True, split the string by character only, when
-        split_by_character is None, this parameter is ignored.
-        ids: single string of the document ID or list of unique document IDs, if not provided, MD5 hash IDs will be generated
-        file_paths: single string of the file path or list of file paths, used for citation
-        scheme_name: scheme name (optional)
-    """
-    logger.info("Starting text content insertion into LightRAG...")
-
-    # Use LightRAG's insert method with all parameters
-    try:
-        await lightrag.ainsert(
-            input=input,
-            multimodal_content=multimodal_content,
-            file_paths=file_paths,
-            split_by_character=split_by_character,
-            split_by_character_only=split_by_character_only,
-            ids=ids,
-            scheme_name=scheme_name,
-        )
-    except Exception as e:
-        logger.info(f"Error: {e}")
-        logger.info(
-            "If the error is caused by the ainsert function not having a multimodal content parameter, please update the raganything branch of lightrag"
-        )
-
-    logger.info("Text content insertion complete")
-
-
-def get_processor_for_type(modal_processors: Dict[str, Any], content_type: str):
-    """
-    Get appropriate processor based on content type
-
-    Args:
-        modal_processors: Dictionary of available processors
-        content_type: Content type
-
-    Returns:
-        Corresponding processor instance
-    """
-    # Direct mapping to corresponding processor
-    if content_type == "image":
-        return modal_processors.get("image")
-    elif content_type == "table":
-        return modal_processors.get("table")
-    elif content_type == "equation":
-        return modal_processors.get("equation")
-    else:
-        # For other types, use generic processor
-        return modal_processors.get("generic")
-
-
-def get_processor_supports(proc_type: str) -> List[str]:
-    """Get processor supported features"""
-    supports_map = {
-        "image": [
-            "Image content analysis",
-            "Visual understanding",
-            "Image description generation",
-            "Image entity extraction",
-        ],
-        "table": [
-            "Table structure analysis",
-            "Data statistics",
-            "Trend identification",
-            "Table entity extraction",
-        ],
-        "equation": [
-            "Mathematical formula parsing",
-            "Variable identification",
-            "Formula meaning explanation",
-            "Formula entity extraction",
-        ],
-        "generic": [
-            "General content analysis",
-            "Structured processing",
-            "Entity extraction",
-        ],
-    }
-    return supports_map.get(proc_type, ["Basic processing"])

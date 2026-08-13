@@ -18,6 +18,7 @@ Usage (process-global switch)::
 from __future__ import annotations
 
 import logging
+import os
 import threading
 from typing import Any, Dict
 
@@ -154,3 +155,42 @@ def get_available_languages() -> list[str]:
     # Include known lazy-loadable languages
     all_langs = set(_PROMPT_LANGUAGES.keys()) | {"zh"}
     return sorted(all_langs)
+
+
+def _normalize_env_language_token(raw: str) -> str | None:
+    token = raw.strip().lower()
+    if not token:
+        return None
+    if token in ("zh", "cn", "chinese", "中文", "chs", "zh-cn", "zh_cn"):
+        return "zh"
+    if token in ("en", "english", "英文"):
+        return "en"
+    return token
+
+
+def resolve_prompt_language_from_env() -> str | None:
+    """Map env vars to a prompt language code, or None to keep the default."""
+    explicit = _normalize_env_language_token(os.getenv("RAG_PROMPT_LANGUAGE", ""))
+    if explicit:
+        return explicit
+    summary = _normalize_env_language_token(os.getenv("SUMMARY_LANGUAGE", ""))
+    if summary:
+        return summary
+    return None
+
+
+def apply_prompt_language_from_env() -> str:
+    """Apply ``RAG_PROMPT_LANGUAGE`` or ``SUMMARY_LANGUAGE`` to global PROMPTS."""
+    lang = resolve_prompt_language_from_env()
+    if lang is None:
+        return get_prompt_language()
+    try:
+        set_prompt_language(lang)
+    except ValueError:
+        # Bad/typo env must not crash import-time pipeline CLI (--help, argparse).
+        logger.warning(
+            "Ignoring invalid prompt language from env: %r (keeping %s)",
+            lang,
+            get_prompt_language(),
+        )
+    return get_prompt_language()
