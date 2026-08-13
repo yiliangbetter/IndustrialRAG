@@ -2856,12 +2856,6 @@ def filter_docs_cited_by_answer(
                 meta["query_section_anchor"] = qsec_meta
             elif meta.get("mode") == "pending_query_section_anchor":
                 meta["query_section_anchor"] = qsec_meta
-    if _domain_schema.matches_special_pattern(query or "") and not span_keep:
-        kept = [
-            doc
-            for doc in kept
-            if not extract_image_refs_from_context(_doc_content(doc).strip())
-        ]
     if not kept:
         meta["mode"] = "answer_no_chunk_match"
         meta["after"] = 0

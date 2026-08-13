@@ -17,8 +17,6 @@
 
   "filename_truncate_markers": ["维护保养"],
 
-  "special_query_patterns": ["开机前"],
-
   "machine_class_suffixes": ["封边机", "钻", "中心"],
 
   "catalog_page_marker": "本手册适用产品型号",

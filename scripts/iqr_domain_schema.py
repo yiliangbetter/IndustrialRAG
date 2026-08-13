@@ -41,7 +41,6 @@ _FALLBACK: dict[str, Any] = {
     "footnote_labels": ["注", "备注"],
     "paragraph_connectors": ["此外", "另外", "同时", "除此之外"],
     "filename_truncate_markers": ["维护保养"],
-    "special_query_patterns": ["开机前"],
     "machine_class_suffixes": ["封边机", "钻", "中心"],
     "catalog_page_marker": "本手册适用产品型号",
     "image_block_fields": ["图片路径", "页码", "关联正文", "图注", "脚注"],
@@ -60,7 +59,6 @@ class DomainSchema:
         self._footnote_labels_set = set(data.get("footnote_labels") or [])
         self._connectors_set = set(data.get("paragraph_connectors") or [])
         self._truncate_markers = list(data.get("filename_truncate_markers") or [])
-        self._special_patterns = list(data.get("special_query_patterns") or [])
         self._machine_class_suffixes = list(data.get("machine_class_suffixes") or [])
 
     # --- List properties ---
@@ -94,10 +92,6 @@ class DomainSchema:
         return list(self._truncate_markers)
 
     @property
-    def special_query_patterns(self) -> list[str]:
-        return list(self._special_patterns)
-
-    @property
     def machine_class_suffixes(self) -> list[str]:
         return list(self._machine_class_suffixes)
 
@@ -122,13 +116,6 @@ class DomainSchema:
 
     def is_paragraph_connector(self, text: str) -> bool:
         return text in self._connectors_set
-
-    def matches_special_pattern(self, query: str) -> str | None:
-        """Return the first special pattern found in query, or None."""
-        for pat in self._special_patterns:
-            if pat in query:
-                return pat
-        return None
 
     def truncate_filename(self, title: str) -> str:
         """Strip domain suffix markers from a PDF title to get the machine name."""
