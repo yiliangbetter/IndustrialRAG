@@ -51,13 +51,24 @@ class QueryMixin:
                 if isinstance(item, dict):
                     normalized_item = {}
                     for key, value in item.items():
-                        # For file paths, use basename to make cache more portable
+                        # Keep path identity in the cache key. Basename-only keys
+                        # collide across documents that share MinerU names like
+                        # image_0.png / chart.png in different folders.
                         if key in [
                             "img_path",
                             "image_path",
                             "file_path",
                         ] and isinstance(value, str):
-                            normalized_item[key] = Path(value).name
+                            path_value = value.strip()
+                            if path_value:
+                                try:
+                                    normalized_item[key] = str(
+                                        Path(path_value).expanduser().resolve()
+                                    )
+                                except (OSError, RuntimeError, ValueError):
+                                    normalized_item[key] = path_value
+                            else:
+                                normalized_item[key] = path_value
                         # For large content, create a hash instead of storing directly
                         elif (
                             key in ["table_data", "table_body"]
