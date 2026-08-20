@@ -25,6 +25,7 @@ from lightrag.lightrag import LightRAG
 from dataclasses import asdict
 from lightrag.kg.shared_storage import get_namespace_data, get_pipeline_status_lock
 from lightrag.operate import extract_entities, merge_nodes_and_edges
+from raganything.utils import snapshot_kg_recovery_anchors, union_kg_recovery_anchors
 
 # Import prompt templates
 from raganything.prompt import PROMPTS
@@ -798,8 +799,13 @@ class BaseModalProcessor:
             # Merge with correct file_path parameter
             file_path = chunk_data.get("file_path", "manual_creation")
             doc_id = chunk_data.get("full_doc_id")
+            prior_entities, prior_relations = await snapshot_kg_recovery_anchors(
+                self.lightrag.full_entities,
+                self.lightrag.full_relations,
+                doc_id,
+            )
             await merge_nodes_and_edges(
-                chunk_results=chunk_results,
+                chunk_results=processed_chunk_results,
                 knowledge_graph_inst=self.knowledge_graph_inst,
                 entity_vdb=self.entities_vdb,
                 relationships_vdb=self.relationships_vdb,
@@ -815,6 +821,13 @@ class BaseModalProcessor:
                 current_file_number=1,
                 total_files=1,
                 file_path=file_path,
+            )
+            await union_kg_recovery_anchors(
+                self.lightrag.full_entities,
+                self.lightrag.full_relations,
+                doc_id,
+                prior_entities,
+                prior_relations,
             )
 
             # Ensure all storage updates are complete
