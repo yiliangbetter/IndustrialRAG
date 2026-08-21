@@ -116,7 +116,9 @@ async def test_async_main_exits_when_data_root_missing(bigraph, monkeypatch, tmp
 
 
 @pytest.mark.asyncio
-async def test_async_main_exits_when_llm_api_key_missing(bigraph, monkeypatch, tmp_path):
+async def test_async_main_exits_when_llm_api_key_missing(
+    bigraph, monkeypatch, tmp_path
+):
     repo = tmp_path / "repo"
     (repo / "output" / "data_upload_test_v3").mkdir(parents=True)
     monkeypatch.delenv("OPENAI_API_KEY", raising=False)
@@ -211,7 +213,9 @@ async def test_async_main_ingests_list_json_and_skips_multimodal_by_default(
 @pytest.mark.asyncio
 async def test_no_skip_multimodal_flag_is_forwarded(bigraph, monkeypatch, tmp_path):
     repo = tmp_path / "repo"
-    _write_content_list(repo, "doc_content_list_v2.json", [{"type": "text", "text": "x"}])
+    _write_content_list(
+        repo, "doc_content_list_v2.json", [{"type": "text", "text": "x"}]
+    )
     monkeypatch.setenv("LLM_BINDING_API_KEY", "sk-from-binding")
     monkeypatch.delenv("OPENAI_API_KEY", raising=False)
     monkeypatch.setenv("EMBEDDING_BACKEND", "openai")
@@ -274,9 +278,7 @@ async def test_ingest_exception_continues_and_still_finalizes(
     )
 
     stack = _IngestStack()
-    stack.rag.insert_content_list = AsyncMock(
-        side_effect=[RuntimeError("boom"), None]
-    )
+    stack.rag.insert_content_list = AsyncMock(side_effect=[RuntimeError("boom"), None])
     with patch("lightrag.utils.EmbeddingFunc", return_value=stack.embedding):
         with patch("lightrag.LightRAG", return_value=stack.lightrag):
             with patch("raganything.RAGAnything", side_effect=stack.rag_ctor):

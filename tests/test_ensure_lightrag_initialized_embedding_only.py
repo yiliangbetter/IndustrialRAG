@@ -52,13 +52,9 @@ def test_embedding_only_disables_multimodal_processor_flags(monkeypatch, tmp_pat
 
 
 @pytest.mark.asyncio
-async def test_embedding_only_skips_failed_parser_installation(
-    monkeypatch, tmp_path
-):
+async def test_embedding_only_skips_failed_parser_installation(monkeypatch, tmp_path):
     parser = StubParser(installed=False)
-    rag, stub, _ = _make_rag(
-        monkeypatch, tmp_path, embedding_only=True, parser=parser
-    )
+    rag, stub, _ = _make_rag(monkeypatch, tmp_path, embedding_only=True, parser=parser)
 
     class FakeStatus:
         name = "INITIALIZED"
@@ -83,9 +79,7 @@ async def test_parser_failure_is_fail_closed_without_embedding_only(
     monkeypatch, tmp_path
 ):
     parser = StubParser(installed=False)
-    rag, stub, _ = _make_rag(
-        monkeypatch, tmp_path, embedding_only=False, parser=parser
-    )
+    rag, stub, _ = _make_rag(monkeypatch, tmp_path, embedding_only=False, parser=parser)
 
     result = await rag._ensure_lightrag_initialized()
 
@@ -96,13 +90,9 @@ async def test_parser_failure_is_fail_closed_without_embedding_only(
 
 
 @pytest.mark.asyncio
-async def test_missing_llm_fails_closed_without_embedding_only(
-    monkeypatch, tmp_path
-):
+async def test_missing_llm_fails_closed_without_embedding_only(monkeypatch, tmp_path):
     parser = StubParser(installed=True)
-    rag, _, _ = _make_rag(
-        monkeypatch, tmp_path, embedding_only=False, parser=parser
-    )
+    rag, _, _ = _make_rag(monkeypatch, tmp_path, embedding_only=False, parser=parser)
     rag.lightrag = None
     rag.llm_model_func = None
     rag.embedding_func = MagicMock()
@@ -154,9 +144,7 @@ async def test_embedding_only_installs_llm_placeholder_and_creates_lightrag(
             created["kwargs"] = kwargs
             self.workspace = "ws"
             self.__dict__.update(kwargs)
-            self.key_string_value_json_storage_cls = (
-                lambda **kw: FakeParseCache()
-            )
+            self.key_string_value_json_storage_cls = lambda **kw: FakeParseCache()
             self.initialize_storages = AsyncMock()
 
     async def fake_pipeline_status():
