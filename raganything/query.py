@@ -75,7 +75,10 @@ class QueryMixin:
 
         cache_data["multimodal_content"] = normalized_content
 
-        # Add relevant kwargs to cache data
+        # Include kwargs that change retrieval or generation. Omitting these
+        # caused silent wrong-answer cache hits (e.g. conversation_history /
+        # only_need_context / enable_rerank differing across otherwise identical
+        # multimodal queries).
         relevant_kwargs = {
             k: v
             for k, v in kwargs.items()
@@ -84,11 +87,21 @@ class QueryMixin:
                 "stream",
                 "response_type",
                 "top_k",
+                "chunk_top_k",
                 "max_tokens",
+                "max_entity_tokens",
+                "max_relation_tokens",
+                "max_total_tokens",
                 "temperature",
                 "system_prompt",
-                # "only_need_context",
-                # "only_need_prompt",
+                "user_prompt",
+                "only_need_context",
+                "only_need_prompt",
+                "hl_keywords",
+                "ll_keywords",
+                "conversation_history",
+                "enable_rerank",
+                "include_references",
             ]
         }
         cache_data.update(relevant_kwargs)
