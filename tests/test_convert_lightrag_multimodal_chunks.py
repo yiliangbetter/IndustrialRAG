@@ -116,9 +116,7 @@ class TestConvertToLightragChunksTypeAware:
         assert len(chunks) == 2
         orders = sorted(chunk["chunk_order_index"] for chunk in chunks.values())
         assert orders == [0, 5]
-        by_order = {
-            chunk["chunk_order_index"]: chunk for chunk in chunks.values()
-        }
+        by_order = {chunk["chunk_order_index"]: chunk for chunk in chunks.values()}
         assert by_order[0]["modal_entity_name"] == "A"
         assert by_order[5]["modal_entity_name"] == "B"
 
