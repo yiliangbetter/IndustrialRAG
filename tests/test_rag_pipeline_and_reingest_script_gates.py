@@ -100,7 +100,9 @@ def test_mineru_parse_kwargs_darwin_defaults_cpu(pipeline, monkeypatch):
 
 
 @pytest.mark.asyncio
-async def test_pipeline_async_main_rejects_missing_input_dir(pipeline, monkeypatch, tmp_path):
+async def test_pipeline_async_main_rejects_missing_input_dir(
+    pipeline, monkeypatch, tmp_path
+):
     missing = tmp_path / "nope"
     monkeypatch.setattr(
         sys,
@@ -120,13 +122,17 @@ async def test_pipeline_async_main_rejects_missing_input_dir(pipeline, monkeypat
 async def test_ingest_folder_exits_when_no_supported_files(pipeline, tmp_path):
     empty = tmp_path / "empty"
     empty.mkdir()
-    config = SimpleNamespace(supported_file_extensions=[".pdf"], display_content_stats=False)
+    config = SimpleNamespace(
+        supported_file_extensions=[".pdf"], display_content_stats=False
+    )
 
     with pytest.raises(SystemExit, match="No supported files"):
         await pipeline._ingest_folder(
             rag=SimpleNamespace(),
             config=config,
-            logger=SimpleNamespace(info=lambda *a, **k: None, error=lambda *a, **k: None),
+            logger=SimpleNamespace(
+                info=lambda *a, **k: None, error=lambda *a, **k: None
+            ),
             input_folder=empty,
             parser_output_dir=tmp_path / "out",
             parse_method="auto",

@@ -223,7 +223,9 @@ async def test_aquery_with_multimodal_continues_when_cache_ops_fail():
     assert any(
         "Error accessing multimodal query cache" in d for d in query.logger.debugs
     )
-    assert any("Error saving multimodal query to cache" in d for d in query.logger.debugs)
+    assert any(
+        "Error saving multimodal query to cache" in d for d in query.logger.debugs
+    )
     assert any(
         "Error persisting multimodal query cache" in d for d in query.logger.debugs
     )

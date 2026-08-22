@@ -105,8 +105,9 @@ def test_main_returns_1_when_batch_has_failures(export_mod, monkeypatch, tmp_pat
                 errors={"doc.pdf": "timeout"},
             )
 
-    with patch.object(export_mod, "_venv_path"), patch(
-        "raganything.batch_parser.BatchParser", FakeBatchParser
+    with (
+        patch.object(export_mod, "_venv_path"),
+        patch("raganything.batch_parser.BatchParser", FakeBatchParser),
     ):
         code = export_mod.main()
 
@@ -140,8 +141,9 @@ def test_main_returns_0_on_success(export_mod, monkeypatch, tmp_path):
                 errors={},
             )
 
-    with patch.object(export_mod, "_venv_path"), patch(
-        "raganything.batch_parser.BatchParser", FakeBatchParser
+    with (
+        patch.object(export_mod, "_venv_path"),
+        patch("raganything.batch_parser.BatchParser", FakeBatchParser),
     ):
         code = export_mod.main()
 
@@ -176,8 +178,9 @@ def test_main_clamps_timeout_and_workers(export_mod, monkeypatch, tmp_path):
         def process_batch(self, **kwargs):
             return SimpleNamespace(summary=lambda: "ok", failed_files=[], errors={})
 
-    with patch.object(export_mod, "_venv_path"), patch(
-        "raganything.batch_parser.BatchParser", FakeBatchParser
+    with (
+        patch.object(export_mod, "_venv_path"),
+        patch("raganything.batch_parser.BatchParser", FakeBatchParser),
     ):
         export_mod.main()
 
