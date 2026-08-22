@@ -176,8 +176,22 @@ class ProcessorMixin:
             lines.append(f"{prefix} {body}".strip() if prefix else body)
         return "\n".join(lines)
 
+    def _join_caption_body_footnote(
+        self, caption: Any, body: Any, footnote: Any = None
+    ) -> str:
+        parts = [
+            self._mineru_span_text(caption),
+            self._mineru_span_text(body),
+            self._mineru_span_text(footnote),
+        ]
+        return "\n".join(p for p in parts if p)
+
     def _plaintext_from_mineru_blocks(self, items: List[Dict[str, Any]]) -> str:
-        """Recover plaintext from MinerU v2 paragraph/title/list/table/image blocks."""
+        """Recover plaintext from MinerU v2 paragraph/title/list/table/image blocks.
+
+        Also harvests official v2 ``algorithm`` / ``index`` / ``equation_interline``
+        payloads so skip-multimodal ingest does not drop them.
+        """
         parts: List[str] = []
         for item in items:
             if not isinstance(item, dict):
@@ -198,8 +212,16 @@ class ProcessorMixin:
                 s = self._mineru_span_text(content.get("paragraph_content"))
             elif block_type == "title":
                 s = self._mineru_span_text(content.get("title_content"))
-            elif block_type == "list":
+            elif block_type in ("list", "index"):
                 s = self._mineru_list_items_text(content.get("list_items"))
+            elif block_type == "algorithm":
+                s = self._join_caption_body_footnote(
+                    content.get("algorithm_caption"),
+                    content.get("algorithm_content"),
+                    content.get("algorithm_footnote"),
+                )
+            elif block_type == "equation_interline":
+                s = self._mineru_span_text(content.get("math_content"))
             elif block_type == "table":
                 s = (content.get("html") or "").strip()
             elif block_type == "image":
