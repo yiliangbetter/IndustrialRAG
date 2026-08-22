@@ -41,6 +41,7 @@ logs/
 .gradio/
 .history/
 temp/
+out/
 
 # IDE / Editor Files
 .idea/
@@ -64,6 +65,8 @@ output*/
 TODO.md
 ignore_this.txt
 *.ignore.*
+current0611
+config/setup_complete.json
 
 # Project-specific files
 dickens*/
@@ -78,9 +81,15 @@ tiktoken_cache/
 # Cline files
 memory-bank/
 
+# Local workflow drafts / debugging scratch (never commit)
+_tmp_*
+.tmp_*
+/scripts/_*
+
 # AI
 .claude/
 .cursor/
+.qoder/
 # Keep PR-split working guide rule tracked (agents must follow docs/PR拆分合入主线操作说明.md)
 !.cursor/rules/
 .cursor/rules/*
