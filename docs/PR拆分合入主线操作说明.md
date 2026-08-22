@@ -144,6 +144,8 @@ scripts/query_doc_steering.py         ← 运行时依赖（1078 行）
 scripts/query_progress_hooks.py       ← 运行时依赖（944 行）
 docs/domain_schema_design.md
 scripts/_induce_field_schema.py       ← 客户切换工具
+raganything/ingest_runtime.py         ← 灌库取消机制（Web 灌库运行时依赖，lhq 提交 5f139b1）
+raganything/ingest_session_log.py     ← 灌库会话日志（同上）
 
 # ④ 测试
 tests/test_chunk_locality_anchor.py
@@ -152,6 +154,8 @@ tests/test_field_schema_induction.py
 tests/test_figure_targets.py
 tests/test_image_chunk_locality.py
 tests/test_ingest_coalesce_schema.py
+tests/test_clarify_context_kg_scope.py   ← lhq 提交 5f139b1（依赖 clarify_context，#47 范围）
+tests/test_llm_chunk_locality.py         ← lhq 提交 5f139b1（依赖 image_query_refs，#47 push-2 范围）
 tests/fixtures/                       ← 测试数据
 ```
 
@@ -268,6 +272,7 @@ scripts/standalone_rerank_stress.py
 scripts/stress_gpu_vram.py
 scripts/test_clarify_gate_batch.py
 scripts/time_clarify_gate.py
+tests/test_web_path_q15_grade.py      ← 依赖 scripts/run_web_path_q1_17.py（本 PR 范围），勿入 A2
 ```
 
 **合入后验证**（任选 smoke）：
@@ -389,13 +394,17 @@ git checkout lhq-rag-dev -- `
   scripts/query_progress_hooks.py `
   docs/domain_schema_design.md `
   scripts/_induce_field_schema.py `
+  raganything/ingest_runtime.py `
+  raganything/ingest_session_log.py `
   tests/fixtures `
   tests/test_chunk_locality_anchor.py `
   tests/test_clarify_candidate_skip_probe.py `
   tests/test_field_schema_induction.py `
   tests/test_figure_targets.py `
   tests/test_image_chunk_locality.py `
-  tests/test_ingest_coalesce_schema.py
+  tests/test_ingest_coalesce_schema.py `
+  tests/test_clarify_context_kg_scope.py `
+  tests/test_llm_chunk_locality.py
 
 git add -A
 git commit --no-verify -m "feat: domain schema externalization + runtime deps + unit tests"
@@ -494,7 +503,8 @@ git checkout lhq-rag-dev -- `
   scripts/standalone_rerank_stress.py `
   scripts/stress_gpu_vram.py `
   scripts/test_clarify_gate_batch.py `
-  scripts/time_clarify_gate.py
+  scripts/time_clarify_gate.py `
+  tests/test_web_path_q15_grade.py
 
 git add -A
 git commit -m "chore: add bench, replay, and eval tooling scripts"
@@ -769,3 +779,4 @@ flowchart LR
 *文档生成依据：2026-07-12 对 `lhq-rag-dev` 与 `origin/main` 的 diff 统计（`2665196` 起 `image_query_refs.py` 已剔除 legacy 死代码，较初版统计少约 2.1k 行）。*
 *§十一补充：2026-07-25 PR-A 评审收尾与全量验证约定。*
 *§二/三/五/七/十一 修订：2026-07-27——lhq 重组式重构完成，PR #47 拆为两次 push（A1-① raganything ~5K + A1-② iqr ~16K），A2 单独新 PR（pr-a2-schema，~3.6K）。批测脚本全部列入 PR-D。*
+*§三/5.3/5.6 修订：2026-08-22——lhq 补交灌库模块（lhq 提交 5f139b1）：`ingest_runtime.py`/`ingest_session_log.py` 及 2 个配套单测列入 A2；`test_web_path_q15_grade.py` 因依赖 `run_web_path_q1_17.py` 列入 PR-D；`.gitignore` 草稿清理（lhq 提交 e86a321）随 PR-B 交付。*
