@@ -996,23 +996,37 @@ class MineruParser(Parser):
 
         file_stem_subdir = output_dir / file_stem
         if file_stem_subdir.is_dir():
-            # Scan for actual output subdirectory instead of assuming method name
+            # Prefer the subdirectory that matches the requested method. A later
+            # OCR/VLM re-parse writes a sibling folder (e.g. ocr/ next to auto/)
+            # inside the same unique output dir; a first-match scan would keep
+            # returning the older parse and silently drop the new results.
             found = False
-            for subdir in file_stem_subdir.iterdir():
-                if not subdir.is_dir():
-                    continue
-                # Check if this subdirectory contains the expected JSON output file
-                candidate_json = subdir / f"{file_stem}_content_list.json"
-                if candidate_json.exists():
-                    # Found the actual output directory
-                    md_file = subdir / f"{file_stem}.md"
-                    json_file = candidate_json
-                    images_base_dir = subdir
-                    found = True
-                    cls.logger.info(
-                        f"Found MinerU output in subdirectory: {subdir.name}"
-                    )
-                    break
+            preferred_dir = file_stem_subdir / method
+            preferred_json = preferred_dir / f"{file_stem}_content_list.json"
+            if method and preferred_json.is_file():
+                md_file = preferred_dir / f"{file_stem}.md"
+                json_file = preferred_json
+                images_base_dir = preferred_dir
+                found = True
+                cls.logger.info(
+                    f"Found MinerU output in subdirectory: {preferred_dir.name}"
+                )
+            else:
+                # Scan for actual output subdirectory (hybrid/vlm backends use
+                # names like hybrid_auto/ that do not match method=auto).
+                for subdir in file_stem_subdir.iterdir():
+                    if not subdir.is_dir():
+                        continue
+                    candidate_json = subdir / f"{file_stem}_content_list.json"
+                    if candidate_json.exists():
+                        md_file = subdir / f"{file_stem}.md"
+                        json_file = candidate_json
+                        images_base_dir = subdir
+                        found = True
+                        cls.logger.info(
+                            f"Found MinerU output in subdirectory: {subdir.name}"
+                        )
+                        break
 
             # Fallback to method-based path if scanning didn't find output
             if not found:
