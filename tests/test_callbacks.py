@@ -87,6 +87,38 @@ class TestCallbackManager:
         mgr.dispatch("on_parse_start", file_path="test.pdf")
         assert len(cb.events) == 0
 
+    def test_unregister_never_registered_raises(self):
+        mgr = CallbackManager()
+        cb = RecordingCallback()
+        with pytest.raises(ValueError):
+            mgr.unregister(cb)
+
+    def test_double_unregister_raises(self):
+        mgr = CallbackManager()
+        cb = RecordingCallback()
+        mgr.register(cb)
+        mgr.unregister(cb)
+        with pytest.raises(ValueError):
+            mgr.unregister(cb)
+
+    def test_unregister_during_dispatch_still_notifies_snapshot(self):
+        mgr = CallbackManager()
+        later = RecordingCallback()
+
+        class UnregisterSelf(ProcessingCallback):
+            def on_parse_start(self, file_path, **kw):
+                mgr.unregister(self)
+                mgr.unregister(later)
+
+        first = UnregisterSelf()
+        mgr.register(first)
+        mgr.register(later)
+        mgr.dispatch("on_parse_start", file_path="test.pdf")
+        assert later.events == [("parse_start", "test.pdf")]
+        later.events.clear()
+        mgr.dispatch("on_parse_start", file_path="again.pdf")
+        assert later.events == []
+
     def test_register_rejects_non_callback(self):
         mgr = CallbackManager()
         with pytest.raises(TypeError, match="ProcessingCallback"):
