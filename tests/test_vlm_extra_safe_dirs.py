@@ -90,9 +90,7 @@ async def test_extra_safe_dirs_allows_image_outside_default_sandbox(
 
 
 @pytest.mark.asyncio
-async def test_bad_extra_safe_dir_does_not_block_later_valid_dir(
-    tmp_path, monkeypatch
-):
+async def test_bad_extra_safe_dir_does_not_block_later_valid_dir(tmp_path, monkeypatch):
     working_dir = tmp_path / "workspace"
     output_dir = tmp_path / "parser_output"
     cwd = tmp_path / "cwd"
