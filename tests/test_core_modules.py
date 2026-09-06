@@ -173,6 +173,16 @@ class TestSeparateContent:
         text, multimodal = separate_content(content)
         assert "no type field" in text
 
+    def test_list_code_chart_are_multimodal_not_text(self):
+        content = [
+            {"type": "list", "content": {"list_items": [{"item_content": "step 1"}]}},
+            {"type": "code", "content": {"code_body": "print(1)"}},
+            {"type": "chart", "img_path": "/abs/chart.png"},
+        ]
+        text, multimodal = separate_content(content)
+        assert text == ""
+        assert [item["type"] for item in multimodal] == ["list", "code", "chart"]
+
 
 # ── Image Encoding Tests ─────────────────────────────────────────
 
