@@ -27,6 +27,7 @@ Parser = _load_parser_class()
     [
         ("https://example.com/file.pdf", True),
         ("http://example.com/path?id=1", True),
+        ("http://[::1]/doc.pdf", True),
         ("/local/path/file.pdf", False),
         ("file.pdf", False),
         ("", False),
@@ -59,6 +60,24 @@ def test_download_file_uses_extension_from_url_path(tmp_path):
         mock_open.assert_called_once()
         _, kwargs = mock_open.call_args
         assert kwargs.get("timeout") == 30, "must pass an explicit timeout"
+    finally:
+        if downloaded.exists():
+            downloaded.unlink()
+
+
+def test_download_file_keeps_pdf_suffix_when_url_has_query_string():
+    """Signed CDN URLs must not lose .pdf because of ?token= query params."""
+    parser = Parser()
+    response = _fake_response()
+
+    with patch("urllib.request.urlopen", return_value=response):
+        downloaded = parser._download_file(
+            "https://cdn.example.com/manuals/plant.pdf?X-Amz-Signature=abc&download=1"
+        )
+
+    try:
+        assert downloaded.suffix == ".pdf"
+        assert downloaded.read_bytes() == b"%PDF-1.4 fake"
     finally:
         if downloaded.exists():
             downloaded.unlink()
