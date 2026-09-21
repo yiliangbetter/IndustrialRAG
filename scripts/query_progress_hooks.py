@@ -7,7 +7,9 @@ import contextlib
 import copy
 from collections.abc import AsyncIterator
 from contextvars import ContextVar
+from dataclasses import dataclass, field
 from pathlib import Path
+import threading
 from typing import Any
 
 PHASE_RETRIEVE = "retrieve"
@@ -34,6 +36,7 @@ async def emit_query_phase(phase: str) -> None:
     """Emit a UI status line for the current query phase (gate or answer)."""
     await _emit(phase)
 
+
 _progress_queue: ContextVar[asyncio.Queue[dict[str, str]] | None] = ContextVar(
     "progress_queue", default=None
 )
@@ -54,11 +57,17 @@ def gate_probe_active() -> bool:
     return _gate_probe_active.get()
 
 
-_retrieval_context: ContextVar[str | None] = ContextVar("retrieval_context", default=None)
-_retrieved_docs_text: ContextVar[str | None] = ContextVar("retrieved_docs_text", default=None)
+_retrieval_context: ContextVar[str | None] = ContextVar(
+    "retrieval_context", default=None
+)
+_retrieved_docs_text: ContextVar[str | None] = ContextVar(
+    "retrieved_docs_text", default=None
+)
 _media_roots: ContextVar[list[Path] | None] = ContextVar("media_roots", default=None)
 _query_text: ContextVar[str | None] = ContextVar("query_text", default=None)
-_retrieved_docs: ContextVar[list[dict] | None] = ContextVar("retrieved_docs", default=None)
+_retrieved_docs: ContextVar[list[dict] | None] = ContextVar(
+    "retrieved_docs", default=None
+)
 _llm_chunks_for_images: ContextVar[list[dict] | None] = ContextVar(
     "llm_chunks_for_images", default=None
 )
@@ -95,12 +104,32 @@ _last_probe_raw_data: ContextVar[dict[str, Any] | None] = ContextVar(
 _clarify_context_injection: ContextVar[dict[str, Any] | None] = ContextVar(
     "clarify_context_injection", default=None
 )
-# Worker tasks copy ContextVar; parent finalize/dump reads these module-level snapshots.
-_query_debug_snapshot: dict[str, Any] = {}
-_retained_query_debug_snapshot: dict[str, Any] = {}
-_retained_llm_chunks_for_images: list[dict[str, Any]] = []
-_retained_rerank_docs: list[dict[str, Any]] = []
-_retained_rerank_docs_raw: list[dict[str, Any]] = []
+
+
+@dataclass
+class _QueryHookState:
+    """Mutable per-request state shared with worker tasks through ContextVar copying."""
+
+    debug_snapshot: dict[str, Any] = field(default_factory=dict)
+    retained_debug_snapshot: dict[str, Any] = field(default_factory=dict)
+    retained_llm_chunks_for_images: list[dict[str, Any]] = field(default_factory=list)
+    retained_rerank_docs: list[dict[str, Any]] = field(default_factory=list)
+    retained_rerank_docs_raw: list[dict[str, Any]] = field(default_factory=list)
+
+
+_query_hook_state: ContextVar[_QueryHookState | None] = ContextVar(
+    "query_hook_state", default=None
+)
+_query_hooks_install_lock = threading.Lock()
+_query_hooks_installed = False
+
+
+def _current_query_hook_state() -> _QueryHookState:
+    state = _query_hook_state.get()
+    if state is None:
+        state = _QueryHookState()
+        _query_hook_state.set(state)
+    return state
 
 
 def _chunks_from_hook_raw_data(raw_data: Any) -> list[dict]:
@@ -114,11 +143,12 @@ def _chunks_from_hook_raw_data(raw_data: Any) -> list[dict]:
 
 def _docs_for_image_finalize(snap: dict[str, Any] | None = None) -> list[dict]:
     """LLM chunks visible to ``finalize_inline_images`` (worker-safe)."""
+    state = _current_query_hook_state()
     live = _llm_chunks_for_images.get()
     if live:
         return list(live)
-    if _retained_llm_chunks_for_images:
-        return list(_retained_llm_chunks_for_images)
+    if state.retained_llm_chunks_for_images:
+        return list(state.retained_llm_chunks_for_images)
     snap = snap if isinstance(snap, dict) else _active_query_debug_snapshot()
     from_snap = snap.get("llm_chunks_for_images")
     if isinstance(from_snap, list) and from_snap:
@@ -135,23 +165,26 @@ def _docs_for_image_finalize(snap: dict[str, Any] | None = None) -> list[dict]:
 
 
 def _retain_query_debug_snapshot() -> None:
-    if not _query_debug_snapshot:
+    state = _current_query_hook_state()
+    if not state.debug_snapshot:
         return
-    _retained_query_debug_snapshot.clear()
-    _retained_query_debug_snapshot.update(_query_debug_snapshot)
+    state.retained_debug_snapshot.clear()
+    state.retained_debug_snapshot.update(state.debug_snapshot)
 
 
 def _active_query_debug_snapshot() -> dict[str, Any]:
-    if _query_debug_snapshot:
-        return dict(_query_debug_snapshot)
-    if _retained_query_debug_snapshot:
-        return dict(_retained_query_debug_snapshot)
+    state = _current_query_hook_state()
+    if state.debug_snapshot:
+        return dict(state.debug_snapshot)
+    if state.retained_debug_snapshot:
+        return dict(state.retained_debug_snapshot)
     return {}
 
 
 def _sync_query_debug_snapshot() -> None:
-    _query_debug_snapshot.clear()
-    _query_debug_snapshot.update(
+    snapshot = _current_query_hook_state().debug_snapshot
+    snapshot.clear()
+    snapshot.update(
         {
             "retrieval_context": _retrieval_context.get(),
             "retrieved_docs_text": _retrieved_docs_text.get(),
@@ -174,13 +207,14 @@ def _sync_query_debug_snapshot() -> None:
 
 def get_query_debug_state() -> dict[str, Any]:
     """Snapshot hook state for query debug dumps."""
+    state = _current_query_hook_state()
     snap = _active_query_debug_snapshot()
     live = {
         "retrieval_context": _retrieval_context.get(),
         "retrieved_docs_text": _retrieved_docs_text.get(),
         "retrieved_docs": _retrieved_docs.get(),
         "llm_chunks_for_images": _llm_chunks_for_images.get()
-        or list(_retained_llm_chunks_for_images)
+        or list(state.retained_llm_chunks_for_images)
         or None,
         "related_images": list(_related_images_selected.get() or []),
         "inline_placements": list(_inline_placements.get() or []),
@@ -520,8 +554,9 @@ def _sync_llm_chunks_for_images(query: str, chunks: list[dict]) -> None:
         matrix_added = 0
     _llm_chunks_table_matrix_supplement.set(matrix_added)
     _llm_chunks_for_images.set(merged)
-    _retained_llm_chunks_for_images.clear()
-    _retained_llm_chunks_for_images.extend(merged)
+    retained = _current_query_hook_state().retained_llm_chunks_for_images
+    retained.clear()
+    retained.extend(merged)
     _retrieved_docs.set(merged)
     if not (_rerank_figure_pool.get() or []):
         try:
@@ -549,16 +584,18 @@ def _sync_retrieved_docs_after_rerank(final_docs: list[dict]) -> None:
     """Snapshot rerank pool for optional subject-figure supplement at LLM chunk sync."""
     docs = list(final_docs or [])
     _rerank_docs.set(docs)
-    _retained_rerank_docs.clear()
-    _retained_rerank_docs.extend(docs)
+    retained = _current_query_hook_state().retained_rerank_docs
+    retained.clear()
+    retained.extend(docs)
 
 
 def _sync_rerank_docs_raw(docs: list[dict]) -> None:
     """CrossEncoder output before catalog KV boost (gate scoring)."""
     raw = list(docs or [])
     _rerank_docs_raw.set(raw)
-    _retained_rerank_docs_raw.clear()
-    _retained_rerank_docs_raw.extend(raw)
+    retained = _current_query_hook_state().retained_rerank_docs_raw
+    retained.clear()
+    retained.extend(raw)
 
 
 def get_rerank_pool_chunks() -> list[dict]:
@@ -566,8 +603,9 @@ def get_rerank_pool_chunks() -> list[dict]:
     rerank = _rerank_docs.get()
     if rerank:
         return list(rerank)
-    if _retained_rerank_docs:
-        return list(_retained_rerank_docs)
+    retained = _current_query_hook_state().retained_rerank_docs
+    if retained:
+        return list(retained)
     return []
 
 
@@ -576,8 +614,9 @@ def get_rerank_pool_chunks_raw() -> list[dict]:
     raw = _rerank_docs_raw.get()
     if raw:
         return list(raw)
-    if _retained_rerank_docs_raw:
-        return list(_retained_rerank_docs_raw)
+    retained = _current_query_hook_state().retained_rerank_docs_raw
+    if retained:
+        return list(retained)
     return []
 
 
@@ -590,19 +629,12 @@ def get_llm_input_chunks() -> list[dict]:
     return get_rerank_pool_chunks()
 
 
-@contextlib.asynccontextmanager
-async def query_progress_hooks() -> AsyncIterator[asyncio.Queue[dict[str, str]]]:
-    """Install hooks; yield a queue of ``{type, phase, text}`` status events."""
+def _install_query_hooks_unlocked() -> None:
+    """Install process-wide dispatchers once; request data stays in ContextVars."""
+    global _query_hooks_installed
+
     import lightrag.operate as op
     import lightrag.utils as ut
-
-    q: asyncio.Queue[dict[str, str]] = asyncio.Queue(maxsize=32)
-    token = _progress_queue.set(q)
-    _query_debug_snapshot.clear()
-    _retained_query_debug_snapshot.clear()
-    _retained_llm_chunks_for_images.clear()
-    _retained_rerank_docs.clear()
-    _retained_rerank_docs_raw.clear()
 
     orig_build_ctx = op._build_query_context
     orig_naive_query = op.naive_query
@@ -611,6 +643,8 @@ async def query_progress_hooks() -> AsyncIterator[asyncio.Queue[dict[str, str]]]
     orig_process_chunks = op.process_chunks_unified
 
     async def _build_query_context(*args: Any, **kwargs: Any):
+        if not progress_hooks_active():
+            return await orig_build_ctx(*args, **kwargs)
         injected = get_clarify_context_injection()
         if injected:
             from lightrag.base import QueryContextResult  # noqa: WPS433
@@ -657,13 +691,17 @@ async def query_progress_hooks() -> AsyncIterator[asyncio.Queue[dict[str, str]]]
             if rerank_docs:
                 _sync_llm_chunks_for_images(query, rerank_docs)
             else:
-                bundle_chunks = _chunks_from_hook_raw_data(getattr(ctx, "raw_data", None))
+                bundle_chunks = _chunks_from_hook_raw_data(
+                    getattr(ctx, "raw_data", None)
+                )
                 if bundle_chunks:
                     _sync_llm_chunks_for_images(query, bundle_chunks)
         _sync_query_debug_snapshot()
         return ctx
 
     async def _naive_query(*args: Any, **kwargs: Any):
+        if not progress_hooks_active():
+            return await orig_naive_query(*args, **kwargs)
         await _emit(PHASE_RETRIEVE)
         query = args[0] if args else kwargs.get("query", "")
         if isinstance(query, str) and query.strip():
@@ -677,6 +715,10 @@ async def query_progress_hooks() -> AsyncIterator[asyncio.Queue[dict[str, str]]]
         enable_rerank: bool = True,
         top_n: int | None = None,
     ):
+        if not progress_hooks_active():
+            return await orig_rerank(
+                query, retrieved_docs, global_config, enable_rerank, top_n
+            )
         if enable_rerank and retrieved_docs:
             await _emit(PHASE_RERANK)
         _query_text.set(query)
@@ -692,9 +734,7 @@ async def query_progress_hooks() -> AsyncIterator[asyncio.Queue[dict[str, str]]]
                 record_table_matrix_boost(pre_rerank=matrix_pre)
         except Exception:
             pass
-        docs = await orig_rerank(
-            query, pool, global_config, enable_rerank, top_n
-        )
+        docs = await orig_rerank(query, pool, global_config, enable_rerank, top_n)
         _sync_rerank_docs_raw(list(docs or []))
         try:
             from query_doc_steering import (  # noqa: WPS433
@@ -747,9 +787,7 @@ async def query_progress_hooks() -> AsyncIterator[asyncio.Queue[dict[str, str]]]
                     from iqr_store import _doc_basename  # noqa: WPS433
 
                     allowed = {
-                        fp
-                        for doc in retrieved_docs or []
-                        if (fp := _doc_basename(doc))
+                        fp for doc in retrieved_docs or [] if (fp := _doc_basename(doc))
                     }
                     kv_fig = _load_figure_chunks_for_manual_paths(
                         allowed, query, max_per_manual=8
@@ -768,6 +806,8 @@ async def query_progress_hooks() -> AsyncIterator[asyncio.Queue[dict[str, str]]]
         return final_docs
 
     async def _process_chunks_unified(*args: Any, **kwargs: Any):
+        if not progress_hooks_active():
+            return await orig_process_chunks(*args, **kwargs)
         query = args[0] if args else kwargs.get("query", "")
         if isinstance(query, str) and query.strip():
             _query_text.set(query)
@@ -784,10 +824,8 @@ async def query_progress_hooks() -> AsyncIterator[asyncio.Queue[dict[str, str]]]
                     args[1] if len(args) > 1 else kwargs.get("unique_chunks")
                 )
                 if isinstance(unique_chunks, list) and unique_chunks:
-                    expanded, _loc_meta = (
-                        supplement_unique_chunks_with_order_neighbors(
-                            query, unique_chunks
-                        )
+                    expanded, _loc_meta = supplement_unique_chunks_with_order_neighbors(
+                        query, unique_chunks
                     )
                     if len(expanded) > len(unique_chunks):
                         if len(args) > 1:
@@ -871,15 +909,29 @@ async def query_progress_hooks() -> AsyncIterator[asyncio.Queue[dict[str, str]]]
     ut.apply_rerank_if_enabled = _apply_rerank_if_enabled  # type: ignore[method-assign]
     op.process_chunks_unified = _process_chunks_unified  # type: ignore[method-assign]
     ut.process_chunks_unified = _process_chunks_unified  # type: ignore[method-assign]
+    _query_hooks_installed = True
+
+
+def _install_query_hooks() -> None:
+    if _query_hooks_installed:
+        return
+    with _query_hooks_install_lock:
+        if not _query_hooks_installed:
+            _install_query_hooks_unlocked()
+
+
+@contextlib.asynccontextmanager
+async def query_progress_hooks() -> AsyncIterator[asyncio.Queue[dict[str, str]]]:
+    """Activate per-request progress capture on install-once LightRAG hooks."""
+    _install_query_hooks()
+    q: asyncio.Queue[dict[str, str]] = asyncio.Queue(maxsize=32)
+    token = _progress_queue.set(q)
+    state = _QueryHookState()
+    _query_hook_state.set(state)
 
     try:
         yield q
     finally:
-        op._build_query_context = orig_build_ctx  # type: ignore[method-assign]
-        op.naive_query = orig_naive_query  # type: ignore[method-assign]
-        ut.apply_rerank_if_enabled = orig_rerank  # type: ignore[method-assign]
-        op.process_chunks_unified = orig_process_chunks  # type: ignore[method-assign]
-        ut.process_chunks_unified = orig_process_chunks  # type: ignore[method-assign]
         _progress_queue.reset(token)
         _retrieval_context.set(None)
         _retrieved_docs_text.set(None)
@@ -901,7 +953,7 @@ async def query_progress_hooks() -> AsyncIterator[asyncio.Queue[dict[str, str]]]
         _last_probe_raw_data.set(None)
         clear_clarify_context_injection()
         _retain_query_debug_snapshot()
-        _query_debug_snapshot.clear()
+        state.debug_snapshot.clear()
 
 
 async def _emit(phase: str) -> None:
@@ -924,21 +976,3 @@ async def _emit(phase: str) -> None:
         )
     except asyncio.QueueFull:
         pass
-
-
-def strip_think_tags(text: str) -> str:
-    """Remove chain-of-thought blocks from streamed LLM output."""
-    import re
-
-    if not text:
-        return text
-    tags = (
-        ("think", "think"),
-        ("redacted_reasoning", "redacted_reasoning"),
-    )
-    out = text
-    for open_name, close_name in tags:
-        o = "<" + open_name + ">"
-        c = "</" + close_name + ">"
-        out = re.sub(re.escape(o) + r"[\s\S]*?" + re.escape(c), "", out, flags=re.I)
-    return out.strip()

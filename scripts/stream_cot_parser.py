@@ -7,10 +7,12 @@ from typing import Literal
 
 Kind = Literal["thinking", "answer"]
 
-# (open_tag_name, close_tag_name)
-_COT_TAGS: tuple[tuple[str, str], ...] = (
-    ("think", "think"),
-    ("redacted_reasoning", "redacted_reasoning"),
+# Reasoning models use several equivalent wrappers. Keep the names in one
+# place so complete and streamed responses follow the same policy.
+_COT_TAG_NAMES: tuple[str, ...] = (
+    "think",
+    "thinking",
+    "redacted_reasoning",
 )
 
 
@@ -24,8 +26,8 @@ def _close_tag(name: str) -> str:
 
 def _tag_prefixes() -> list[str]:
     prefixes: list[str] = []
-    for open_name, close_name in _COT_TAGS:
-        for tag in (_open_tag(open_name), _close_tag(close_name)):
+    for name in _COT_TAG_NAMES:
+        for tag in (_open_tag(name), _close_tag(name)):
             for i in range(1, len(tag)):
                 prefixes.append(tag[:i])
     return sorted(set(prefixes), key=len, reverse=True)
@@ -53,13 +55,13 @@ def _keep_tail_for_partial_tag(buf: str, close_tag: str = "") -> int:
 def _find_earliest_open(buf: str) -> tuple[int, str, str] | None:
     best: tuple[int, str, str] | None = None
     lower = buf.lower()
-    for open_name, close_name in _COT_TAGS:
-        token = _open_tag(open_name)
+    for name in _COT_TAG_NAMES:
+        token = _open_tag(name)
         idx = lower.find(token.lower())
         if idx < 0:
             continue
         if best is None or idx < best[0]:
-            best = (idx, token, close_name)
+            best = (idx, token, name)
     return best
 
 

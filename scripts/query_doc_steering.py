@@ -24,8 +24,7 @@ _ROOT = Path(__file__).resolve().parents[1]
 
 # Manual step markers (①②…) — strip in user-facing answers, keep wording.
 _CIRCLED_STEP_BEFORE_CJK = re.compile(
-    r"[\u2460-\u2473\u3251-\u325f\u2776-\u277f\u24ea-\u24ff"
-    r"](?=\s*[\u4e00-\u9fff])"
+    r"[\u2460-\u2473\u3251-\u325f\u2776-\u277f\u24ea-\u24ff" r"](?=\s*[\u4e00-\u9fff])"
 )
 
 
@@ -147,8 +146,7 @@ class FilterReport:
         parts = [f"检索范围：{self.machine_label} 相关手册"]
         if self.removed_sources:
             names = [
-                r.get("title") or r.get("path", "")
-                for r in self.removed_sources[:4]
+                r.get("title") or r.get("path", "") for r in self.removed_sources[:4]
             ]
             extra = len(self.removed_sources) - len(names)
             tail = f" 等{extra}份" if extra > 0 else ""
@@ -314,7 +312,9 @@ def _catalog_chunk_relevant_to_query(query: str, doc: dict) -> bool:
         phrases = profile.get("query_phrases") or []
         if path and phrases:
             pn = path.replace(" ", "")
-            if not any(str(p).replace(" ", "") in pn for p in phrases if str(p).strip()):
+            if not any(
+                str(p).replace(" ", "") in pn for p in phrases if str(p).strip()
+            ):
                 return False
     terms = _query_discriminative_terms(query)
     if not terms:
@@ -598,10 +598,15 @@ def _matrix_store_path() -> Path:
 
 
 def _rag_storage_dir() -> Path:
+    for env_key in ("RAG_WEB_WORKING_DIR", "WORKING_DIR"):
+        raw = (os.getenv(env_key) or "").strip()
+        if raw:
+            path = Path(raw).expanduser()
+            return path.resolve() if path.is_absolute() else (_ROOT / path).resolve()
     try:
         from client_paths import get_rag_storage_dir  # noqa: WPS433
 
-        return Path(get_rag_storage_dir())
+        return Path(get_rag_storage_dir()).resolve()
     except Exception:
         return _ROOT / "data" / "rag_storage"
 
@@ -788,7 +793,9 @@ def _load_manual_chunks_for_paths(
         if not fp or _path_hits_deny(fp, deny):
             continue
         bp = _basename(fp)
-        if not any(ab and (ab in fp or ab in bp or bp in ab) for ab in allowed_basenames):
+        if not any(
+            ab and (ab in fp or ab in bp or bp in ab) for ab in allowed_basenames
+        ):
             continue
         content = str(row.get("content") or "")
         if len(content.strip()) < min_chars:
@@ -1058,11 +1065,7 @@ def install_query_context_hooks() -> None:
         query_param = kwargs.get("query_param")
         if query_param is None and len(args) >= 8:
             query_param = args[7]
-        if (
-            isinstance(query, str)
-            and query.strip()
-            and query_param is not None
-        ):
+        if isinstance(query, str) and query.strip() and query_param is not None:
             ctx = str(getattr(result, "context", None) or "")
             if detect_table_filter_signal(query, ctx):
                 _append_table_filter_user_prompt(query_param, query)

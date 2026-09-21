@@ -39,7 +39,13 @@ from typing import Any
 from dotenv import load_dotenv
 from fastapi import FastAPI, File, HTTPException, UploadFile
 from fastapi.middleware.cors import CORSMiddleware
-from fastapi.responses import FileResponse, HTMLResponse, JSONResponse, RedirectResponse, StreamingResponse
+from fastapi.responses import (
+    FileResponse,
+    HTMLResponse,
+    JSONResponse,
+    RedirectResponse,
+    StreamingResponse,
+)
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel, Field
 
@@ -55,7 +61,12 @@ from client_paths import (  # noqa: E402
     is_setup_complete,
     write_setup_complete,
 )
-from client_env_manager import apply_env_to_process, get_form_values, patch_env_keys, save_env  # noqa: E402
+from client_env_manager import (
+    apply_env_to_process,
+    get_form_values,
+    patch_env_keys,
+    save_env,
+)  # noqa: E402
 from client_setup_service import get_setup_status, resolve_multimodal_enabled  # noqa: E402
 
 apply_client_env_defaults()
@@ -124,16 +135,22 @@ def _resolve_kb_paths(
     pod_raw = (parser_output_dir or "").strip()
     if base_raw:
         if wd_raw or pod_raw:
-            raise ValueError("请只填写知识库根目录，或分别填写 rag_storage / pipeline_parse，不要混用。")
+            raise ValueError(
+                "请只填写知识库根目录，或分别填写 rag_storage / pipeline_parse，不要混用。"
+            )
         return _kb_paths_from_base(_resolve_user_path(base_raw))
     if not wd_raw or not pod_raw:
-        raise ValueError("请填写知识库根目录（推荐），或同时填写 rag_storage 与 pipeline_parse 路径。")
+        raise ValueError(
+            "请填写知识库根目录（推荐），或同时填写 rag_storage 与 pipeline_parse 路径。"
+        )
     return _resolve_user_path(wd_raw), _resolve_user_path(pod_raw)
 
 
 class QueryBody(BaseModel):
     query: str = Field(..., min_length=1, max_length=8000)
-    mode: str | None = Field(None, description="LightRAG mode; default from RAG_QUERY_MODE")
+    mode: str | None = Field(
+        None, description="LightRAG mode; default from RAG_QUERY_MODE"
+    )
     stream: bool = Field(
         True,
         description="When true, prefer /api/query/stream; ignored on non-stream endpoint.",
@@ -157,11 +174,15 @@ class SetupEnvBody(BaseModel):
 
 
 class MultimodalBody(BaseModel):
-    enabled: bool = Field(..., description="Enable image/table/equation processing during ingest")
+    enabled: bool = Field(
+        ..., description="Enable image/table/equation processing during ingest"
+    )
 
 
 class QueryDebugBody(BaseModel):
-    enabled: bool = Field(..., description="Save structured JSON dumps under logs/query_dumps/")
+    enabled: bool = Field(
+        ..., description="Save structured JSON dumps under logs/query_dumps/"
+    )
 
 
 class KnowledgeBaseSwitchBody(BaseModel):
@@ -199,7 +220,9 @@ def _friendly_query_error(exc: BaseException) -> str:
     return text or "查询失败"
 
 
-async def _iter_llm_chunks(result: str | AsyncIterator[str] | None) -> AsyncIterator[str]:
+async def _iter_llm_chunks(
+    result: str | AsyncIterator[str] | None,
+) -> AsyncIterator[str]:
     if result is None:
         raise RuntimeError("LLM 未返回内容，请检查 API Key 与 LLM API 地址是否正确。")
     if isinstance(result, str):
@@ -236,7 +259,11 @@ async def _inject_clarify_bundle_for_bypass(gate_result: Any, body: QueryBody) -
     if not isinstance(gate_result, ClarifyBypass):
         return False
     bundle = gate_result.cached_bundle
-    if bundle is None and gate_result.reason == "direct" and gate_result.probe is not None:
+    if (
+        bundle is None
+        and gate_result.reason == "direct"
+        and gate_result.probe is not None
+    ):
         bundle = gate_result.probe.bundle
     if bundle is None and gate_result.reason in ("use_candidate", "keep_original"):
         bundle = resolve_clarify_bundle(
@@ -268,7 +295,10 @@ async def _inject_clarify_bundle_for_bypass(gate_result: Any, body: QueryBody) -
 
 
 def _finalize_clarify_bypass(body: QueryBody, gate_result: Any) -> None:
-    from raganything.clarify_gate import ClarifyBypass, finalize_clarify_bypass_consumption  # noqa: WPS433
+    from raganything.clarify_gate import (
+        ClarifyBypass,
+        finalize_clarify_bypass_consumption,
+    )  # noqa: WPS433
 
     if not isinstance(gate_result, ClarifyBypass):
         return
@@ -284,7 +314,6 @@ def _finalize_clarify_bypass(body: QueryBody, gate_result: Any) -> None:
 async def _evaluate_clarify_gate(body: QueryBody, mode: str) -> Any:
     from raganything.clarify_gate import (  # noqa: WPS433
         ClarifyBypass,
-        ClarifyRequired,
         ClarifyValidationError,
         evaluate_clarify_gate,
     )
@@ -429,6 +458,7 @@ def _finalize_web_timing(
     *,
     gate_wall_s: float,
     answer_wall_s: float | None = None,
+    first_answer_s: float | None = None,
     answer_skipped: str | None = None,
 ) -> dict[str, Any] | None:
     from raganything.query_timing_trace import (  # noqa: WPS433
@@ -445,14 +475,28 @@ def _finalize_web_timing(
     }
     if answer_wall_s is not None:
         extra["answer_wall_s"] = round(answer_wall_s, 1)
+    if first_answer_s is not None:
+        extra["first_answer_s"] = round(first_answer_s, 3)
     if answer_skipped:
         extra["answer_skipped"] = answer_skipped
     return finish_query_trace(**extra)
 
 
-async def _evaluate_clarify_gate_timed(
-    body: QueryBody, mode: str
-) -> tuple[Any, float]:
+def _mark_first_answer(
+    request_started: float,
+    current: float | None,
+) -> float:
+    """Record time-to-first-answer once and return the stable elapsed value."""
+    if current is not None:
+        return current
+    elapsed = time.perf_counter() - request_started
+    from raganything.query_timing_trace import trace_event  # noqa: WPS433
+
+    trace_event("first_answer_delta", first_answer_s=round(elapsed, 3))
+    return elapsed
+
+
+async def _evaluate_clarify_gate_timed(body: QueryBody, mode: str) -> tuple[Any, float]:
     from raganything.query_timing_trace import is_query_timing_enabled, trace_event  # noqa: WPS433
 
     if is_query_timing_enabled():
@@ -511,9 +555,7 @@ def _wipe_directory(path: Path) -> None:
         leftover = list(path.iterdir())
     if leftover:
         names = ", ".join(p.name for p in leftover[:8])
-        raise RuntimeError(
-            f"Failed to fully wipe {path}; leftover: {names}"
-        )
+        raise RuntimeError(f"Failed to fully wipe {path}; leftover: {names}")
 
 
 async def _shutdown_priority_workers(func: Any) -> None:
@@ -553,9 +595,7 @@ async def _shutdown_rag_instance(rag: Any, *, persist: bool = True) -> None:
         await _shutdown_priority_workers(getattr(lightrag, "llm_model_func", None))
         embedding = getattr(lightrag, "embedding_func", None)
         if embedding is not None:
-            await _shutdown_priority_workers(
-                getattr(embedding, "func", embedding)
-            )
+            await _shutdown_priority_workers(getattr(embedding, "func", embedding))
     if persist:
         try:
             await rag.finalize_storages()
@@ -575,11 +615,15 @@ async def _shutdown_rag(*, persist: bool = True) -> None:
 
 
 async def _clear_knowledge_base() -> None:
-    wd = Path(state.working_dir) if state.working_dir else _resolve_path(
-        "RAG_WEB_WORKING_DIR", "rag_storage_run"
+    wd = (
+        Path(state.working_dir)
+        if state.working_dir
+        else _resolve_path("RAG_WEB_WORKING_DIR", "rag_storage_run")
     )
-    pod = Path(state.parser_output_dir) if state.parser_output_dir else _resolve_path(
-        "RAG_WEB_PARSER_OUTPUT_DIR", "output/pipeline_parse"
+    pod = (
+        Path(state.parser_output_dir)
+        if state.parser_output_dir
+        else _resolve_path("RAG_WEB_PARSER_OUTPUT_DIR", "output/pipeline_parse")
     )
     async with state.lock:
         await _shutdown_rag(persist=False)
@@ -593,6 +637,10 @@ async def _init_rag_engine() -> None:
     rpc = _load_rpc()
     wd = _resolve_path("RAG_WEB_WORKING_DIR", "rag_storage_run")
     pod = _resolve_path("RAG_WEB_PARSER_OUTPUT_DIR", "output/pipeline_parse")
+    # Publish the resolved paths so query-time supplements use the same KB as
+    # the LightRAG instance, including the default and UI-switched locations.
+    os.environ["RAG_WEB_WORKING_DIR"] = str(wd)
+    os.environ["RAG_WEB_PARSER_OUTPUT_DIR"] = str(pod)
     pod.mkdir(parents=True, exist_ok=True)
     skip_mm = not resolve_multimodal_enabled()
     state.working_dir = str(wd)
@@ -966,7 +1014,9 @@ async def api_setup_multimodal(body: MultimodalBody):
         "skip_multimodal": not enabled,
         "rag_ready": state.ready,
         "rag_error": state.init_error,
-        "message": "已开启多模态灌库（图片/表格/公式）。" if enabled else "已关闭多模态，仅文本灌库。",
+        "message": "已开启多模态灌库（图片/表格/公式）。"
+        if enabled
+        else "已关闭多模态，仅文本灌库。",
         **status,
     }
 
@@ -1060,7 +1110,9 @@ async def api_dev_query_debug_set(body: QueryDebugBody):
         "enabled": body.enabled,
         "dump_dir": str(get_query_dump_dir()),
         "recent": list_recent_dumps(limit=12),
-        "message": "已开启查询调试日志保存。" if body.enabled else "已关闭查询调试日志保存。",
+        "message": "已开启查询调试日志保存。"
+        if body.enabled
+        else "已关闭查询调试日志保存。",
     }
 
 
@@ -1069,15 +1121,17 @@ async def api_query(body: QueryBody):
     if not state.ready or state.rag is None:
         raise HTTPException(
             503,
-            state.init_error or "RAG engine not initialized; check server logs and .env",
+            state.init_error
+            or "RAG engine not initialized; check server logs and .env",
         )
     mode = (body.mode or state.query_mode or "mix").strip()
     q = body.query.strip()
     parser_root = Path(state.parser_output_dir).resolve()
 
-    from raganything.clarify_gate import ClarifyBypass, ClarifyRequired  # noqa: WPS433
+    from raganything.clarify_gate import ClarifyRequired  # noqa: WPS433
 
     gate_result: Any = None
+    answer_completed = False
     try:
         _begin_web_query_trace(body, mode=mode, endpoint="/api/query")
         gate_result, gate_wall_s = await _evaluate_clarify_gate_timed(body, mode)
@@ -1172,9 +1226,11 @@ async def api_query(body: QueryBody):
         }
         if dump_path is not None:
             payload["debug_dump"] = {"path": str(dump_path), "name": dump_path.name}
+        answer_completed = True
         return payload
     finally:
-        _finalize_clarify_bypass(body, gate_result)
+        if answer_completed:
+            _finalize_clarify_bypass(body, gate_result)
         _clear_clarify_injection_if_set()
         _release_rerank_after_web_query()
 
@@ -1184,12 +1240,23 @@ async def _iter_hook_events_until_task_done(
     task: asyncio.Task[Any],
 ) -> AsyncIterator[dict[str, Any]]:
     """Drain progress-hook events until ``task`` completes (plus any queued tail)."""
-    while not task.done() or not progress_queue.empty():
-        try:
-            ev = await asyncio.wait_for(progress_queue.get(), timeout=0.08)
-        except asyncio.TimeoutError:
+    while True:
+        while not progress_queue.empty():
+            yield progress_queue.get_nowait()
+        if task.done():
+            return
+
+        event_task = asyncio.create_task(progress_queue.get())
+        done, _ = await asyncio.wait(
+            {event_task, task},
+            return_when=asyncio.FIRST_COMPLETED,
+        )
+        if event_task in done:
+            yield event_task.result()
             continue
-        yield ev
+        event_task.cancel()
+        with contextlib.suppress(asyncio.CancelledError):
+            await event_task
 
 
 def _sse_progress_event(ev: dict[str, Any]) -> str | None:
@@ -1203,27 +1270,37 @@ def _sse_progress_event(ev: dict[str, Any]) -> str | None:
     return None
 
 
-async def _query_stream_events(q: str, mode: str, body: QueryBody) -> AsyncIterator[str]:
+async def _query_stream_events(
+    q: str, mode: str, body: QueryBody
+) -> AsyncIterator[str]:
     """SSE tied to real LightRAG stages (retrieve → rerank → generate), then token deltas."""
     from query_doc_steering import strip_manual_circled_step_markers  # noqa: WPS433
-    from query_progress_hooks import query_progress_hooks, set_query_media_roots, set_query_text_for_images  # noqa: WPS433
+    from query_progress_hooks import (
+        query_progress_hooks,
+        set_query_media_roots,
+        set_query_text_for_images,
+    )  # noqa: WPS433
     from stream_cot_parser import StreamCotParser  # noqa: WPS433
-    from raganything.clarify_gate import ClarifyBypass, ClarifyRequired  # noqa: WPS433
+    from raganything.clarify_gate import ClarifyRequired  # noqa: WPS433
 
     q = q.strip()
     parser_root = Path(state.parser_output_dir).resolve()
+    request_started = time.perf_counter()
 
+    gate_result: Any = None
+    answer_completed = False
     try:
         _begin_web_query_trace(body, mode=mode, endpoint="/api/query/stream")
 
-        gate_result: Any = None
         gate_wall_s = 0.0
         gate_http_error: HTTPException | None = None
 
         async with query_progress_hooks() as progress_queue:
             gate_task = asyncio.create_task(_evaluate_clarify_gate_timed(body, mode))
 
-            async for ev in _iter_hook_events_until_task_done(progress_queue, gate_task):
+            async for ev in _iter_hook_events_until_task_done(
+                progress_queue, gate_task
+            ):
                 sse = _sse_progress_event(ev)
                 if sse is not None:
                     yield sse
@@ -1303,10 +1380,12 @@ async def _query_stream_events(q: str, mode: str, body: QueryBody) -> AsyncItera
         thinking_parts: list[str] = []
         answer_parts: list[str] = []
         stream_error: str | None = None
+        first_answer_s: float | None = None
 
         result_queue: asyncio.Queue[tuple[str, Any]] = asyncio.Queue(maxsize=1)
 
         async with query_progress_hooks() as progress_queue:
+
             async def _worker() -> None:
                 try:
                     result = await _run_aquery(q, mode, stream=True)
@@ -1360,7 +1439,38 @@ async def _query_stream_events(q: str, mode: str, body: QueryBody) -> AsyncItera
                             return
 
                         try:
-                            chunk_iter = _iter_llm_chunks(payload)
+                            async for chunk in _iter_llm_chunks(payload):
+                                for ev_kind, piece in cot_parser.feed(chunk):
+                                    if not piece:
+                                        continue
+                                    if ev_kind == "thinking":
+                                        thinking_parts.append(piece)
+                                        yield _sse(
+                                            {"type": "thinking_delta", "text": piece}
+                                        )
+                                    else:
+                                        first_answer_s = _mark_first_answer(
+                                            request_started, first_answer_s
+                                        )
+                                        answer_parts.append(piece)
+                                        yield _sse(
+                                            {"type": "answer_delta", "text": piece}
+                                        )
+                            for ev_kind, piece in cot_parser.flush():
+                                if not piece:
+                                    continue
+                                if ev_kind == "thinking":
+                                    thinking_parts.append(piece)
+                                    yield _sse(
+                                        {"type": "thinking_delta", "text": piece}
+                                    )
+                                else:
+                                    first_answer_s = _mark_first_answer(
+                                        request_started, first_answer_s
+                                    )
+                                    piece = strip_manual_circled_step_markers(piece)
+                                    answer_parts.append(piece)
+                                    yield _sse({"type": "answer_delta", "text": piece})
                         except Exception as exc:
                             stream_error = _friendly_query_error(exc)
                             dump_path = _persist_query_debug_dump(
@@ -1380,27 +1490,6 @@ async def _query_stream_events(q: str, mode: str, body: QueryBody) -> AsyncItera
                                 )
                             yield _sse({"type": "error", "message": stream_error})
                             return
-
-                        async for chunk in chunk_iter:
-                            for ev_kind, piece in cot_parser.feed(chunk):
-                                if not piece:
-                                    continue
-                                if ev_kind == "thinking":
-                                    thinking_parts.append(piece)
-                                    yield _sse({"type": "thinking_delta", "text": piece})
-                                else:
-                                    answer_parts.append(piece)
-                                    yield _sse({"type": "answer_delta", "text": piece})
-                        for ev_kind, piece in cot_parser.flush():
-                            if not piece:
-                                continue
-                            if ev_kind == "thinking":
-                                thinking_parts.append(piece)
-                                yield _sse({"type": "thinking_delta", "text": piece})
-                            else:
-                                piece = strip_manual_circled_step_markers(piece)
-                                answer_parts.append(piece)
-                                yield _sse({"type": "answer_delta", "text": piece})
                         final_answer = strip_manual_circled_step_markers(
                             "".join(answer_parts).strip()
                         )
@@ -1424,6 +1513,7 @@ async def _query_stream_events(q: str, mode: str, body: QueryBody) -> AsyncItera
                             gate_result,
                             gate_wall_s=gate_wall_s,
                             answer_wall_s=answer_wall_s,
+                            first_answer_s=first_answer_s,
                         )
                         dump_path = _persist_query_debug_dump(
                             query=q,
@@ -1443,6 +1533,7 @@ async def _query_stream_events(q: str, mode: str, body: QueryBody) -> AsyncItera
                                     "name": dump_path.name,
                                 }
                             )
+                        answer_completed = True
                         yield _sse({"type": "done", "mode": mode})
                         return
             finally:
@@ -1453,7 +1544,8 @@ async def _query_stream_events(q: str, mode: str, body: QueryBody) -> AsyncItera
                     except asyncio.CancelledError:
                         pass
     finally:
-        _finalize_clarify_bypass(body, gate_result)
+        if answer_completed:
+            _finalize_clarify_bypass(body, gate_result)
         _clear_clarify_injection_if_set()
         _release_rerank_after_web_query()
 
@@ -1463,7 +1555,8 @@ async def api_query_stream(body: QueryBody):
     if not state.ready or state.rag is None:
         raise HTTPException(
             503,
-            state.init_error or "RAG engine not initialized; check server logs and .env",
+            state.init_error
+            or "RAG engine not initialized; check server logs and .env",
         )
     mode = (body.mode or state.query_mode or "mix").strip()
     q = body.query.strip()
@@ -1488,7 +1581,14 @@ async def api_ingest(files: list[UploadFile] = File(...)):
     tmp_root = Path(tempfile.mkdtemp(prefix="rag_web_ingest_"))
     try:
         saved = await _save_uploaded_files(files, tmp_root)
-        ok, fail, errors, cancelled, _rollback_removed, log_path = await _run_ingest_on_folder(tmp_root)
+        (
+            ok,
+            fail,
+            errors,
+            cancelled,
+            _rollback_removed,
+            log_path,
+        ) = await _run_ingest_on_folder(tmp_root)
         return {
             "ok": ok,
             "fail": fail,
@@ -1530,8 +1630,10 @@ async def _run_ingest_on_folder(
 
     rpc = _load_rpc()
     pod = Path(state.parser_output_dir)
-    wd = Path(state.working_dir) if state.working_dir else _resolve_path(
-        "RAG_WEB_WORKING_DIR", "rag_storage_run"
+    wd = (
+        Path(state.working_dir)
+        if state.working_dir
+        else _resolve_path("RAG_WEB_WORKING_DIR", "rag_storage_run")
     )
     parse_method = (os.getenv("PARSE_METHOD") or "auto").strip()
     parse_extra = rpc._mineru_parse_kwargs(state.config.parser)
@@ -1633,8 +1735,10 @@ async def _ingest_stream_events(files: list[UploadFile]) -> AsyncIterator[str]:
             saved = await _save_uploaded_files(files, tmp_root)
             from raganything.ingest_session_log import IngestSessionLog  # noqa: WPS433
 
-            wd = Path(state.working_dir) if state.working_dir else _resolve_path(
-                "RAG_WEB_WORKING_DIR", "rag_storage_run"
+            wd = (
+                Path(state.working_dir)
+                if state.working_dir
+                else _resolve_path("RAG_WEB_WORKING_DIR", "rag_storage_run")
             )
             pod = Path(state.parser_output_dir)
             ingest_log = IngestSessionLog.start(
@@ -1652,7 +1756,14 @@ async def _ingest_stream_events(files: list[UploadFile]) -> AsyncIterator[str]:
                     "ingest_log": log_path,
                 }
             )
-            ok, fail, errors, cancelled, rollback_removed, log_path = await _run_ingest_on_folder(
+            (
+                ok,
+                fail,
+                errors,
+                cancelled,
+                rollback_removed,
+                log_path,
+            ) = await _run_ingest_on_folder(
                 tmp_root,
                 on_event=on_event,
                 session_started=session_started,
@@ -1810,15 +1921,22 @@ if __name__ == "__main__":
     key_suffix = f"?key={share_key}" if share_key else ""
     print(f"Open http://{host}:{port}/ in your browser", flush=True)
     if share_key:
-        print(f"访问密钥已启用：分享链接需带 ?key=<密钥>；未验证时页面与 API 均不可用", flush=True)
+        print(
+            "访问密钥已启用：分享链接需带 ?key=<密钥>；未验证时页面与 API 均不可用",
+            flush=True,
+        )
     if host in ("127.0.0.1", "localhost"):
         print(
             "手机访问：当前仅监听本机。请设置 RAG_WEB_HOST=0.0.0.0 后重启，"
-            "再用手机浏览器打开 http://<本机局域网IP>:" f"{port}/{key_suffix}",
+            "再用手机浏览器打开 http://<本机局域网IP>:"
+            f"{port}/{key_suffix}",
             flush=True,
         )
     else:
         lan_ip = _detect_lan_ip()
         if lan_ip:
-            print(f"手机访问（同一局域网）：http://{lan_ip}:{port}/{key_suffix}", flush=True)
+            print(
+                f"手机访问（同一局域网）：http://{lan_ip}:{port}/{key_suffix}",
+                flush=True,
+            )
     uvicorn.run(app, host=host, port=port, reload=False)

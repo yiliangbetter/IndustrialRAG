@@ -30,10 +30,10 @@ logger = logging.getLogger(__name__)
 _kv_store_cache: dict[str, Any] | None = None
 
 
-_kv_store_mtime: float = -1.0
+_kv_store_revision: tuple[str, int] | None = None
 
 
-_cl_path_index: list[tuple[Path, str, Path]] | None = None
+_cl_path_index: tuple[tuple[str, ...], list[tuple[Path, str, Path]]] | None = None
 
 
 def _unique_retrieved_doc_count(retrieved_docs: list[dict[str, Any]] | None) -> int:
@@ -148,10 +148,12 @@ def _load_manual_chunks_for_locality(manual_hint: str) -> list[dict[str, Any]]:
 def _pipeline_content_list_entries() -> list[tuple[Path, str, Path]]:
     """Cached ``(content_list_path, doc_hint, auto_dir)`` under parse roots."""
     global _cl_path_index
-    if _cl_path_index is not None:
-        return _cl_path_index
+    roots = _pipeline_parse_roots()
+    root_key = tuple(str(path.resolve()) for path in roots)
+    if _cl_path_index is not None and _cl_path_index[0] == root_key:
+        return list(_cl_path_index[1])
     entries: list[tuple[Path, str, Path]] = []
-    for root in _pipeline_parse_roots():
+    for root in roots:
         if not root.is_dir():
             continue
         try:
@@ -163,7 +165,7 @@ def _pipeline_content_list_entries() -> list[tuple[Path, str, Path]]:
                 "_content_list_v2", ""
             )
             entries.append((cl_path, doc_hint, cl_path.parent))
-    _cl_path_index = entries
+    _cl_path_index = (root_key, entries)
     return entries
 
 
@@ -335,28 +337,29 @@ def _doc_storage_chunk_id(doc: dict[str, Any]) -> str:
 
 
 def _kv_text_chunks_store() -> dict[str, Any]:
-    global _kv_store_cache, _kv_store_mtime
+    global _kv_store_cache, _kv_store_revision
     try:
         from query_doc_steering import _text_chunks_store_path  # noqa: WPS433
     except ImportError:
         return {}
     path = _text_chunks_store_path()
+    path_key = str(path.resolve())
     if not path.is_file():
         _kv_store_cache = {}
-        _kv_store_mtime = -1.0
+        _kv_store_revision = (path_key, -1)
         return {}
     try:
-        mtime = path.stat().st_mtime
+        revision = (path_key, path.stat().st_mtime_ns)
     except OSError:
         return {}
-    if _kv_store_cache is not None and mtime == _kv_store_mtime:
+    if _kv_store_cache is not None and revision == _kv_store_revision:
         return _kv_store_cache
     try:
         raw = json.loads(path.read_text(encoding="utf-8"))
     except (OSError, json.JSONDecodeError):
         return {}
     _kv_store_cache = raw if isinstance(raw, dict) else {}
-    _kv_store_mtime = mtime
+    _kv_store_revision = revision
     return _kv_store_cache
 
 
