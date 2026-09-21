@@ -1,6 +1,8 @@
 """Tests for the single rerank release strategy (RERANK_RELEASE_AFTER_QUERY)."""
 
 import logging
+import asyncio
+import time
 
 import pytest
 
@@ -92,3 +94,58 @@ class TestHfCrossEncoderRerank:
     @pytest.mark.asyncio
     async def test_empty_documents_short_circuits(self):
         assert await pipeline_rerank.hf_cross_encoder_rerank("q", []) == []
+
+    @pytest.mark.asyncio
+    async def test_model_load_does_not_block_event_loop(self, monkeypatch):
+        def slow_load(_model):
+            time.sleep(0.1)
+            return object()
+
+        monkeypatch.setattr(pipeline_rerank, "_get_cross_encoder", slow_load)
+        monkeypatch.setattr(
+            pipeline_rerank,
+            "_cross_encoder_predict",
+            lambda _model, _pairs: [0.5],
+        )
+
+        started = time.perf_counter()
+        heartbeat_at: list[float] = []
+
+        async def heartbeat():
+            await asyncio.sleep(0.01)
+            heartbeat_at.append(time.perf_counter() - started)
+
+        await asyncio.gather(
+            pipeline_rerank.hf_cross_encoder_rerank("q", ["document"]),
+            heartbeat(),
+        )
+
+        assert heartbeat_at[0] < 0.06
+
+    @pytest.mark.asyncio
+    async def test_concurrent_predictions_share_model_exclusively(self, monkeypatch):
+        active = 0
+        max_active = 0
+
+        monkeypatch.setattr(
+            pipeline_rerank,
+            "_get_cross_encoder",
+            lambda _model: object(),
+        )
+
+        def predict(_model, _pairs):
+            nonlocal active, max_active
+            active += 1
+            max_active = max(max_active, active)
+            time.sleep(0.03)
+            active -= 1
+            return [0.5]
+
+        monkeypatch.setattr(pipeline_rerank, "_cross_encoder_predict", predict)
+
+        await asyncio.gather(
+            pipeline_rerank.hf_cross_encoder_rerank("q1", ["document"]),
+            pipeline_rerank.hf_cross_encoder_rerank("q2", ["document"]),
+        )
+
+        assert max_active == 1

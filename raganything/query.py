@@ -4,6 +4,7 @@ Query functionality for RAGAnything
 Contains all query-related methods for both text and multimodal queries
 """
 
+import asyncio
 import json
 import hashlib
 import re
@@ -422,50 +423,46 @@ class QueryMixin:
     async def _process_multimodal_query_content(
         self, base_query: str, multimodal_content: List[Dict[str, Any]]
     ) -> str:
-        """
-        Process multimodal query content to generate enhanced query text
-
-        Args:
-            base_query: Base query text
-            multimodal_content: List of multimodal content
-
-        Returns:
-            str: Enhanced query text
-        """
+        """Analyze query attachments concurrently and preserve their input order."""
         self.logger.info("Starting multimodal query content processing...")
+        configured_limit = getattr(
+            getattr(self, "config", None),
+            "max_concurrent_query_content",
+            4,
+        )
+        try:
+            max_concurrency = max(1, int(configured_limit))
+        except (TypeError, ValueError):
+            max_concurrency = 4
+        semaphore = asyncio.Semaphore(max_concurrency)
 
-        enhanced_parts = [f"User query: {base_query}"]
-
-        for i, content in enumerate(multimodal_content):
+        async def _process_one(i: int, content: Dict[str, Any]) -> str | None:
             content_type = content.get("type", "unknown")
             self.logger.info(
                 f"Processing {i + 1}/{len(multimodal_content)} multimodal content: {content_type}"
             )
-
             try:
-                # Get appropriate processor
                 processor = get_processor_for_type(self.modal_processors, content_type)
-
                 if processor:
-                    # Generate content description
-                    description = await self._generate_query_content_description(
-                        processor, content, content_type
-                    )
-                    enhanced_parts.append(
-                        f"\nRelated {content_type} content: {description}"
-                    )
+                    async with semaphore:
+                        description = await self._generate_query_content_description(
+                            processor, content, content_type
+                        )
                 else:
-                    # If no appropriate processor, use basic description
-                    basic_desc = str(content)[:200]
-                    enhanced_parts.append(
-                        f"\nRelated {content_type} content: {basic_desc}"
-                    )
-
+                    description = str(content)[:200]
+                return PROMPTS["QUERY_RELATED_CONTENT"].format(
+                    content_type=content_type,
+                    description=description,
+                )
             except Exception as e:
                 self.logger.error(f"Error processing multimodal content: {str(e)}")
-                # Continue processing other content
-                continue
+                return None
 
+        rendered = await asyncio.gather(
+            *(_process_one(i, content) for i, content in enumerate(multimodal_content))
+        )
+        enhanced_parts = [PROMPTS["QUERY_USER_CONTEXT"].format(query=base_query)]
+        enhanced_parts.extend(part for part in rendered if part is not None)
         enhanced_query = "\n".join(enhanced_parts)
         enhanced_query += PROMPTS["QUERY_ENHANCEMENT_SUFFIX"]
 

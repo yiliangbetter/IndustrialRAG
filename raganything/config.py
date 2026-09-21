@@ -63,6 +63,11 @@ class RAGAnythingConfig:
     )
     """Maximum number of files to process concurrently."""
 
+    max_concurrent_query_content: int = field(
+        default=get_env_value("MAX_CONCURRENT_QUERY_CONTENT", 4, int)
+    )
+    """Maximum multimodal query items analyzed concurrently before retrieval."""
+
     supported_file_extensions: List[str] = field(
         default_factory=lambda: [
             x.strip()

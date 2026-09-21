@@ -290,6 +290,10 @@ PROMPTS_ZH["generic_chunk"] = """{content_type}内容分析：
 分析：{enhanced_caption}"""
 
 # Query-related prompts
+PROMPTS_ZH["QUERY_USER_CONTEXT"] = "用户查询：{query}"
+
+PROMPTS_ZH["QUERY_RELATED_CONTENT"] = "\n相关{content_type}内容：{description}"
+
 PROMPTS_ZH["QUERY_IMAGE_DESCRIPTION"] = (
     "请简要描述这张图片的主要内容、关键元素和重要信息。"
 )

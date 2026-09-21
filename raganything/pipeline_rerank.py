@@ -11,6 +11,7 @@ import asyncio
 import gc
 import logging
 import os
+import threading
 import time
 from functools import partial
 from pathlib import Path
@@ -30,6 +31,7 @@ _cross_encoder_id: str | None = None
 _cross_encoder_device: str | None = None
 _cross_encoder_dtype_key: str | None = None
 _cross_encoder: Any = None
+_cross_encoder_lock = threading.RLock()
 
 
 def _resolve_rerank_device() -> str:
@@ -148,33 +150,34 @@ def _cross_encoder_predict(ce: Any, pairs: list[tuple[str, str]]) -> Any:
 def release_cross_encoder() -> None:
     """Drop the global CrossEncoder singleton and free GPU memory if applicable."""
     global _cross_encoder_id, _cross_encoder_device, _cross_encoder_dtype_key, _cross_encoder  # fmt: skip
-    if _cross_encoder is None:
-        return
-    device = (_cross_encoder_device or _resolve_rerank_device() or "").lower()
-    try:
-        from raganything.query_timing_trace import trace_event
-
-        trace_event("rerank_release", device=device)
-    except ImportError:
-        pass
-    ce = _cross_encoder
-    _cross_encoder = None
-    _cross_encoder_id = None
-    _cross_encoder_device = None
-    _cross_encoder_dtype_key = None
-    del ce
-    gc.collect()
-    if device.startswith("cuda"):
+    with _cross_encoder_lock:
+        if _cross_encoder is None:
+            return
+        device = (_cross_encoder_device or _resolve_rerank_device() or "").lower()
         try:
-            import torch
+            from raganything.query_timing_trace import trace_event
 
-            if torch.cuda.is_available():
-                torch.cuda.empty_cache()
+            trace_event("rerank_release", device=device)
         except ImportError:
             pass
-    logger.debug(
-        "RERANK hf: released CrossEncoder (device was %s)", device or "unknown"
-    )
+        ce = _cross_encoder
+        _cross_encoder = None
+        _cross_encoder_id = None
+        _cross_encoder_device = None
+        _cross_encoder_dtype_key = None
+        del ce
+        gc.collect()
+        if device.startswith("cuda"):
+            try:
+                import torch
+
+                if torch.cuda.is_available():
+                    torch.cuda.empty_cache()
+            except ImportError:
+                pass
+        logger.debug(
+            "RERANK hf: released CrossEncoder (device was %s)", device or "unknown"
+        )
 
 
 def _hf_hub_offline_requested() -> bool:
@@ -305,6 +308,18 @@ def _get_cross_encoder(model_id: str) -> Any:
     return _cross_encoder
 
 
+def _load_and_predict(
+    model: str,
+    pairs: list[tuple[str, str]],
+) -> tuple[Any, float]:
+    """Load/reuse the model and predict in one serialized worker-thread section."""
+    with _cross_encoder_lock:
+        cross_encoder = _get_cross_encoder(model)
+        started = time.perf_counter()
+        scores = _cross_encoder_predict(cross_encoder, pairs)
+        return scores, time.perf_counter() - started
+
+
 async def hf_cross_encoder_rerank(
     query: str,
     documents: list[str],
@@ -315,7 +330,6 @@ async def hf_cross_encoder_rerank(
     """Rerank with a local ``sentence_transformers.CrossEncoder`` (no HTTP API)."""
     if not documents:
         return []
-    ce = _get_cross_encoder(model)
     pairs = [(query, d) for d in documents]
     try:
         from raganything.query_timing_trace import trace_event
@@ -323,9 +337,8 @@ async def hf_cross_encoder_rerank(
         trace_event("rerank_predict_start", model=model, pairs=len(pairs))
     except ImportError:
         pass
-    t_predict = time.perf_counter()
-    scores = await asyncio.to_thread(_cross_encoder_predict, ce, pairs)
-    predict_s = round(time.perf_counter() - t_predict, 2)
+    scores, predict_elapsed = await asyncio.to_thread(_load_and_predict, model, pairs)
+    predict_s = round(predict_elapsed, 2)
     try:
         from raganything.query_timing_trace import trace_event
 

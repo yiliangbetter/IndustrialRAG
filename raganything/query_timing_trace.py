@@ -58,9 +58,12 @@ def trace_event(kind: str, **detail: Any) -> None:
     for key, val in detail.items():
         if val is not None:
             row[key] = val
-    events = list(_TRACE_EVENTS.get() or [])
-    events.append(row)
-    _TRACE_EVENTS.set(events)
+    # Child tasks and ``asyncio.to_thread`` copy ContextVars but retain object
+    # identity. Mutating the shared request list keeps their timing events
+    # visible to the parent request that eventually finalizes the trace.
+    events = _TRACE_EVENTS.get()
+    if events is not None:
+        events.append(row)
 
 
 def _env_snapshot() -> dict[str, str | None]:
