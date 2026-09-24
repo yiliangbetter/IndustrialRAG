@@ -103,7 +103,10 @@ def test_refs_from_chunk_locality_listing_four_machines(monkeypatch):
             "id": f"chunk-f-{base}",
             "chunk_order_index": 21,
             "file_path": f"{manual_hint}.pdf",
-            "content": f"检查控制箱\n\n[图片]\n图片路径：/tmp/{base}.jpg\n页码：17",
+            "content": (
+                f"[图片]\n图片路径：/tmp/{base}.jpg\n页码：17\n"
+                "图注：电控板\n关联正文：电控板检查"
+            ),
         }
         return [heading, fig]
 
@@ -111,9 +114,7 @@ def test_refs_from_chunk_locality_listing_four_machines(monkeypatch):
         return h.replace(" ", "")[:8]
 
     monkeypatch.setattr("iqr_anchor._load_manual_chunks_for_locality", fake_load)
-    monkeypatch.setattr(
-        "iqr_figure_target._load_manual_chunks_for_locality", fake_load
-    )
+    monkeypatch.setattr("iqr_figure_target._load_manual_chunks_for_locality", fake_load)
 
     answer = """
 * **高速智能封边机**：电控板**每季度一次** [1]。
