@@ -30,7 +30,6 @@ import logging
 import os
 import subprocess
 import sys
-from functools import partial
 from pathlib import Path
 from typing import Any
 
@@ -273,54 +272,14 @@ async def _build_rag(
     *,
     skip_multimodal: bool = True,
 ):
-    from lightrag import LightRAG
-    from lightrag.llm.openai import openai_complete_if_cache, openai_embed
-    from lightrag.utils import EmbeddingFunc, logger
-    from raganything import RAGAnything, RAGAnythingConfig
-    from raganything.local_hf_embedding import (
-        ensure_hf_home_from_repo_fallback,
-        make_local_hf_embedding_func,
-    )
-
-    ensure_hf_home_from_repo_fallback(_ROOT)
+    from raganything import RAGAnythingConfig
+    from raganything.runtime_factory import RuntimeOptions, create_rag_runtime
 
     def _env_bool(name: str, default: bool) -> bool:
         v = os.getenv(name)
         if v is None or not str(v).strip():
             return default
         return str(v).strip().lower() in ("1", "true", "yes", "on")
-
-    llm_key = (
-        os.getenv("LLM_BINDING_API_KEY", "").strip()
-        or os.getenv("OPENAI_API_KEY", "").strip()
-    )
-    if not llm_key:
-        raise SystemExit("Set OPENAI_API_KEY or LLM_BINDING_API_KEY.")
-
-    emb_key = os.getenv("EMBEDDING_API_KEY", "").strip() or llm_key
-    embedding_backend = os.getenv("EMBEDDING_BACKEND", "openai").strip().lower()
-
-    base_url = (
-        os.getenv("LLM_BINDING_HOST", "").strip()
-        or os.getenv("OPENAI_BASE_URL", "").strip()
-        or None
-    )
-    emb_host = os.getenv("EMBEDDING_BINDING_HOST", "").strip()
-    embedding_base_url = emb_host if emb_host else base_url
-    if embedding_backend != "hf":
-        if emb_host and not os.getenv("EMBEDDING_API_KEY", "").strip():
-            raise SystemExit(
-                "EMBEDDING_BINDING_HOST is set; set EMBEDDING_API_KEY for that host."
-            )
-
-    llm_model = os.getenv("LLM_MODEL", "gpt-4o-mini")
-    vision_model = os.getenv("VISION_MODEL", llm_model)
-    if embedding_backend == "hf":
-        embedding_dim = int(os.getenv("EMBEDDING_DIM", "1024"))
-        embedding_model = os.getenv("EMBEDDING_MODEL", "BAAI/bge-m3")
-    else:
-        embedding_dim = int(os.getenv("EMBEDDING_DIM", "1536"))
-        embedding_model = os.getenv("EMBEDDING_MODEL", "text-embedding-3-small")
 
     if skip_multimodal:
         enable_image_processing = False
@@ -343,107 +302,22 @@ async def _build_rag(
         max_concurrent_files=int(os.getenv("MAX_CONCURRENT_FILES", "1")),
     )
 
-    async def llm_model_func(
-        prompt, system_prompt=None, history_messages=None, **kwargs
-    ):
-        if history_messages is None:
-            history_messages = []
-        return await openai_complete_if_cache(
-            llm_model,
-            prompt,
-            system_prompt=system_prompt,
-            history_messages=history_messages,
-            api_key=llm_key,
-            base_url=base_url,
-            **kwargs,
-        )
-
-    async def vision_model_func(
-        prompt,
-        system_prompt=None,
-        history_messages=None,
-        image_data=None,
-        messages=None,
-        **kwargs,
-    ):
-        if history_messages is None:
-            history_messages = []
-        if messages:
-            return await openai_complete_if_cache(
-                vision_model,
-                "",
-                system_prompt=None,
-                history_messages=[],
-                messages=messages,
-                api_key=llm_key,
-                base_url=base_url,
-                **kwargs,
-            )
-        if image_data:
-            return await openai_complete_if_cache(
-                vision_model,
-                "",
-                system_prompt=None,
-                history_messages=[],
-                messages=[
-                    {"role": "system", "content": system_prompt}
-                    if system_prompt
-                    else None,
-                    {
-                        "role": "user",
-                        "content": [
-                            {"type": "text", "text": prompt},
-                            {
-                                "type": "image_url",
-                                "image_url": {
-                                    "url": f"data:image/jpeg;base64,{image_data}",
-                                },
-                            },
-                        ],
-                    },
-                ],
-                api_key=llm_key,
-                base_url=base_url,
-                **kwargs,
-            )
-        return await llm_model_func(prompt, system_prompt, history_messages, **kwargs)
-
-    if embedding_backend == "hf":
-        embedding_func = make_local_hf_embedding_func(
-            embedding_dim,
-            embedding_model=embedding_model,
-        )
-    else:
-        embedding_func = EmbeddingFunc(
-            embedding_dim=embedding_dim,
-            max_token_size=8192,
-            func=partial(
-                openai_embed.func,
-                model=embedding_model,
-                api_key=emb_key,
-                base_url=embedding_base_url,
-            ),
-        )
-
-    from raganything.pipeline_rerank import build_rerank_model_func_from_env
-
-    rerank_model_func = build_rerank_model_func_from_env()
-
     enable_llm_cache = os.getenv("ENABLE_LLM_CACHE", "true").strip().lower() in (
         "1",
         "true",
         "yes",
     )
-    lightrag = LightRAG(
-        working_dir=str(working_dir),
-        llm_model_func=llm_model_func,
-        embedding_func=embedding_func,
-        rerank_model_func=rerank_model_func,
-        enable_llm_cache=enable_llm_cache,
-        embedding_func_max_async=int(os.getenv("EMBEDDING_FUNC_MAX_ASYNC", "1")),
-        embedding_batch_num=int(os.getenv("EMBEDDING_BATCH_NUM", "1")),
+    runtime = await create_rag_runtime(
+        config,
+        RuntimeOptions(
+            project_root=_ROOT,
+            embedding_func_max_async=int(os.getenv("EMBEDDING_FUNC_MAX_ASYNC", "1")),
+            embedding_batch_num=int(os.getenv("EMBEDDING_BATCH_NUM", "1")),
+            enable_llm_cache=enable_llm_cache,
+            enable_rerank=True,
+            prefer_binding_api_key=True,
+        ),
     )
-    await lightrag.initialize_storages()
 
     scripts_dir = Path(__file__).resolve().parent
     if str(scripts_dir) not in sys.path:
@@ -451,22 +325,14 @@ async def _build_rag(
     try:
         from query_doc_steering import install_query_steering_hooks  # noqa: WPS433
     except ImportError:
-        logger.warning(
+        runtime.logger.warning(
             "query_doc_steering not available; skipping query steering hooks "
             "(expected until web/tooling PR lands)"
         )
     else:
         install_query_steering_hooks()
 
-    rag = RAGAnything(
-        config=config,
-        lightrag=lightrag,
-        llm_model_func=llm_model_func,
-        vision_model_func=vision_model_func,
-        embedding_func=embedding_func,
-    )
-
-    return rag, config, logger
+    return runtime.rag, runtime.config, runtime.logger
 
 
 async def _ingest_folder(

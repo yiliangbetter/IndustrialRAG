@@ -10,7 +10,6 @@ import math
 import os
 import sys
 import time
-from functools import partial
 from pathlib import Path
 
 from dotenv import load_dotenv
@@ -20,30 +19,14 @@ _ROOT = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(_ROOT))
 load_dotenv(dotenv_path=_ROOT / ".env", override=False)
 
-from lightrag import LightRAG
-from lightrag.llm.openai import openai_complete_if_cache, openai_embed
-from lightrag.utils import EmbeddingFunc, logger
-from raganything import RAGAnything, RAGAnythingConfig
-from raganything.local_hf_embedding import (
-    ensure_hf_home_from_repo_fallback,
-    make_local_hf_embedding_func,
-)
-from raganything.pipeline_rerank import build_rerank_model_func_from_env
+from raganything import RAGAnythingConfig
+from raganything.runtime_factory import RuntimeOptions, create_rag_runtime
 
 
 def _json_safe(val):
     if isinstance(val, float) and (math.isnan(val) or math.isinf(val)):
         return None
     return val
-
-
-def _resolve_keys() -> tuple[str, str]:
-    llm_key = (
-        os.getenv("OPENAI_API_KEY", "").strip()
-        or os.getenv("LLM_BINDING_API_KEY", "").strip()
-    )
-    emb_key = os.getenv("EMBEDDING_API_KEY", "").strip() or llm_key
-    return llm_key, emb_key
 
 
 async def run_batch(
@@ -60,38 +43,6 @@ async def run_batch(
 ) -> None:
     import openpyxl
 
-    ensure_hf_home_from_repo_fallback(_ROOT)
-
-    llm_key, emb_key = _resolve_keys()
-    if not llm_key:
-        raise SystemExit(
-            "Set OPENAI_API_KEY or LLM_BINDING_API_KEY in the environment or .env"
-        )
-
-    embedding_backend = os.getenv("EMBEDDING_BACKEND", "openai").strip().lower()
-
-    base_url = (
-        os.getenv("LLM_BINDING_HOST", "").strip()
-        or os.getenv("OPENAI_BASE_URL", "").strip()
-        or None
-    )
-    emb_host = os.getenv("EMBEDDING_BINDING_HOST", "").strip()
-    embedding_base_url = emb_host if emb_host else base_url
-    if embedding_backend != "hf":
-        if emb_host and not os.getenv("EMBEDDING_API_KEY", "").strip():
-            raise SystemExit(
-                "EMBEDDING_BINDING_HOST is set; set EMBEDDING_API_KEY to the key for that host "
-                "(e.g. OpenAI platform key when using text-embedding-3-small on api.openai.com)."
-            )
-    llm_model = os.getenv("LLM_MODEL", "gpt-4o-mini")
-    vision_model = os.getenv("VISION_MODEL", llm_model)
-    if embedding_backend == "hf":
-        embedding_dim = int(os.getenv("EMBEDDING_DIM", "1024"))
-        embedding_model = os.getenv("EMBEDDING_MODEL", "BAAI/bge-m3")
-    else:
-        embedding_dim = int(os.getenv("EMBEDDING_DIM", "1536"))
-        embedding_model = os.getenv("EMBEDDING_MODEL", "text-embedding-3-small").strip()
-
     config = RAGAnythingConfig(
         working_dir=str(working_dir),
         parser=os.getenv("PARSER", "mineru"),
@@ -101,106 +52,17 @@ async def run_batch(
         enable_equation_processing=True,
     )
 
-    def llm_model_func(prompt, system_prompt=None, history_messages=None, **kwargs):
-        if history_messages is None:
-            history_messages = []
-        return openai_complete_if_cache(
-            llm_model,
-            prompt,
-            system_prompt=system_prompt,
-            history_messages=history_messages,
-            api_key=llm_key,
-            base_url=base_url,
-            **kwargs,
-        )
-
-    def vision_model_func(
-        prompt,
-        system_prompt=None,
-        history_messages=None,
-        image_data=None,
-        messages=None,
-        **kwargs,
-    ):
-        if history_messages is None:
-            history_messages = []
-        if messages:
-            return openai_complete_if_cache(
-                vision_model,
-                "",
-                system_prompt=None,
-                history_messages=[],
-                messages=messages,
-                api_key=llm_key,
-                base_url=base_url,
-                **kwargs,
-            )
-        if image_data:
-            return openai_complete_if_cache(
-                vision_model,
-                "",
-                system_prompt=None,
-                history_messages=[],
-                messages=[
-                    {"role": "system", "content": system_prompt}
-                    if system_prompt
-                    else None,
-                    {
-                        "role": "user",
-                        "content": [
-                            {"type": "text", "text": prompt},
-                            {
-                                "type": "image_url",
-                                "image_url": {
-                                    "url": f"data:image/jpeg;base64,{image_data}",
-                                },
-                            },
-                        ],
-                    },
-                ],
-                api_key=llm_key,
-                base_url=base_url,
-                **kwargs,
-            )
-        return llm_model_func(prompt, system_prompt, history_messages, **kwargs)
-
-    if embedding_backend == "hf":
-        embedding_func = make_local_hf_embedding_func(
-            embedding_dim,
-            embedding_model=embedding_model,
-        )
-    else:
-        embedding_func = EmbeddingFunc(
-            embedding_dim=embedding_dim,
-            max_token_size=8192,
-            func=partial(
-                openai_embed.func,
-                model=embedding_model,
-                api_key=emb_key,
-                base_url=embedding_base_url,
-            ),
-        )
-
-    rerank_model_func = build_rerank_model_func_from_env()
-
-    lightrag = LightRAG(
-        working_dir=str(working_dir),
-        llm_model_func=llm_model_func,
-        embedding_func=embedding_func,
-        rerank_model_func=rerank_model_func,
-        enable_llm_cache=True,
-        embedding_func_max_async=embedding_func_max_async,
-        embedding_batch_num=embedding_batch_num,
+    runtime = await create_rag_runtime(
+        config,
+        RuntimeOptions(
+            project_root=_ROOT,
+            embedding_func_max_async=embedding_func_max_async,
+            embedding_batch_num=embedding_batch_num,
+            enable_rerank=True,
+            await_model_calls=False,
+        ),
     )
-    await lightrag.initialize_storages()
-
-    rag = RAGAnything(
-        config=config,
-        lightrag=lightrag,
-        llm_model_func=llm_model_func,
-        vision_model_func=vision_model_func,
-        embedding_func=embedding_func,
-    )
+    rag, logger = runtime.rag, runtime.logger
 
     wb_in = openpyxl.load_workbook(input_xlsx)
     ws_in = wb_in.active
