@@ -68,6 +68,12 @@ from client_env_manager import (
     save_env,
 )  # noqa: E402
 from client_setup_service import get_setup_status, resolve_multimodal_enabled  # noqa: E402
+from raganything.kb_safety import (  # noqa: E402
+    UnsafeKnowledgeBasePath,
+    allowed_kb_roots,
+    clear_prepared_kb_path,
+    prepare_kb_paths,
+)
 
 apply_client_env_defaults()
 load_dotenv(_ROOT / ".env", override=False)
@@ -144,6 +150,11 @@ def _resolve_kb_paths(
             "请填写知识库根目录（推荐），或同时填写 rag_storage 与 pipeline_parse 路径。"
         )
     return _resolve_user_path(wd_raw), _resolve_user_path(pod_raw)
+
+
+def _prepare_kb_paths(working_dir: Path, parser_output_dir: Path) -> tuple[Path, Path]:
+    roots = allowed_kb_roots(_ROOT)
+    return prepare_kb_paths(working_dir, parser_output_dir, roots=roots)
 
 
 class QueryBody(BaseModel):
@@ -542,22 +553,6 @@ def _reset_lightrag_process_cache() -> None:
     finalize_share_data()
 
 
-def _wipe_directory(path: Path) -> None:
-    """Remove a directory tree and recreate an empty folder."""
-    if path.is_dir():
-        shutil.rmtree(path, ignore_errors=True)
-    path.mkdir(parents=True, exist_ok=True)
-    leftover = list(path.iterdir())
-    if leftover:
-        time.sleep(0.25)
-        shutil.rmtree(path, ignore_errors=True)
-        path.mkdir(parents=True, exist_ok=True)
-        leftover = list(path.iterdir())
-    if leftover:
-        names = ", ".join(p.name for p in leftover[:8])
-        raise RuntimeError(f"Failed to fully wipe {path}; leftover: {names}")
-
-
 async def _shutdown_priority_workers(func: Any) -> None:
     """Gracefully stop LightRAG priority queue workers attached to a callable."""
     seen: set[int] = set()
@@ -625,29 +620,31 @@ async def _clear_knowledge_base() -> None:
         if state.parser_output_dir
         else _resolve_path("RAG_WEB_PARSER_OUTPUT_DIR", "output/pipeline_parse")
     )
+    wd, pod = _prepare_kb_paths(wd, pod)
+    roots = allowed_kb_roots(_ROOT)
     async with state.lock:
         await _shutdown_rag(persist=False)
         _reset_lightrag_process_cache()
-        _wipe_directory(wd)
-        _wipe_directory(pod)
+        clear_prepared_kb_path(wd, role="storage", roots=roots)
+        clear_prepared_kb_path(pod, role="parser", roots=roots)
     await _init_rag_engine()
 
 
 async def _init_rag_engine() -> None:
-    rpc = _load_rpc()
-    wd = _resolve_path("RAG_WEB_WORKING_DIR", "rag_storage_run")
-    pod = _resolve_path("RAG_WEB_PARSER_OUTPUT_DIR", "output/pipeline_parse")
-    # Publish the resolved paths so query-time supplements use the same KB as
-    # the LightRAG instance, including the default and UI-switched locations.
-    os.environ["RAG_WEB_WORKING_DIR"] = str(wd)
-    os.environ["RAG_WEB_PARSER_OUTPUT_DIR"] = str(pod)
-    pod.mkdir(parents=True, exist_ok=True)
-    skip_mm = not resolve_multimodal_enabled()
-    state.working_dir = str(wd)
-    state.parser_output_dir = str(pod)
-    state.query_mode = (os.getenv("RAG_QUERY_MODE") or "mix").strip()
-    state.skip_multimodal = skip_mm
     try:
+        rpc = _load_rpc()
+        wd = _resolve_path("RAG_WEB_WORKING_DIR", "rag_storage_run")
+        pod = _resolve_path("RAG_WEB_PARSER_OUTPUT_DIR", "output/pipeline_parse")
+        wd, pod = _prepare_kb_paths(wd, pod)
+        # Publish the resolved paths so every query supplement follows the
+        # same active KB, including UI-switched locations.
+        os.environ["RAG_WEB_WORKING_DIR"] = str(wd)
+        os.environ["RAG_WEB_PARSER_OUTPUT_DIR"] = str(pod)
+        skip_mm = not resolve_multimodal_enabled()
+        state.working_dir = str(wd)
+        state.parser_output_dir = str(pod)
+        state.query_mode = (os.getenv("RAG_QUERY_MODE") or "mix").strip()
+        state.skip_multimodal = skip_mm
         rag, config, _logger = await rpc._build_rag(wd, pod, skip_multimodal=skip_mm)
         state.rag = rag
         state.config = config
@@ -700,14 +697,60 @@ async def lifespan(app: FastAPI):
         await _shutdown_rag()
 
 
+def _configured_cors_origins() -> tuple[str, ...]:
+    raw = (os.getenv("RAG_WEB_CORS_ORIGINS") or "").strip()
+    origins = tuple(
+        dict.fromkeys(
+            part.strip().rstrip("/") for part in raw.split(",") if part.strip()
+        )
+    )
+    if "*" in origins:
+        raise ValueError(
+            "RAG_WEB_CORS_ORIGINS must list explicit origins; '*' is unsafe"
+        )
+    return origins
+
+
+def _scope_header(scope: dict, name: bytes) -> str:
+    for header_name, value in scope.get("headers", []):
+        if header_name.lower() == name:
+            return value.decode("latin-1")
+    return ""
+
+
+class BrowserOriginGate:
+    """Reject cross-origin browser access unless explicitly configured."""
+
+    def __init__(self, app, allowed_origins: tuple[str, ...]):
+        self.app = app
+        self.allowed_origins = frozenset(allowed_origins)
+
+    async def __call__(self, scope, receive, send):
+        if scope.get("type") == "http" and scope.get("path", "").startswith("/api/"):
+            origin = _scope_header(scope, b"origin").rstrip("/")
+            host = _scope_header(scope, b"host")
+            same_origin = f"{scope.get('scheme', 'http')}://{host}".rstrip("/")
+            if origin and origin != same_origin and origin not in self.allowed_origins:
+                response = JSONResponse(
+                    {"detail": "Cross-origin API access is not allowed."},
+                    status_code=403,
+                )
+                await response(scope, receive, send)
+                return
+        await self.app(scope, receive, send)
+
+
+_CORS_ORIGINS = _configured_cors_origins()
 app = FastAPI(title="Nanxing RAG Client", lifespan=lifespan)
-app.add_middleware(
-    CORSMiddleware,
-    allow_origins=["*"],
-    allow_credentials=True,
-    allow_methods=["*"],
-    allow_headers=["*"],
-)
+if _CORS_ORIGINS:
+    app.add_middleware(
+        CORSMiddleware,
+        allow_origins=list(_CORS_ORIGINS),
+        allow_credentials=True,
+        allow_methods=["*"],
+        allow_headers=["*"],
+    )
+app.add_middleware(BrowserOriginGate, allowed_origins=_CORS_ORIGINS)
 
 # ----------------------------------------------------------------------
 # Optional access-key gate (for LAN sharing / public tunnels).
@@ -950,11 +993,9 @@ async def api_knowledge_base_switch(body: KnowledgeBaseSwitchBody):
             working_dir=body.working_dir,
             parser_output_dir=body.parser_output_dir,
         )
-    except ValueError as exc:
+        wd, pod = _prepare_kb_paths(wd, pod)
+    except (ValueError, UnsafeKnowledgeBasePath) as exc:
         raise HTTPException(400, str(exc)) from exc
-
-    wd.mkdir(parents=True, exist_ok=True)
-    pod.mkdir(parents=True, exist_ok=True)
 
     patch_env_keys(
         {

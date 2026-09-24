@@ -4,6 +4,9 @@ from __future__ import annotations
 
 import os
 from pathlib import Path
+import re
+import tempfile
+import threading
 from typing import Any
 
 from client_paths import get_env_example_path, get_env_path, is_client_mode
@@ -15,11 +18,16 @@ from client_paths import (
 )
 
 VISION_MODEL_CUSTOM = "__custom__"
+_ENV_KEY_RE = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*$")
+_ENV_WRITE_LOCK = threading.Lock()
 
 VISION_MODEL_OPTIONS: list[dict[str, str]] = [
     {"value": "qwen-vl-max", "label": "qwen-vl-max（DashScope 推荐）"},
     {"value": "qwen-vl-plus", "label": "qwen-vl-plus（DashScope，更省额度）"},
-    {"value": "qwen2.5-vl-72b-instruct", "label": "qwen2.5-vl-72b-instruct（DashScope）"},
+    {
+        "value": "qwen2.5-vl-72b-instruct",
+        "label": "qwen2.5-vl-72b-instruct（DashScope）",
+    },
     {"value": "gpt-4o", "label": "gpt-4o（OpenAI 视觉模型）"},
     {"value": VISION_MODEL_CUSTOM, "label": "自定义模型名称…"},
 ]
@@ -110,55 +118,6 @@ CLIENT_AUTO_KEYS: dict[str, str] = {
     "RAG_PROMPT_LANGUAGE": "zh",
 }
 
-# Keys persisted when the setup wizard saves (client never needs to edit .env by hand).
-CLIENT_WRITE_KEYS: frozenset[str] = frozenset(
-    [
-        *[f["key"] for f in SETUP_FIELDS],
-        *CLIENT_AUTO_KEYS.keys(),
-        "LLM_BINDING",
-        "RAG_WEB_HOST",
-        "RAG_WEB_PORT",
-        "RAG_WEB_ENABLE_MULTIMODAL",
-    "RAG_WEB_SKIP_MULTIMODAL",
-    "HF_HOME",
-    "RAG_WEB_WORKING_DIR",
-    "RAG_WEB_PARSER_OUTPUT_DIR",
-    "TIKTOKEN_CACHE_DIR",
-    "OPENAI_API_KEY",
-    ]
-)
-
-# Shipped in config/env.example; preserved across wizard saves (not shown in setup form).
-CLIENT_TUNING_KEYS: frozenset[str] = frozenset(
-    {
-        "MIN_RERANK_SCORE",
-        "RAG_IMAGE_MIN_RERANK_SCORE",
-        "RAG_IMAGE_MIN_TERM_OVERLAP",
-        "RAG_IMAGE_MIN_TERM_LEN",
-        "RAG_IMAGE_MIN_QUERY_CHARS",
-        "TOP_K",
-        "CHUNK_TOP_K",
-        "COSINE_THRESHOLD",
-        "MAX_TOTAL_TOKENS",
-        "MAX_ENTITY_TOKENS",
-        "MAX_RELATION_TOKENS",
-        "LLM_TIMEOUT",
-        "RAG_QUERY_KG_STEERING",
-        "RAG_QUERY_STEERING_PROFILES",
-        "RAG_IMAGE_MIN_REF_ALIGN",
-    }
-)
-
-CLIENT_DEV_KEYS: frozenset[str] = frozenset(
-    {
-        "RAG_QUERY_DEBUG_DUMP",
-    }
-)
-
-CLIENT_PERSIST_KEYS: frozenset[str] = (
-    CLIENT_WRITE_KEYS | CLIENT_TUNING_KEYS | CLIENT_DEV_KEYS
-)
-
 
 def _client_tiktoken_cache_dir() -> str:
     return str(get_tiktoken_cache_dir())
@@ -181,7 +140,9 @@ def _parse_env_file(path: Path) -> dict[str, str]:
     return {k: v for k, v in dotenv_values(path).items() if v is not None}
 
 
-def _quote_env_value(value: str) -> str:
+def _quote_env_value(value: str, *, key: str = "environment value") -> str:
+    if any(ord(char) < 32 or ord(char) == 127 for char in value):
+        raise ValueError(f"{key} contains a forbidden control character")
     if not value:
         return ""
     if any(c in value for c in " #\"'\\"):
@@ -233,6 +194,12 @@ def get_form_values() -> list[dict[str, Any]]:
         key = item["key"]
         raw = (data.get(key) or item.get("default", "")).strip()
         row = {**item, "value": raw, "custom_value": ""}
+        if item.get("type") == "password":
+            row["configured"] = bool(raw)
+            row["value"] = ""
+            if raw:
+                row["required"] = False
+                row["placeholder"] = "已保存；留空保持不变"
         if key == "VISION_MODEL":
             if raw and raw not in presets:
                 row["value"] = VISION_MODEL_CUSTOM
@@ -270,10 +237,17 @@ def _resolve_vision_from_payload(payload: dict[str, str]) -> str:
 
 def validate_form(payload: dict[str, str]) -> list[str]:
     errors: list[str] = []
+    current = load_env_dict()
+    for key, value in payload.items():
+        if any(ord(char) < 32 or ord(char) == 127 for char in str(value)):
+            errors.append(f"{key} 包含非法换行或控制字符")
     for item in SETUP_FIELDS:
         key = item["key"]
         val = (payload.get(key) or "").strip()
-        if item.get("required") and not val:
+        configured_secret = item.get("type") == "password" and bool(
+            (current.get(key) or "").strip()
+        )
+        if item.get("required") and not val and not configured_secret:
             errors.append(f"「{item['label']}」不能为空")
         if key == "VISION_MODEL" and val == VISION_MODEL_CUSTOM:
             custom = (payload.get("VISION_MODEL__custom") or "").strip()
@@ -283,8 +257,6 @@ def validate_form(payload: dict[str, str]) -> list[str]:
 
 
 def _write_env_dict(merged: dict[str, str]) -> Path:
-    if is_client_mode():
-        merged = {k: v for k, v in merged.items() if k in CLIENT_PERSIST_KEYS}
     lines: list[str] = [
         "### Generated / updated by Nanxing RAG client setup wizard",
         "### 检索/配图等高级项来自 config/env.example，打包前由开发人员调好；用户一般无需修改。",
@@ -294,8 +266,6 @@ def _write_env_dict(merged: dict[str, str]) -> Path:
         *[f["key"] for f in SETUP_FIELDS],
         "VISION_MODEL",
         *CLIENT_AUTO_KEYS.keys(),
-        *sorted(CLIENT_TUNING_KEYS),
-        *sorted(CLIENT_DEV_KEYS),
         "RAG_WEB_ENABLE_MULTIMODAL",
         "RAG_WEB_SKIP_MULTIMODAL",
         "HF_HOME",
@@ -307,16 +277,34 @@ def _write_env_dict(merged: dict[str, str]) -> Path:
     written: set[str] = set()
     for key in priority:
         if key in merged and key not in written:
-            lines.append(f"{key}={_quote_env_value(merged[key])}")
+            if not _ENV_KEY_RE.fullmatch(key):
+                raise ValueError(f"Invalid environment key: {key!r}")
+            lines.append(f"{key}={_quote_env_value(merged[key], key=key)}")
             written.add(key)
     for key in sorted(merged.keys()):
         if key not in written:
-            lines.append(f"{key}={_quote_env_value(merged[key])}")
+            if not _ENV_KEY_RE.fullmatch(key):
+                raise ValueError(f"Invalid environment key: {key!r}")
+            lines.append(f"{key}={_quote_env_value(merged[key], key=key)}")
             written.add(key)
 
     env_path = get_env_path()
     env_path.parent.mkdir(parents=True, exist_ok=True)
-    env_path.write_text("\n".join(lines) + "\n", encoding="utf-8")
+    payload = "\n".join(lines) + "\n"
+    with _ENV_WRITE_LOCK:
+        fd, tmp_name = tempfile.mkstemp(
+            prefix=f".{env_path.name}.", dir=env_path.parent
+        )
+        tmp_path = Path(tmp_name)
+        try:
+            with os.fdopen(fd, "w", encoding="utf-8") as handle:
+                handle.write(payload)
+                handle.flush()
+                os.fsync(handle.fileno())
+            os.chmod(tmp_path, 0o600)
+            os.replace(tmp_path, env_path)
+        finally:
+            tmp_path.unlink(missing_ok=True)
     return env_path
 
 
@@ -410,6 +398,10 @@ def apply_env_to_process() -> None:
         os.environ.setdefault("RAG_WEB_WORKING_DIR", str(get_rag_storage_dir()))
         os.environ.setdefault("RAG_WEB_PARSER_OUTPUT_DIR", str(get_parser_output_dir()))
         os.environ.setdefault("TIKTOKEN_CACHE_DIR", _client_tiktoken_cache_dir())
-        if (os.getenv("HF_EMBED_OFFLINE") or "").strip().lower() in ("1", "true", "yes"):
+        if (os.getenv("HF_EMBED_OFFLINE") or "").strip().lower() in (
+            "1",
+            "true",
+            "yes",
+        ):
             os.environ["HF_HUB_OFFLINE"] = "1"
             os.environ.setdefault("TRANSFORMERS_OFFLINE", "1")

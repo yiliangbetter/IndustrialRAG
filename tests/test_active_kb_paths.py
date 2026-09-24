@@ -87,7 +87,9 @@ def test_content_list_index_is_keyed_by_parser_root(
     (first / "first_content_list.json").write_text("[]", encoding="utf-8")
     (second / "second_content_list.json").write_text("[]", encoding="utf-8")
 
+    monkeypatch.delenv("RAG_PARSER_OUTPUT_DIR", raising=False)
     monkeypatch.setenv("RAG_WEB_PARSER_OUTPUT_DIR", str(first))
+    assert iqr_store._pipeline_parse_roots() == [first]
     first_entries = iqr_store._pipeline_content_list_entries()
     assert any(path.name == "first_content_list.json" for path, _, _ in first_entries)
 
@@ -97,3 +99,19 @@ def test_content_list_index_is_keyed_by_parser_root(
     assert not any(
         path.name == "first_content_list.json" for path, _, _ in second_entries
     )
+
+
+def test_legacy_parser_roots_are_used_only_without_explicit_configuration(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    fake_script = tmp_path / "scripts" / "iqr_store.py"
+    fake_script.parent.mkdir()
+    monkeypatch.setattr(iqr_store, "__file__", str(fake_script))
+    monkeypatch.delenv("RAG_WEB_PARSER_OUTPUT_DIR", raising=False)
+    monkeypatch.delenv("RAG_PARSER_OUTPUT_DIR", raising=False)
+
+    assert iqr_store._pipeline_parse_roots() == [
+        tmp_path / "data" / "pipeline_parse",
+        tmp_path / "output" / "pipeline_parse",
+    ]

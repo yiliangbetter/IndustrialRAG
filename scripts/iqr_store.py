@@ -176,9 +176,11 @@ def _pipeline_parse_roots() -> list[Path]:
         raw = (os.getenv(key) or "").strip()
         if raw:
             roots.append(Path(raw))
-    repo = Path(__file__).resolve().parents[1]
-    for rel in ("data/pipeline_parse", "output/pipeline_parse"):
-        roots.append(repo / rel)
+    if not roots:
+        repo = Path(__file__).resolve().parents[1]
+        roots.extend(
+            repo / rel for rel in ("data/pipeline_parse", "output/pipeline_parse")
+        )
     seen: set[str] = set()
     out: list[Path] = []
     for path in roots:

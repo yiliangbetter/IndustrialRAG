@@ -54,6 +54,7 @@ class TestRAGAnythingConfig:
             "ENABLE_TABLE_PROCESSING",
             "ENABLE_EQUATION_PROCESSING",
             "MAX_CONCURRENT_FILES",
+            "MAX_CONCURRENT_QUERY_CONTENT",
             "CONTEXT_WINDOW",
             "CONTEXT_MODE",
             "MAX_CONTEXT_TOKENS",
@@ -70,6 +71,7 @@ class TestRAGAnythingConfig:
         assert config.enable_table_processing is True
         assert config.enable_equation_processing is True
         assert config.max_concurrent_files == 1
+        assert config.max_concurrent_query_content == 4
         assert config.context_window == 1
         assert config.context_mode == "page"
         assert config.max_context_tokens == 2000
@@ -97,6 +99,15 @@ class TestRAGAnythingConfig:
         config = RAGAnythingConfig()
         assert isinstance(config.supported_file_extensions, list)
         assert ".pdf" in config.supported_file_extensions
+
+    def test_scalar_environment_defaults_are_resolved_per_instance(self, monkeypatch):
+        monkeypatch.setenv("MAX_CONCURRENT_FILES", "17")
+        monkeypatch.setenv("MAX_CONCURRENT_QUERY_CONTENT", "6")
+
+        config = RAGAnythingConfig()
+
+        assert config.max_concurrent_files == 17
+        assert config.max_concurrent_query_content == 6
 
     def test_context_filter_content_types(self):
         config = RAGAnythingConfig()
