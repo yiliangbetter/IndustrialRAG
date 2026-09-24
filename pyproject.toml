@@ -102,6 +102,10 @@ torch = { index = "pytorch-cu130" }
 torchvision = { index = "pytorch-cu130" }
 
 [tool.uv]
+constraint-dependencies = [
+    # onnxruntime 1.24+ no longer publishes CPython 3.10 wheels.
+    "onnxruntime<1.24; python_version < '3.11'",
+]
 override-dependencies = [
     "torch==2.11.0+cu130",
     "torchvision==0.26.0+cu130",
