@@ -53,6 +53,10 @@ class ClarifyValidationError(ClarifyGateError):
     """Invalid use_candidate / clarification_id pairing."""
 
 
+class ClarifyProbeError(ClarifyGateError):
+    """The retrieval probe failed before relevance could be determined."""
+
+
 @dataclass(frozen=True)
 class ClarifyBypass:
     """Proceed to aquery without showing clarification UI."""
@@ -287,9 +291,9 @@ async def probe_llm_retrieval_full(
             progress_hooks_active = hooks_mod.progress_hooks_active
             query_progress_hooks = hooks_mod.query_progress_hooks
 
-            def _probe_chunks_and_stats() -> (
-                tuple[list[dict[str, Any]], dict[str, Any]]
-            ):
+            def _probe_chunks_and_stats() -> tuple[
+                list[dict[str, Any]], dict[str, Any]
+            ]:
                 def _pick_best(
                     *candidates: tuple[list[dict[str, Any]], dict[str, Any]],
                 ) -> tuple[list[dict[str, Any]], dict[str, Any]]:
@@ -336,11 +340,8 @@ async def probe_llm_retrieval_full(
                     context_str = get_retrieval_context()
                     raw_data = get_last_probe_raw_data()
     except Exception as exc:
-        logger.warning("clarify retrieval probe failed: %s", exc, exc_info=True)
-        chunks = []
-        stats = {}
-        context_str = None
-        raw_data = None
+        logger.exception("clarify retrieval probe failed")
+        raise ClarifyProbeError("clarification retrieval probe failed") from exc
 
     if not stats:
         stats = _summarize_llm_chunks(chunks, min_thr=min_thr)

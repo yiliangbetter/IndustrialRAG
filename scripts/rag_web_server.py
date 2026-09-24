@@ -325,6 +325,7 @@ def _finalize_clarify_bypass(body: QueryBody, gate_result: Any) -> None:
 async def _evaluate_clarify_gate(body: QueryBody, mode: str) -> Any:
     from raganything.clarify_gate import (  # noqa: WPS433
         ClarifyBypass,
+        ClarifyProbeError,
         ClarifyValidationError,
         evaluate_clarify_gate,
     )
@@ -342,6 +343,8 @@ async def _evaluate_clarify_gate(body: QueryBody, mode: str) -> Any:
         )
     except ClarifyValidationError as exc:
         raise HTTPException(400, str(exc)) from exc
+    except ClarifyProbeError as exc:
+        raise HTTPException(503, "知识库检索暂时失败，请稍后重试。") from exc
 
     import logging
 
