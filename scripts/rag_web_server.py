@@ -85,6 +85,8 @@ if (os.getenv("HF_EMBED_OFFLINE") or "").strip().lower() in ("1", "true", "yes")
 
 _WEB_DIR = _ROOT / "web"
 _RPC: Any = None
+_DEFAULT_WORKING_DIR = "rag_storage_run"
+_DEFAULT_PARSER_OUTPUT_DIR = "output/pipeline_parse"
 
 
 def _load_rpc():
@@ -105,6 +107,20 @@ def _load_rpc():
 def _resolve_path(env_key: str, default: str) -> Path:
     raw = (os.getenv(env_key) or default).strip()
     return _resolve_user_path(raw)
+
+
+def _configured_kb_paths() -> tuple[Path, Path]:
+    """Resolve the development defaults from one canonical location."""
+    return (
+        _resolve_path("RAG_WEB_WORKING_DIR", _DEFAULT_WORKING_DIR),
+        _resolve_path("RAG_WEB_PARSER_OUTPUT_DIR", _DEFAULT_PARSER_OUTPUT_DIR),
+    )
+
+
+def _active_working_dir() -> Path:
+    if state.working_dir:
+        return Path(state.working_dir)
+    return _configured_kb_paths()[0]
 
 
 def _resolve_user_path(raw: str) -> Path:
@@ -613,16 +629,9 @@ async def _shutdown_rag(*, persist: bool = True) -> None:
 
 
 async def _clear_knowledge_base() -> None:
-    wd = (
-        Path(state.working_dir)
-        if state.working_dir
-        else _resolve_path("RAG_WEB_WORKING_DIR", "rag_storage_run")
-    )
-    pod = (
-        Path(state.parser_output_dir)
-        if state.parser_output_dir
-        else _resolve_path("RAG_WEB_PARSER_OUTPUT_DIR", "output/pipeline_parse")
-    )
+    configured_wd, configured_pod = _configured_kb_paths()
+    wd = Path(state.working_dir) if state.working_dir else configured_wd
+    pod = Path(state.parser_output_dir) if state.parser_output_dir else configured_pod
     wd, pod = _prepare_kb_paths(wd, pod)
     roots = allowed_kb_roots(_ROOT)
     async with state.lock:
@@ -636,8 +645,7 @@ async def _clear_knowledge_base() -> None:
 async def _init_rag_engine() -> None:
     try:
         rpc = _load_rpc()
-        wd = _resolve_path("RAG_WEB_WORKING_DIR", "rag_storage_run")
-        pod = _resolve_path("RAG_WEB_PARSER_OUTPUT_DIR", "output/pipeline_parse")
+        wd, pod = _configured_kb_paths()
         wd, pod = _prepare_kb_paths(wd, pod)
         # Publish the resolved paths so every query supplement follows the
         # same active KB, including UI-switched locations.
@@ -1674,11 +1682,7 @@ async def _run_ingest_on_folder(
 
     rpc = _load_rpc()
     pod = Path(state.parser_output_dir)
-    wd = (
-        Path(state.working_dir)
-        if state.working_dir
-        else _resolve_path("RAG_WEB_WORKING_DIR", "rag_storage_run")
-    )
+    wd = _active_working_dir()
     parse_method = (os.getenv("PARSE_METHOD") or "auto").strip()
     parse_extra = rpc._mineru_parse_kwargs(state.config.parser)
     logger = __import__("lightrag.utils", fromlist=["logger"]).logger
@@ -1779,11 +1783,7 @@ async def _ingest_stream_events(files: list[UploadFile]) -> AsyncIterator[str]:
             saved = await _save_uploaded_files(files, tmp_root)
             from raganything.ingest_session_log import IngestSessionLog  # noqa: WPS433
 
-            wd = (
-                Path(state.working_dir)
-                if state.working_dir
-                else _resolve_path("RAG_WEB_WORKING_DIR", "rag_storage_run")
-            )
+            wd = _active_working_dir()
             pod = Path(state.parser_output_dir)
             ingest_log = IngestSessionLog.start(
                 files=[p.name for p in saved],
