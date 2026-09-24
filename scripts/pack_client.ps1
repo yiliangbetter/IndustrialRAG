@@ -23,22 +23,14 @@ $ErrorActionPreference = "Stop"
 $RepoRoot = (Resolve-Path (Join-Path $PSScriptRoot "..")).Path
 $OutRoot = Join-Path $RepoRoot $OutDir
 $VenvPython = Join-Path $RepoRoot ".venv/Scripts/python.exe"
-$RequiredScripts = @(
-    "client_launcher.py",
-    "client_paths.py",
-    "client_env_manager.py",
-    "client_setup_service.py",
-    "rag_web_server.py",
-    "rag_pipeline_parse_graph_chat.py",
-    "query_doc_steering.py",
-    "query_progress_hooks.py"
-)
-$RequiredModels = @(
-    "models--BAAI--bge-m3",
-    "models--BAAI--bge-reranker-base",
-    "models--opendatalab--PDF-Extract-Kit-1.0"
-)
-$RequiredConfigs = @("domain_schema.json", "query_steering_profiles.json")
+$ManifestPath = Join-Path $RepoRoot "config/client_runtime_manifest.json"
+$Manifest = Get-Content -LiteralPath $ManifestPath -Raw | ConvertFrom-Json
+if ($Manifest.version -ne 1) {
+    throw "Unsupported client runtime manifest version: $($Manifest.version)"
+}
+$RequiredScripts = @($Manifest.scripts)
+$RequiredModels = @($Manifest.models)
+$RequiredConfigs = @($Manifest.configs)
 
 function Write-Step([string]$Message) {
     Write-Host ""
@@ -134,12 +126,7 @@ foreach ($name in $RequiredScripts) {
 Write-Step "Copying web UI"
 Invoke-RobocopyMirror (Join-Path $RepoRoot "web") (Join-Path $OutRoot "web")
 
-Write-Step "Copying config template"
-$envExampleSrc = Join-Path $RepoRoot "config/env.example"
-if (-not (Test-Path $envExampleSrc)) {
-    $envExampleSrc = Join-Path $RepoRoot "env.example"
-}
-Copy-Item -LiteralPath $envExampleSrc -Destination (Join-Path $OutRoot "config/env.example")
+Write-Step "Copying runtime config"
 foreach ($name in $RequiredConfigs) {
     Copy-Item -LiteralPath (Join-Path $RepoRoot "config/$name") -Destination (Join-Path $OutRoot "config/$name")
 }
@@ -226,8 +213,6 @@ if (-not $SkipExe) {
 } else {
     Write-Host "SkipExe: NanxingRAG.exe not built (use NanxingRAG.bat)."
 }
-
-Copy-Item -LiteralPath (Join-Path $RepoRoot "docs/client/README.txt") -Destination (Join-Path $OutRoot "README.txt")
 
 Write-Step "Package summary"
 $sizeGb = [math]::Round(((Get-ChildItem $OutRoot -Recurse -File -ErrorAction SilentlyContinue | Measure-Object Length -Sum).Sum / 1GB), 2)
