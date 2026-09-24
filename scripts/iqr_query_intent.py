@@ -9,9 +9,9 @@ from __future__ import annotations
 
 import re
 
-from raganything.utils import discriminative_terms, substantive_bigrams
 from iqr_domain_schema import schema as _domain_schema
 
+from raganything.utils import discriminative_terms, substantive_bigrams
 
 # ---------------------------------------------------------------------------
 # Compiled constants (schema-driven + static)
@@ -51,14 +51,16 @@ _BULLET_PREFIX_RE = re.compile(r"^[-*•]\s+")
 _PERIOD_NL_SPLIT_RE = re.compile(r"[。\n]")
 
 _STRUCTURAL_LABEL_SUFFIXES = tuple(_domain_schema.structural_field_keys)
+_CATALOG_MODEL_MARKER = _domain_schema.catalog_page_marker
+
+
+def _catalog_model_marker() -> str:
+    return _domain_schema.catalog_page_marker
+
 
 try:
-    from query_doc_steering import (  # noqa: WPS433
-        _CATALOG_MODEL_MARKER,
-        detect_table_filter_signal,
-    )
+    from query_doc_steering import detect_table_filter_signal  # noqa: WPS433
 except ImportError:
-    _CATALOG_MODEL_MARKER = _domain_schema.catalog_page_marker
 
     def detect_table_filter_signal(query: str, text: str) -> bool:  # type: ignore[misc]
         return False
@@ -79,7 +81,7 @@ def _retrieval_prefers_catalog_field(query: str, text: str) -> bool:
     catalog_best = 0.0
     procedure_best = 0.0
     for overlap, line in ranked:
-        if _CATALOG_MODEL_MARKER in line:
+        if _catalog_model_marker() in line:
             catalog_best = max(catalog_best, overlap)
         if _MAINT_TOPIC_RE.search(line):
             procedure_best = max(procedure_best, overlap)
@@ -162,9 +164,7 @@ def _is_component_listing_across_machines(query: str) -> bool:
     if not (re.search(r"部件|零件|组件", q) and re.search(r"哪些|有什么|有哪|各自", q)):
         return False
     # Single-machine query → not a cross-manual listing.
-    if resolve_machine_name(q):
-        return False
-    return True
+    return not resolve_machine_name(q)
 
 
 def _strict_object_image_gate(query: str) -> bool:

@@ -1,8 +1,8 @@
 """Scope retrieval to the machine type mentioned in the user query.
 
-Rules live in code (``MACHINE_PROFILES``), not per-machine ``.env`` entries.
-When a profile matches, unrelated manual PDFs can be dropped after rerank
-(see ``query_progress_hooks``); a report is exposed for the Web UI / logs.
+Rules come from ``config/query_steering_profiles.json`` (or
+``RAG_QUERY_STEERING_PROFILES``). When a profile matches, unrelated manual
+PDFs can be dropped after rerank; a report is exposed for the Web UI / logs.
 
 Rerank scores come from CrossEncoder (``pipeline_rerank``). Foreword catalog
 chunks (``本手册适用产品型号``) may be merged from KV after rerank or at the
@@ -17,10 +17,14 @@ import os
 import re
 from contextvars import ContextVar
 from dataclasses import dataclass, field
+from functools import lru_cache
 from pathlib import Path
 from typing import Any
 
+from iqr_domain_schema import schema as _domain_schema
+
 _ROOT = Path(__file__).resolve().parents[1]
+_DEFAULT_PROFILES_PATH = _ROOT / "config" / "query_steering_profiles.json"
 
 # Manual step markers (①②…) — strip in user-facing answers, keep wording.
 _CIRCLED_STEP_BEFORE_CJK = re.compile(
@@ -34,87 +38,6 @@ def strip_manual_circled_step_markers(text: str) -> str:
         return text
     return _CIRCLED_STEP_BEFORE_CJK.sub("", text)
 
-
-# Order matters: longer / more specific query phrases first.
-MACHINE_PROFILES: list[dict[str, Any]] = [
-    {
-        "id": "high_speed_smart",
-        "label": "高速智能封边机",
-        "query_phrases": [
-            "高速智能封边机",
-            "高速智能",
-            "NB9-Smart",
-            "NB10-Smart",
-        ],
-        "deny_path_substrings": [
-            "自动封边机维护保养手册",
-            "高速自动封边机维护保养手册",
-            "双端封边机维护保养手册",
-            "数控六面钻",
-            "PC封边机电气",
-        ],
-    },
-    {
-        "id": "high_speed_auto",
-        "label": "高速自动封边机",
-        "query_phrases": [
-            "高速自动封边机",
-            "高速自动",
-            "NB6PG",
-            "NB7PCG",
-            "NB8PCHGM",
-        ],
-        "deny_path_substrings": [
-            "自动封边机维护保养手册",
-            "封边机连线项目维护保养手册",
-            "双端封边机维护保养手册",
-            "数控六面钻",
-        ],
-    },
-    {
-        "id": "double_end",
-        "label": "双端封边机",
-        "query_phrases": [
-            "双端封边机",
-            "双端",
-            "NB6S2",
-            "NB7HS2",
-            "NB8CS2",
-        ],
-        "deny_path_substrings": [
-            "自动封边机维护保养手册",
-            "封边机连线项目维护保养手册",
-            "高速自动封边机维护保养手册",
-            "数控六面钻",
-        ],
-    },
-    {
-        "id": "auto_edge",
-        "label": "自动封边机",
-        "query_phrases": [
-            "自动封边机",
-            "NBC332",
-            "NB5J",
-            "NB6J",
-            "NB6CJ",
-            "NB7CJ",
-            "NB7CJM",
-            "NB557D",
-        ],
-        "query_exclude_if_contains": [
-            "高速智能",
-            "高速自动",
-            "双端封边",
-            "连线项目",
-        ],
-        "deny_path_substrings": [
-            "封边机连线项目维护保养手册",
-            "高速自动封边机维护保养手册",
-            "双端封边机维护保养手册",
-            "数控六面钻",
-        ],
-    },
-]
 
 _last_filter_report: ContextVar[dict[str, Any] | None] = ContextVar(
     "last_filter_report", default=None
@@ -161,15 +84,88 @@ def _env_bool(name: str, default: bool) -> bool:
     return raw in ("1", "true", "yes", "on")
 
 
+class SteeringProfileError(RuntimeError):
+    """Machine steering policy is missing or malformed."""
+
+
+def _validate_profiles(data: Any, source: str) -> list[dict[str, Any]]:
+    if not isinstance(data, list) or not data:
+        raise SteeringProfileError(
+            f"Steering profiles must be a non-empty list: {source}"
+        )
+    profiles: list[dict[str, Any]] = []
+    seen_ids: set[str] = set()
+    for index, profile in enumerate(data):
+        if not isinstance(profile, dict):
+            raise SteeringProfileError(
+                f"Profile #{index + 1} is not an object: {source}"
+            )
+        profile_id = str(profile.get("id") or "").strip()
+        label = str(profile.get("label") or "").strip()
+        phrases = profile.get("query_phrases")
+        if not profile_id or not label or not isinstance(phrases, list) or not phrases:
+            raise SteeringProfileError(
+                f"Profile #{index + 1} requires id, label, and query_phrases: {source}"
+            )
+        if profile_id in seen_ids:
+            raise SteeringProfileError(f"Duplicate profile id {profile_id!r}: {source}")
+        seen_ids.add(profile_id)
+        for key in (
+            "query_phrases",
+            "query_exclude_if_contains",
+            "deny_path_substrings",
+        ):
+            values = profile.get(key, [])
+            if not isinstance(values, list) or not all(
+                isinstance(value, str) and value.strip() for value in values
+            ):
+                raise SteeringProfileError(
+                    f"Profile {profile_id!r} field {key!r} must be a string list: {source}"
+                )
+        profiles.append(dict(profile))
+    return profiles
+
+
+def _profiles_path() -> Path:
+    raw = (os.getenv("RAG_QUERY_STEERING_PROFILES") or "").strip()
+    path = Path(raw).expanduser() if raw else _DEFAULT_PROFILES_PATH
+    return path.resolve() if path.is_absolute() else (_ROOT / path).resolve()
+
+
+@lru_cache(maxsize=8)
+def _load_profiles_file(path_text: str, mtime_ns: int) -> tuple[dict[str, Any], ...]:
+    del mtime_ns  # part of the cache key
+    path = Path(path_text)
+    try:
+        data = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError) as exc:
+        raise SteeringProfileError(
+            f"Cannot load steering profiles {path}: {exc}"
+        ) from exc
+    return tuple(_validate_profiles(data, str(path)))
+
+
 def _load_extra_profiles() -> list[dict[str, Any]]:
     raw = (os.getenv("RAG_QUERY_DOC_FILTER_RULES_JSON") or "").strip()
     if not raw:
         return []
     try:
         data = json.loads(raw)
-        return data if isinstance(data, list) else []
-    except json.JSONDecodeError:
-        return []
+    except json.JSONDecodeError as exc:
+        raise SteeringProfileError(
+            f"RAG_QUERY_DOC_FILTER_RULES_JSON is invalid: {exc}"
+        ) from exc
+    return _validate_profiles(data, "RAG_QUERY_DOC_FILTER_RULES_JSON")
+
+
+def load_steering_profiles() -> list[dict[str, Any]]:
+    path = _profiles_path()
+    try:
+        mtime_ns = path.stat().st_mtime_ns
+    except OSError as exc:
+        raise SteeringProfileError(f"Steering profile file is missing: {path}") from exc
+    combined = [*_load_profiles_file(str(path), mtime_ns), *_load_extra_profiles()]
+    return _validate_profiles(combined, "combined steering profiles")
 
 
 def _normalize_query(q: str) -> str:
@@ -181,7 +177,7 @@ def resolve_machine_profile(query: str) -> dict[str, Any] | None:
     qn = _normalize_query(query)
     if not qn:
         return None
-    profiles = MACHINE_PROFILES + _load_extra_profiles()
+    profiles = load_steering_profiles()
     best: tuple[int, dict[str, Any]] | None = None
     for profile in profiles:
         if any(
@@ -240,7 +236,11 @@ def _path_hits_deny(path: str, deny: list[str]) -> str | None:
     return hit
 
 
-_CATALOG_MODEL_MARKER = "本手册适用产品型号"
+def _catalog_model_marker() -> str:
+    return _domain_schema.catalog_page_marker
+
+
+_CATALOG_MODEL_MARKER = _catalog_model_marker()  # backward-compatible export
 
 
 def _asks_manual_applicability_models(query: str) -> bool:
@@ -274,9 +274,7 @@ def is_catalog_product_model_query(query: str) -> bool:
         return False
     if _asks_manual_applicability_models(q):
         return True
-    if resolve_machine_profile(query):
-        return False
-    return True
+    return not resolve_machine_profile(query)
 
 
 def _default_min_rerank_score() -> float:
@@ -296,7 +294,7 @@ def catalog_query_min_rerank_score() -> float:
 
 
 def _chunk_has_catalog_marker(doc: dict) -> bool:
-    return _CATALOG_MODEL_MARKER in str(doc.get("content") or "")
+    return _catalog_model_marker() in str(doc.get("content") or "")
 
 
 def _catalog_chunk_relevant_to_query(query: str, doc: dict) -> bool:
@@ -329,7 +327,7 @@ def _load_catalog_chunks_from_storage() -> list[dict]:
         if not isinstance(row, dict):
             continue
         content = str(row.get("content") or "")
-        if _CATALOG_MODEL_MARKER not in content:
+        if _catalog_model_marker() not in content:
             continue
         doc = dict(row)
         doc.setdefault("content", content)
@@ -456,7 +454,7 @@ def build_catalog_model_listing_prompt(query: str) -> str:
         return ""
     return (
         "用户询问产品线/型号总览：请按检索到的每一份手册分别列出正文中"
-        f"「{_CATALOG_MODEL_MARKER}」一行里的全部型号；"
+        f"「{_catalog_model_marker()}」一行里的全部型号；"
         "有几份来源含该行就列几份，不得只汇总其中部分来源。"
     )
 
@@ -492,7 +490,10 @@ def _table_filter_min_matching_rows() -> int:
 
 
 def _table_row_matches_filter(row_html: str, needle: str) -> bool:
-    tds = [td.strip() for td in re.findall(r"<td[^>]*>([^<]+)</td>", row_html, re.I)]
+    tds = [
+        td.strip()
+        for td in re.findall(r"<td[^>]*>([^<]+)</td>", row_html, re.IGNORECASE)
+    ]
     if not tds or needle not in row_html:
         return False
     if needle in tds[-1]:
@@ -507,7 +508,7 @@ def detect_table_filter_signal(query: str, text: str) -> bool:
     needle = table_filter_needle(query)
     if not needle or not text or "<tr" not in text.lower():
         return False
-    rows = re.findall(r"<tr>.*?</tr>", text, re.I | re.DOTALL)
+    rows = re.findall(r"<tr>.*?</tr>", text, re.IGNORECASE | re.DOTALL)
     matches = sum(1 for row in rows if _table_row_matches_filter(row, needle))
     return matches >= _table_filter_min_matching_rows()
 
@@ -607,7 +608,7 @@ def _rag_storage_dir() -> Path:
         from client_paths import get_rag_storage_dir  # noqa: WPS433
 
         return Path(get_rag_storage_dir()).resolve()
-    except Exception:
+    except (ImportError, OSError):
         return _ROOT / "data" / "rag_storage"
 
 
@@ -930,32 +931,10 @@ def build_cross_manual_listing_answer_prompt(query: str) -> str:
     """Cross-manual part listings: group by machine, cite all manuals used."""
     if not _is_cross_manual_listing_query(query):
         return ""
-    extra = ""
-    if re.search(r"残胶", query):
-        extra = (
-            "仅列出正文 chunk 字面写明需清理残胶（或「老化胶水」等同类表述）的部件；"
-            "勿根据知识图谱或其它机型类推增加条目；"
-            "某机型正文无残胶清理描述时写明未提及，勿编造部件。"
-            "同一手册内各有独立「保养内容：」行的条目须各占一条 bullet、禁止合并："
-            "若正文同时出现「保养内容：涂胶轴检查清理」与「保养内容：电机检查清理」，"
-            "须分别写 **涂胶轴**（清理轴周老化胶水/残胶，对应涂胶轴保养条目）"
-            "与 **涂胶电机**（电机检查清理、含清理涂胶轴掉下残胶，对应涂胶电机保养条目），"
-            "不得只写「涂胶轴掉下的残胶」并挂在电机条目下而漏掉涂胶轴独立条。"
-            "每条格式：**部件名**：该部件/保养内容对应的残胶清理要求（一句即可）。"
-        )
-    elif re.search(r"1#透平油|透平油", query):
-        extra = (
-            "仅列出正文 chunk 字面出现「1#透平油」或完整词组「1#透平油（气动油）」的机型；"
-            "勿将仅写「气动油（ISOVG32）」「ISO VG-32」等未出现「1#透平油」字样的手册机型列入；"
-            "勿凭知识图谱粘度等级类推六面钻/加工中心等机型。"
-            "每条格式：**机型名**：用于保养**部件名**（一句，可附 [n] 引用）；"
-            "部件名须加粗且为润滑/保养部位，勿将油品名称当作部件。"
-        )
     return (
-        "跨机型列举题：按机型分组列出部件；同一部件在不同机型须分开写。"
-        "每条须能在所引用手册正文 chunk 中找到依据；"
-        "References 须列出作答时实际依据的全部机型手册。"
-        + (f" {extra}" if extra else "")
+        "跨来源列举题：按来源或机型分组，保持正文条目的原始粒度，独立条目不得合并。"
+        "只列正文 chunk 明确支持的对象与要求，不得依据近义词、知识图谱或其它来源类推；"
+        "正文未提及时明确写未提及。每条须引用其实际依据，References 列出全部使用来源。"
     )
 
 

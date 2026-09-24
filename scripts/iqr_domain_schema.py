@@ -1,10 +1,8 @@
 """Domain Schema loader — externalized domain vocabulary for RAG pipeline.
 
 Reads ``config/domain_schema.json`` (or ``RAG_DOMAIN_SCHEMA`` env override)
-and exposes a cached singleton ``schema`` with typed accessors.
-
-If the file is absent, falls back to built-in defaults identical to the
-former hard-coded values, ensuring zero-config backward compatibility.
+and exposes a reload-aware ``schema`` proxy with typed accessors. Missing or
+malformed domain policy fails loudly instead of silently changing behaviour.
 """
 
 from __future__ import annotations
@@ -17,34 +15,20 @@ from typing import Any
 
 _ROOT = Path(__file__).resolve().parents[1]
 _DEFAULT_PATH = _ROOT / "config" / "domain_schema.json"
+_LIST_FIELDS = (
+    "section_markers",
+    "structural_field_keys",
+    "action_prefixes",
+    "footnote_labels",
+    "paragraph_connectors",
+    "filename_truncate_markers",
+    "machine_class_suffixes",
+    "image_block_fields",
+)
 
-# Built-in fallback (= current industrial maintenance domain).
-_FALLBACK: dict[str, Any] = {
-    "domain": "industrial_equipment_maintenance",
-    "version": "0.0-fallback",
-    "section_markers": ["保养步骤", "保养内容", "保养周期"],
-    "structural_field_keys": [
-        "周期",
-        "步骤",
-        "内容",
-        "方式",
-        "部位",
-        "部件",
-        "工具",
-        "标准",
-        "依据",
-        "要求",
-        "方法",
-        "说明",
-    ],
-    "action_prefixes": ["清理", "检查", "更换", "调整", "清洁"],
-    "footnote_labels": ["注", "备注"],
-    "paragraph_connectors": ["此外", "另外", "同时", "除此之外"],
-    "filename_truncate_markers": ["维护保养"],
-    "machine_class_suffixes": ["封边机", "钻", "中心"],
-    "catalog_page_marker": "本手册适用产品型号",
-    "image_block_fields": ["图片路径", "页码", "关联正文", "图注", "脚注"],
-}
+
+class DomainSchemaError(RuntimeError):
+    """The configured domain schema cannot be loaded safely."""
 
 
 class DomainSchema:
@@ -125,18 +109,54 @@ class DomainSchema:
         return result.split(".pdf")[0].split(".PDF")[0].strip()
 
 
-@lru_cache(maxsize=1)
-def _load_schema() -> DomainSchema:
-    path_str = os.environ.get("RAG_DOMAIN_SCHEMA", "")
-    path = Path(path_str) if path_str else _DEFAULT_PATH
-    if path.is_file():
-        try:
-            data = json.loads(path.read_text(encoding="utf-8"))
-            return DomainSchema(data)
-        except (json.JSONDecodeError, OSError):
-            pass
-    return DomainSchema(_FALLBACK)
+def _schema_path() -> Path:
+    raw = (os.getenv("RAG_DOMAIN_SCHEMA") or "").strip()
+    path = Path(raw).expanduser() if raw else _DEFAULT_PATH
+    return path.resolve() if path.is_absolute() else (_ROOT / path).resolve()
 
 
-# Module-level singleton for convenient import.
-schema: DomainSchema = _load_schema()
+def _validate_schema(data: Any, path: Path) -> dict[str, Any]:
+    if not isinstance(data, dict):
+        raise DomainSchemaError(f"Domain schema must be a JSON object: {path}")
+    for key in ("domain", "catalog_page_marker"):
+        if not isinstance(data.get(key), str) or not data[key].strip():
+            raise DomainSchemaError(f"Domain schema field {key!r} is required: {path}")
+    for key in _LIST_FIELDS:
+        values = data.get(key)
+        if (
+            not isinstance(values, list)
+            or not values
+            or not all(isinstance(value, str) and value.strip() for value in values)
+        ):
+            raise DomainSchemaError(
+                f"Domain schema field {key!r} must be a non-empty string list: {path}"
+            )
+    return data
+
+
+@lru_cache(maxsize=8)
+def _load_schema_file(path_text: str, mtime_ns: int) -> DomainSchema:
+    del mtime_ns  # part of the cache key
+    path = Path(path_text)
+    try:
+        data = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError) as exc:
+        raise DomainSchemaError(f"Cannot load domain schema {path}: {exc}") from exc
+    return DomainSchema(_validate_schema(data, path))
+
+
+def get_domain_schema() -> DomainSchema:
+    path = _schema_path()
+    try:
+        mtime_ns = path.stat().st_mtime_ns
+    except OSError as exc:
+        raise DomainSchemaError(f"Domain schema is missing: {path}") from exc
+    return _load_schema_file(str(path), mtime_ns)
+
+
+class _DomainSchemaProxy:
+    def __getattr__(self, name: str) -> Any:
+        return getattr(get_domain_schema(), name)
+
+
+schema = _DomainSchemaProxy()

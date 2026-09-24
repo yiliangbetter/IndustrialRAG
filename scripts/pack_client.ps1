@@ -38,6 +38,7 @@ $RequiredModels = @(
     "models--BAAI--bge-reranker-base",
     "models--opendatalab--PDF-Extract-Kit-1.0"
 )
+$RequiredConfigs = @("domain_schema.json", "query_steering_profiles.json")
 
 function Write-Step([string]$Message) {
     Write-Host ""
@@ -139,9 +140,8 @@ if (-not (Test-Path $envExampleSrc)) {
     $envExampleSrc = Join-Path $RepoRoot "env.example"
 }
 Copy-Item -LiteralPath $envExampleSrc -Destination (Join-Path $OutRoot "config/env.example")
-$steeringProfiles = Join-Path $RepoRoot "config/query_steering_profiles.json"
-if (Test-Path $steeringProfiles) {
-    Copy-Item -LiteralPath $steeringProfiles -Destination (Join-Path $OutRoot "config/query_steering_profiles.json")
+foreach ($name in $RequiredConfigs) {
+    Copy-Item -LiteralPath (Join-Path $RepoRoot "config/$name") -Destination (Join-Path $OutRoot "config/$name")
 }
 
 if (-not $SkipModels) {
