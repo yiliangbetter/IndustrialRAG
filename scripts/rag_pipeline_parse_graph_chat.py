@@ -271,6 +271,7 @@ async def _build_rag(
     parser_output_dir: Path,
     *,
     skip_multimodal: bool = True,
+    enable_llm_cache: bool | None = None,
 ):
     from raganything import RAGAnythingConfig
     from raganything.runtime_factory import RuntimeOptions, create_rag_runtime
@@ -302,11 +303,12 @@ async def _build_rag(
         max_concurrent_files=int(os.getenv("MAX_CONCURRENT_FILES", "1")),
     )
 
-    enable_llm_cache = os.getenv("ENABLE_LLM_CACHE", "true").strip().lower() in (
-        "1",
-        "true",
-        "yes",
-    )
+    if enable_llm_cache is None:
+        enable_llm_cache = os.getenv("ENABLE_LLM_CACHE", "true").strip().lower() in (
+            "1",
+            "true",
+            "yes",
+        )
     runtime = await create_rag_runtime(
         config,
         RuntimeOptions(

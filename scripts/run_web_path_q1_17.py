@@ -15,7 +15,9 @@ Query dumps go to ``logs/query_dumps/`` (prefix ``Qxx_``) unless ``--no-dump``.
 
 Use ``--rounds N`` to run the full batch N times; each round writes its own report
 (``…_r01.md``, ``…_r02.md``, … when N > 1). Multiple rounds reuse one ``_build_rag``
-instance for the whole run (avoids stacking embedding models on GPU/RAM).
+instance for the whole run (avoids stacking embedding models on GPU/RAM). LLM caching is
+disabled so repeated rounds measure the response path; use ``--allow-llm-cache`` only when
+cache behavior itself is under test.
 """
 
 from __future__ import annotations
@@ -125,9 +127,7 @@ def _grade_machine_cycle_pairs(answer: str, pairs: list[dict]) -> list[str]:
             else:
                 misses.append(f"machine_missing:{machine_terms}")
                 continue
-        has_cycle = any(
-            any(_contains(c, line) for c in cycle_any) for line in matched
-        )
+        has_cycle = any(any(_contains(c, line) for c in cycle_any) for line in matched)
         has_bad = any(
             any(_contains(c, line) for c in cycle_forbidden) for line in matched
         )
@@ -280,11 +280,7 @@ def grade_images(result: dict, spec: dict) -> tuple[bool, list[str]]:
 
     if spec.get("image_answer_pairs"):
         waive_raw = spec.get("image_pair_waive") or []
-        pair_waive = [
-            (str(m), str(c))
-            for m, c in waive_raw
-            if m and c
-        ]
+        pair_waive = [(str(m), str(c)) for m, c in waive_raw if m and c]
         return _grade_images_answer_pairs(
             str(result.get("answer") or ""),
             imgs,
@@ -301,9 +297,7 @@ def grade_images(result: dict, spec: dict) -> tuple[bool, list[str]]:
         min_match = int(spec.get("caption_min_match") or 1)
         if len(matched) < min_match:
             notes.append(f"caption_match:{len(matched)}/{len(expected)}")
-        wrong = [
-            c for c in caps if c and not any(e in c or c in e for e in expected)
-        ]
+        wrong = [c for c in caps if c and not any(e in c or c in e for e in expected)]
         if wrong and expected:
             notes.append(f"extra_or_wrong_caps:{wrong}")
         caps_ok = (
@@ -327,8 +321,7 @@ def grade_images(result: dict, spec: dict) -> tuple[bool, list[str]]:
             1
             for img in imgs
             if any(
-                t in str(img.get("caption") or "")
-                or t in str(img.get("context") or "")
+                t in str(img.get("caption") or "") or t in str(img.get("context") or "")
                 for t in topic_any
             )
         )
@@ -467,7 +460,9 @@ def _print_gate_failure_summary(rows: list[dict]) -> int:
         flush=True,
     )
     for row in failures:
-        print(f"  • {_gate_alert_message(int(row['id']), row['gate_probe'])}", flush=True)
+        print(
+            f"  • {_gate_alert_message(int(row['id']), row['gate_probe'])}", flush=True
+        )
         print(f"    问句：{row.get('query', '')[:60]}", flush=True)
     print(f"{'=' * 72}\n", flush=True)
     return len(failures)
@@ -537,7 +532,7 @@ async def run_cases(
     rpc = _load_rpc()
     own_rag = rag is None
     if own_rag:
-        rag, _, _ = await rpc._build_rag(wd, pod)
+        rag, _, _ = await rpc._build_rag(wd, pod, enable_llm_cache=False)
     if rag is None:
         raise RuntimeError("run_cases: rag engine not available")
     parser_root = pod.resolve()
@@ -562,9 +557,8 @@ async def run_cases(
                 )
                 if gate_probe.get("gate_direct_ok") is False:
                     _print_gate_alert(cid, gate_probe)
-                if (
-                    probe_bundle is not None
-                    and _should_reuse_probe_bundle(gate_probe, web_sim=web_sim)
+                if probe_bundle is not None and _should_reuse_probe_bundle(
+                    gate_probe, web_sim=web_sim
                 ):
                     set_clarify_context_injection(probe_bundle)
                     gate_probe["bundle_reused"] = True
@@ -704,6 +698,7 @@ def write_report(
     wd: Path,
     media_root: Path,
     web_sim: str | None = None,
+    llm_cache_enabled: bool | None = None,
     round_no: int | None = None,
     rounds_total: int | None = None,
 ) -> None:
@@ -726,6 +721,7 @@ def write_report(
             f"- 工作目录：`{wd}`",
             f"- 媒体根：`{media_root}`",
             "- 参考答案：`docs/测试例参考答案.md`",
+            "- 判定范围：确定性文字/配图约束烟测；不替代语义正确性或人工事实审查",
             f"- 通过（文字+配图）：**{passed}/{len(rows)}**",
             f"- 仅文字通过：**{text_only}/{len(rows)}**",
         ]
@@ -734,6 +730,9 @@ def write_report(
         lines.append(
             f"- Web 模拟：``{web_sim}``（answer 复用 gate probe bundle，对齐 Web clarify bypass）"
         )
+    if llm_cache_enabled is not None:
+        cache_label = "启用（缓存测试）" if llm_cache_enabled else "禁用（计时有效）"
+        lines.append(f"- LLM 缓存：{cache_label}")
     if probed:
         lines.append(
             f"- Gate direct（final > 7，shili17 期望全达标）：**{direct_ok}/{probed}**"
@@ -914,17 +913,25 @@ async def run_all_rounds(
     report_dir: Path,
     session_stamp: str,
     suffix: str,
+    allow_llm_cache: bool = False,
 ) -> tuple[list[dict[str, Any]], bool]:
     """Run one or more full batches in a single event loop (required for --rounds > 1)."""
     round_summaries: list[dict[str, Any]] = []
     any_fail = False
 
     rpc = _load_rpc()
-    rag, _, _ = await rpc._build_rag(wd, pod)
+    rag, _, _ = await rpc._build_rag(
+        wd,
+        pod,
+        enable_llm_cache=allow_llm_cache,
+    )
     try:
         for rnd in range(1, rounds + 1):
             if rounds > 1:
-                print(f"\n{'=' * 60}\n=== Round {rnd}/{rounds} ===\n{'=' * 60}", flush=True)
+                print(
+                    f"\n{'=' * 60}\n=== Round {rnd}/{rounds} ===\n{'=' * 60}",
+                    flush=True,
+                )
             rows = await run_cases(
                 ids,
                 mode=mode,
@@ -938,7 +945,9 @@ async def run_all_rounds(
             round_tag = f"_r{rnd:02d}" if rounds > 1 else ""
             json_path = report_dir / f"{session_stamp}_{suffix}{round_tag}.json"
             md_path = report_dir / f"{session_stamp}_{suffix}{round_tag}.md"
-            json_path.write_text(json.dumps(rows, ensure_ascii=False, indent=2), encoding="utf-8")
+            json_path.write_text(
+                json.dumps(rows, ensure_ascii=False, indent=2), encoding="utf-8"
+            )
             write_report(
                 md_path,
                 rows,
@@ -946,6 +955,7 @@ async def run_all_rounds(
                 wd=wd,
                 media_root=pod,
                 web_sim=web_sim if not skip_gate else None,
+                llm_cache_enabled=allow_llm_cache,
                 round_no=rnd if rounds > 1 else None,
                 rounds_total=rounds if rounds > 1 else None,
             )
@@ -964,6 +974,7 @@ async def run_all_rounds(
                     "passed": passed,
                     "total": len(rows),
                     "gate_fail_count": gate_fail_count,
+                    "llm_cache_enabled": allow_llm_cache,
                     "ok": not round_fail,
                 }
             )
@@ -974,7 +985,9 @@ async def run_all_rounds(
 
 
 def main() -> None:
-    parser = argparse.ArgumentParser(description="Web-path batch test vs 测试例参考答案")
+    parser = argparse.ArgumentParser(
+        description="Web-path batch test vs 测试例参考答案"
+    )
     parser.add_argument(
         "--ids",
         default=os.getenv("RAG_WEB_PATH_CASE_IDS", ""),
@@ -1006,11 +1019,18 @@ def main() -> None:
         default=int(os.getenv("RAG_WEB_PATH_ROUNDS", "1")),
         help="Run the full batch N times consecutively (default: 1; env RAG_WEB_PATH_ROUNDS)",
     )
+    parser.add_argument(
+        "--allow-llm-cache",
+        action="store_true",
+        help="Enable LLM cache for cache-specific tests (default: disabled for valid timings)",
+    )
     args = parser.parse_args()
     if args.rounds < 1:
         raise SystemExit("--rounds must be >= 1")
     ids = _parse_ids(args.ids)
-    wd = Path(os.getenv("RAG_WEB_WORKING_DIR") or (_ROOT / "data" / "rag_storage")).resolve()
+    wd = Path(
+        os.getenv("RAG_WEB_WORKING_DIR") or (_ROOT / "data" / "rag_storage")
+    ).resolve()
     pod = Path(
         os.getenv("RAG_WEB_PARSER_OUTPUT_DIR") or (_ROOT / "data" / "pipeline_parse")
     ).resolve()
@@ -1018,11 +1038,18 @@ def main() -> None:
     label = ", ".join(f"Q{i}" for i in ids)
     rounds_label = f", {args.rounds} round(s)" if args.rounds > 1 else ""
     print(f"Running {label} web path{rounds_label}, wd={wd}", flush=True)
+    print(
+        f"LLM cache: {'enabled (cache test)' if args.allow_llm_cache else 'disabled (timing-safe)'}",
+        flush=True,
+    )
     if not args.no_dump:
         print("Query dumps: logs/query_dumps/ (per case, prefix Qxx)", flush=True)
     web_sim = _normalize_web_sim(args.web_sim)
     if not args.skip_gate:
-        print("Gate probe: probe_llm_retrieval_full (mix + rerank, final_score)", flush=True)
+        print(
+            "Gate probe: probe_llm_retrieval_full (mix + rerank, final_score)",
+            flush=True,
+        )
         print(f"Web sim: {web_sim} (answer bundle reuse)", flush=True)
     report_dir = _ROOT / "logs" / "web_path_q1_17"
     report_dir.mkdir(parents=True, exist_ok=True)
@@ -1041,6 +1068,7 @@ def main() -> None:
             report_dir=report_dir,
             session_stamp=session_stamp,
             suffix=suffix,
+            allow_llm_cache=args.allow_llm_cache,
         )
     )
 
