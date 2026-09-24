@@ -65,7 +65,11 @@ def test_client_runtime_manifest_contains_exact_import_closure() -> None:
 
 def test_client_packer_consumes_manifest_without_missing_readme() -> None:
     packer = (SCRIPTS / "pack_client.ps1").read_text(encoding="utf-8")
+    stager = (SCRIPTS / "stage_client_models.bat").read_text(encoding="utf-8")
 
     assert "client_runtime_manifest.json" in packer
     assert "ConvertFrom-Json" in packer
     assert "docs/client/README.txt" not in packer
+    assert "client_runtime_manifest.json" in stager
+    for model in _manifest()["models"]:
+        assert model not in stager
