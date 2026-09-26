@@ -254,3 +254,117 @@ async def test_async_main_skips_non_list_json_counts_as_failure(
 
     assert code == 1
     mock_rag.insert_content_list.assert_not_called()
+
+
+def _patch_hf_ingest(fake_emb, mock_lr, mock_rag):
+    return (
+        patch(
+            "raganything.local_hf_embedding.make_local_hf_embedding_func",
+            return_value=fake_emb,
+        ),
+        patch("lightrag.LightRAG", return_value=mock_lr),
+        patch("raganything.RAGAnything", return_value=mock_rag),
+    )
+
+
+def _hf_ingest_mocks():
+    fake_emb = MagicMock()
+    mock_lr = MagicMock()
+    mock_lr.initialize_storages = AsyncMock()
+    mock_lr.finalize_storages = AsyncMock()
+    mock_rag = MagicMock()
+    mock_rag.insert_content_list = AsyncMock()
+    mock_rag.finalize_storages = AsyncMock()
+    return fake_emb, mock_lr, mock_rag
+
+
+@pytest.mark.asyncio
+async def test_non_list_json_does_not_drop_sibling_list(bicl, monkeypatch, tmp_path):
+    """A MinerU object wrapper must fail the job without skipping valid manuals."""
+    monkeypatch.setenv("EMBEDDING_BACKEND", "hf")
+    repo = tmp_path / "repo"
+    out = repo / "output" / "data_upload_test_v3" / "plant-a"
+    out.mkdir(parents=True)
+    (out / "a_wrapped_content_list_v2.json").write_text(
+        json.dumps({"content_list": [{"type": "text", "text": "lost"}]}),
+        encoding="utf-8",
+    )
+    good = [{"type": "text", "text": "pump torque"}]
+    (out / "b_manual_content_list_v2.json").write_text(
+        json.dumps(good), encoding="utf-8"
+    )
+    wd = tmp_path / "wd"
+    wd.mkdir()
+    monkeypatch.setattr(
+        sys,
+        "argv",
+        [
+            "batch_ingest_content_lists_local_hf",
+            "-w",
+            str(wd),
+            "--data-repo-root",
+            str(repo),
+        ],
+    )
+
+    fake_emb, mock_lr, mock_rag = _hf_ingest_mocks()
+    embed_patch, lightrag_patch, rag_patch = _patch_hf_ingest(
+        fake_emb, mock_lr, mock_rag
+    )
+    with embed_patch, lightrag_patch, rag_patch:
+        code = await bicl.async_main()
+
+    assert code == 1
+    mock_rag.insert_content_list.assert_awaited_once()
+    call = mock_rag.insert_content_list.await_args
+    assert call.args[0] == good
+    assert call.kwargs["file_path"] == str(
+        Path("output")
+        / "data_upload_test_v3"
+        / "plant-a"
+        / "b_manual_content_list_v2.json"
+    )
+    mock_rag.finalize_storages.assert_awaited_once()
+
+
+@pytest.mark.asyncio
+async def test_invalid_json_does_not_drop_sibling_list(bicl, monkeypatch, tmp_path):
+    """A corrupt content-list file must not abort the rest of the v3 tree."""
+    monkeypatch.setenv("EMBEDDING_BACKEND", "hf")
+    repo = tmp_path / "repo"
+    out = repo / "output" / "data_upload_test_v3"
+    out.mkdir(parents=True)
+    (out / "a_corrupt_content_list_v2.json").write_text("{not-json", encoding="utf-8")
+    good = [{"type": "text", "text": "valve limit"}]
+    (out / "b_manual_content_list_v2.json").write_text(
+        json.dumps(good), encoding="utf-8"
+    )
+    wd = tmp_path / "wd"
+    wd.mkdir()
+    monkeypatch.setattr(
+        sys,
+        "argv",
+        [
+            "batch_ingest_content_lists_local_hf",
+            "-w",
+            str(wd),
+            "--data-repo-root",
+            str(repo),
+        ],
+    )
+
+    fake_emb, mock_lr, mock_rag = _hf_ingest_mocks()
+    embed_patch, lightrag_patch, rag_patch = _patch_hf_ingest(
+        fake_emb, mock_lr, mock_rag
+    )
+    with embed_patch, lightrag_patch, rag_patch:
+        code = await bicl.async_main()
+
+    assert code == 1
+    mock_rag.insert_content_list.assert_awaited_once()
+    call = mock_rag.insert_content_list.await_args
+    assert call.args[0] == good
+    assert call.kwargs["file_path"] == str(
+        Path("output") / "data_upload_test_v3" / "b_manual_content_list_v2.json"
+    )
+    mock_rag.finalize_storages.assert_awaited_once()
