@@ -266,15 +266,45 @@ async def _iter_llm_chunks(
             yield chunk if isinstance(chunk, str) else str(chunk)
 
 
+def _cached_clarify_keyword_extras(query: str) -> dict[str, list[str]]:
+    """Reuse keywords produced by the gate probe for the identical answer query."""
+    from query_progress_hooks import get_clarify_context_injection  # noqa: WPS433
+
+    injection = get_clarify_context_injection()
+    if not injection or str(injection.get("query") or "").strip() != query.strip():
+        return {}
+    raw_data = injection.get("raw_data")
+    metadata = raw_data.get("metadata") if isinstance(raw_data, dict) else None
+    keywords = metadata.get("keywords") if isinstance(metadata, dict) else None
+    if not isinstance(keywords, dict):
+        return {}
+
+    extras: dict[str, list[str]] = {}
+    for source, target in (("high_level", "hl_keywords"), ("low_level", "ll_keywords")):
+        values = keywords.get(source)
+        if isinstance(values, list):
+            normalized = [
+                value.strip()
+                for value in values
+                if isinstance(value, str) and value.strip()
+            ]
+            if normalized:
+                extras[target] = normalized
+    return extras
+
+
 async def _run_aquery(q: str, mode: str, *, stream: bool) -> str | AsyncIterator[str]:
     rpc = _load_rpc()
+    extras = rpc._query_extras_from_env(q)
+    for key, value in _cached_clarify_keyword_extras(q).items():
+        extras.setdefault(key, value)
     async with state.lock:
         return await state.rag.aquery(
             q,
             mode=mode,
             stream=stream,
             vlm_enhanced=False,
-            **rpc._query_extras_from_env(q),
+            **extras,
         )
 
 

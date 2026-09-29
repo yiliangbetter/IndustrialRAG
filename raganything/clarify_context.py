@@ -156,6 +156,7 @@ class CachedQueryBundle:
 
     def to_injection(self) -> dict[str, Any]:
         return {
+            "query": self.query,
             "context_str": self.context_str,
             "raw_data": self.raw_data,
         }

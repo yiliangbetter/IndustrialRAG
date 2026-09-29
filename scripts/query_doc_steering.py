@@ -994,31 +994,21 @@ def install_catalog_rerank_threshold() -> None:
     if getattr(orig, "_catalog_rerank_wrapped", False):
         return
 
-    async def _wrapped(
-        query: str,
-        unique_chunks: list[dict],
-        query_param: Any,
-        global_config: dict,
-        source_type: str = "mixed",
-        chunk_token_limit: int | None = None,
-    ):
+    async def _wrapped(*args: Any, **kwargs: Any):
+        query = args[0] if args else kwargs.get("query", "")
+        global_config = args[3] if len(args) > 3 else kwargs.get("global_config", {})
         prev_min: float | None = None
-        if is_catalog_product_model_query(query) and _env_bool(
-            "RAG_CATALOG_QUERY_RERANK", True
+        if (
+            isinstance(global_config, dict)
+            and is_catalog_product_model_query(str(query))
+            and _env_bool("RAG_CATALOG_QUERY_RERANK", True)
         ):
             prev_min = float(
                 global_config.get("min_rerank_score", _default_min_rerank_score())
             )
             global_config["min_rerank_score"] = catalog_query_min_rerank_score()
         try:
-            return await orig(
-                query,
-                unique_chunks,
-                query_param,
-                global_config,
-                source_type,
-                chunk_token_limit,
-            )
+            return await orig(*args, **kwargs)
         finally:
             if prev_min is not None:
                 global_config["min_rerank_score"] = prev_min
