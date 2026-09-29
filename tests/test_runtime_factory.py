@@ -17,6 +17,7 @@ _PROVIDER_ENV = (
     "OPENAI_BASE_URL",
     "EMBEDDING_BINDING_HOST",
     "LLM_MODEL",
+    "LLM_ENABLE_THINKING",
     "VISION_MODEL",
     "EMBEDDING_BACKEND",
     "EMBEDDING_DIM",
@@ -48,6 +49,7 @@ def test_provider_settings_preserve_key_and_base_url_precedence(monkeypatch, tmp
     assert default.llm_key == "openai-key"
     assert binding_first.llm_key == "binding-key"
     assert default.llm_base_url == "https://openai-compatible.example/v1"
+    assert default.llm_enable_thinking is None
     assert binding_only_url.llm_base_url is None
     assert default.embedding_dim == 1536
     assert default.embedding_model == "text-embedding-3-small"
@@ -75,6 +77,7 @@ async def test_create_runtime_wires_openai_models_and_light_rag(monkeypatch, tmp
     monkeypatch.setenv("LLM_BINDING_HOST", "https://llm.example/v1")
     monkeypatch.setenv("EMBEDDING_BINDING_HOST", "https://embed.example/v1")
     monkeypatch.setenv("LLM_MODEL", "text-model")
+    monkeypatch.setenv("LLM_ENABLE_THINKING", "false")
     monkeypatch.setenv("VISION_MODEL", "vision-model")
 
     completions = []
@@ -154,8 +157,20 @@ async def test_create_runtime_wires_openai_models_and_light_rag(monkeypatch, tmp
             "history_messages": [],
             "api_key": "llm-key",
             "base_url": "https://llm.example/v1",
+            "extra_body": {"enable_thinking": False},
         },
     )
+    assert (
+        await llm(
+            "override",
+            extra_body={"enable_thinking": True, "provider_option": "kept"},
+        )
+        == "response"
+    )
+    assert completions[-1][1]["extra_body"] == {
+        "enable_thinking": True,
+        "provider_option": "kept",
+    }
     assert await vision("inspect", image_data="abc") == "response"
     args, kwargs = completions[-1]
     assert args == ("vision-model", "")
@@ -208,6 +223,14 @@ async def test_create_runtime_preserves_sync_wrapper_and_hf_backend(
     assert await llm("question") == "response"
     assert local_calls == [((1024,), {"embedding_model": "BAAI/bge-m3"})]
     assert runtime.rag.kwargs["embedding_func"] is local_embedding
+
+
+def test_provider_settings_reject_invalid_thinking_flag(monkeypatch, tmp_path):
+    monkeypatch.setenv("OPENAI_API_KEY", "llm-key")
+    monkeypatch.setenv("LLM_ENABLE_THINKING", "sometimes")
+
+    with pytest.raises(ValueError, match="LLM_ENABLE_THINKING"):
+        factory.ProviderSettings.from_env(factory.RuntimeOptions(project_root=tmp_path))
 
 
 def test_cli_scripts_use_the_shared_runtime_factory():
