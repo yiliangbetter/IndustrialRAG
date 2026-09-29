@@ -53,6 +53,22 @@ def test_provider_settings_preserve_key_and_base_url_precedence(monkeypatch, tmp
     assert default.embedding_model == "text-embedding-3-small"
 
 
+@pytest.mark.parametrize(
+    ("kwargs", "expected"),
+    [
+        ({}, {}),
+        ({"stream": False}, {"stream": False}),
+        ({"stream": True}, {"stream": True, "enable_cot": True}),
+        (
+            {"stream": True, "enable_cot": False},
+            {"stream": True, "enable_cot": False},
+        ),
+    ],
+)
+def test_streaming_cot_default_preserves_caller_override(kwargs, expected):
+    assert factory._with_streaming_cot(kwargs) == expected
+
+
 def test_provider_settings_require_host_specific_embedding_key(monkeypatch, tmp_path):
     monkeypatch.setenv("OPENAI_API_KEY", "llm-key")
     monkeypatch.setenv("EMBEDDING_BINDING_HOST", "https://embed.example/v1")
@@ -156,6 +172,12 @@ async def test_create_runtime_wires_openai_models_and_light_rag(monkeypatch, tmp
             "base_url": "https://llm.example/v1",
         },
     )
+    assert await llm("stream question", stream=True) == "response"
+    assert completions[-1][1]["stream"] is True
+    assert completions[-1][1]["enable_cot"] is True
+    assert await llm("private stream", stream=True, enable_cot=False) == "response"
+    assert completions[-1][1]["enable_cot"] is False
+
     assert await vision("inspect", image_data="abc") == "response"
     args, kwargs = completions[-1]
     assert args == ("vision-model", "")

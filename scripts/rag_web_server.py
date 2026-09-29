@@ -488,6 +488,7 @@ def _finalize_web_timing(
     *,
     gate_wall_s: float,
     answer_wall_s: float | None = None,
+    first_response_s: float | None = None,
     first_answer_s: float | None = None,
     answer_skipped: str | None = None,
 ) -> dict[str, Any] | None:
@@ -505,6 +506,8 @@ def _finalize_web_timing(
     }
     if answer_wall_s is not None:
         extra["answer_wall_s"] = round(answer_wall_s, 1)
+    if first_response_s is not None:
+        extra["first_response_s"] = round(first_response_s, 3)
     if first_answer_s is not None:
         extra["first_answer_s"] = round(first_answer_s, 3)
     if answer_skipped:
@@ -512,17 +515,18 @@ def _finalize_web_timing(
     return finish_query_trace(**extra)
 
 
-def _mark_first_answer(
+def _mark_first_delta(
     request_started: float,
     current: float | None,
+    metric: str,
 ) -> float:
-    """Record time-to-first-answer once and return the stable elapsed value."""
+    """Record one first-delta metric and return its stable elapsed value."""
     if current is not None:
         return current
     elapsed = time.perf_counter() - request_started
     from raganything.query_timing_trace import trace_event  # noqa: WPS433
 
-    trace_event("first_answer_delta", first_answer_s=round(elapsed, 3))
+    trace_event(f"{metric}_delta", **{f"{metric}_s": round(elapsed, 3)})
     return elapsed
 
 
@@ -1432,6 +1436,7 @@ async def _query_stream_events(
         thinking_parts: list[str] = []
         answer_parts: list[str] = []
         stream_error: str | None = None
+        first_response_s: float | None = None
         first_answer_s: float | None = None
 
         result_queue: asyncio.Queue[tuple[str, Any]] = asyncio.Queue(maxsize=1)
@@ -1496,13 +1501,25 @@ async def _query_stream_events(
                                     if not piece:
                                         continue
                                     if ev_kind == "thinking":
+                                        first_response_s = _mark_first_delta(
+                                            request_started,
+                                            first_response_s,
+                                            "first_response",
+                                        )
                                         thinking_parts.append(piece)
                                         yield _sse(
                                             {"type": "thinking_delta", "text": piece}
                                         )
                                     else:
-                                        first_answer_s = _mark_first_answer(
-                                            request_started, first_answer_s
+                                        first_response_s = _mark_first_delta(
+                                            request_started,
+                                            first_response_s,
+                                            "first_response",
+                                        )
+                                        first_answer_s = _mark_first_delta(
+                                            request_started,
+                                            first_answer_s,
+                                            "first_answer",
                                         )
                                         answer_parts.append(piece)
                                         yield _sse(
@@ -1512,13 +1529,25 @@ async def _query_stream_events(
                                 if not piece:
                                     continue
                                 if ev_kind == "thinking":
+                                    first_response_s = _mark_first_delta(
+                                        request_started,
+                                        first_response_s,
+                                        "first_response",
+                                    )
                                     thinking_parts.append(piece)
                                     yield _sse(
                                         {"type": "thinking_delta", "text": piece}
                                     )
                                 else:
-                                    first_answer_s = _mark_first_answer(
-                                        request_started, first_answer_s
+                                    first_response_s = _mark_first_delta(
+                                        request_started,
+                                        first_response_s,
+                                        "first_response",
+                                    )
+                                    first_answer_s = _mark_first_delta(
+                                        request_started,
+                                        first_answer_s,
+                                        "first_answer",
                                     )
                                     piece = strip_manual_circled_step_markers(piece)
                                     answer_parts.append(piece)
@@ -1565,6 +1594,7 @@ async def _query_stream_events(
                             gate_result,
                             gate_wall_s=gate_wall_s,
                             answer_wall_s=answer_wall_s,
+                            first_response_s=first_response_s,
                             first_answer_s=first_answer_s,
                         )
                         dump_path = _persist_query_debug_dump(

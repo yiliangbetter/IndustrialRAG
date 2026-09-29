@@ -110,6 +110,12 @@ class _Dependencies:
     logger: Any
 
 
+def _with_streaming_cot(kwargs: dict[str, Any]) -> dict[str, Any]:
+    if not kwargs.get("stream") or "enable_cot" in kwargs:
+        return kwargs
+    return {**kwargs, "enable_cot": True}
+
+
 def _load_dependencies() -> _Dependencies:
     """Load heavyweight ML dependencies only after CLI environment setup."""
     from lightrag import LightRAG
@@ -147,6 +153,7 @@ async def create_rag_runtime(
 
     def call_llm(prompt, system_prompt=None, history_messages=None, **kwargs):
         history = [] if history_messages is None else history_messages
+        kwargs = _with_streaming_cot(kwargs)
         return deps.openai_complete(
             settings.llm_model,
             prompt,

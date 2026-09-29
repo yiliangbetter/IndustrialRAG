@@ -13,7 +13,11 @@ SCRIPTS = Path(__file__).resolve().parents[1] / "scripts"
 if str(SCRIPTS) not in sys.path:
     sys.path.insert(0, str(SCRIPTS))
 
-from rag_web_server import _iter_hook_events_until_task_done  # noqa: E402
+import rag_web_server  # noqa: E402
+from rag_web_server import (  # noqa: E402
+    _iter_hook_events_until_task_done,
+    _mark_first_delta,
+)
 
 
 @pytest.mark.asyncio
@@ -30,6 +34,21 @@ async def test_completed_gate_does_not_wait_for_poll_timeout() -> None:
 
     assert events == []
     assert elapsed < 0.04
+
+
+def test_first_delta_metric_is_recorded_once(monkeypatch) -> None:
+    events = []
+    monkeypatch.setattr(rag_web_server.time, "perf_counter", lambda: 12.5)
+    monkeypatch.setattr(
+        "raganything.query_timing_trace.trace_event",
+        lambda kind, **detail: events.append((kind, detail)),
+    )
+
+    first = _mark_first_delta(10.0, None, "first_response")
+    repeated = _mark_first_delta(10.0, first, "first_response")
+
+    assert first == repeated == 2.5
+    assert events == [("first_response_delta", {"first_response_s": 2.5})]
 
 
 @pytest.mark.asyncio
