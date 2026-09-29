@@ -35,7 +35,6 @@ class ProviderSettings:
     llm_base_url: str | None
     embedding_base_url: str | None
     llm_model: str
-    llm_enable_thinking: bool | None
     vision_model: str
     embedding_backend: str
     embedding_dim: int
@@ -82,7 +81,6 @@ class ProviderSettings:
             llm_base_url=llm_base_url or None,
             embedding_base_url=embedding_host or llm_base_url or None,
             llm_model=llm_model,
-            llm_enable_thinking=_optional_env_bool("LLM_ENABLE_THINKING"),
             vision_model=os.getenv("VISION_MODEL", llm_model),
             embedding_backend=backend,
             embedding_dim=int(os.getenv("EMBEDDING_DIM", str(defaults[0]))),
@@ -110,31 +108,6 @@ class _Dependencies:
     ensure_hf_home: Callable[..., Any]
     build_reranker: Callable[..., Any]
     logger: Any
-
-
-def _optional_env_bool(name: str) -> bool | None:
-    raw = os.getenv(name, "").strip().lower()
-    if not raw:
-        return None
-    if raw in {"1", "true", "yes", "on"}:
-        return True
-    if raw in {"0", "false", "no", "off"}:
-        return False
-    raise ValueError(f"{name} must be a boolean value, got {raw!r}")
-
-
-def _with_llm_request_defaults(
-    kwargs: dict[str, Any],
-    *,
-    enable_thinking: bool | None,
-) -> dict[str, Any]:
-    if enable_thinking is None:
-        return kwargs
-    request_kwargs = dict(kwargs)
-    extra_body = dict(request_kwargs.get("extra_body") or {})
-    extra_body.setdefault("enable_thinking", enable_thinking)
-    request_kwargs["extra_body"] = extra_body
-    return request_kwargs
 
 
 def _load_dependencies() -> _Dependencies:
@@ -174,10 +147,6 @@ async def create_rag_runtime(
 
     def call_llm(prompt, system_prompt=None, history_messages=None, **kwargs):
         history = [] if history_messages is None else history_messages
-        kwargs = _with_llm_request_defaults(
-            kwargs,
-            enable_thinking=settings.llm_enable_thinking,
-        )
         return deps.openai_complete(
             settings.llm_model,
             prompt,
