@@ -495,10 +495,21 @@ class Parser:
                                     spaceAfter=8,
                                     spaceBefore=16 if level <= 2 else 12,
                                 )
+                                # Escape special characters for ReportLab
+                                header_text = (
+                                    header_text.replace("&", "&amp;")
+                                    .replace("<", "&lt;")
+                                    .replace(">", "&gt;")
+                                )
                                 story.append(Paragraph(header_text, header_style))
                         else:
-                            # Regular text
-                            story.append(Paragraph(line, normal_style))
+                            # Regular text. Escape special characters for ReportLab
+                            safe_line = (
+                                line.replace("&", "&amp;")
+                                .replace("<", "&lt;")
+                                .replace(">", "&gt;")
+                            )
+                            story.append(Paragraph(safe_line, normal_style))
                             story.append(Spacer(1, 6))
                 else:
                     # Handle plain text files (.txt)
