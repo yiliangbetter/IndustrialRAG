@@ -20,6 +20,20 @@ from .ingest_coalesce import (
 from .machine_derive import derive_machine_from_docname
 
 
+def build_lightrag_global_config(lightrag: Any) -> dict[str, Any]:
+    """Build an operation config that includes LightRAG's runtime LLM roles.
+
+    Recent LightRAG releases keep role wrappers outside ``__dict__`` and add
+    them in ``_build_global_config``. Passing ``__dict__`` directly therefore
+    breaks merge summaries with ``KeyError: role_llm_funcs``. The fallback
+    retains compatibility with older LightRAG releases.
+    """
+    builder = getattr(lightrag, "_build_global_config", None)
+    if callable(builder):
+        return builder()
+    return dict(lightrag.__dict__)
+
+
 def compute_ingest_chunk_id(
     full_doc_id: str, chunk_order_index: int, content: str
 ) -> str:
@@ -187,7 +201,7 @@ async def insert_doc_scoped_text_content(
         knowledge_graph_inst=lightrag.chunk_entity_relation_graph,
         entity_vdb=lightrag.entities_vdb,
         relationships_vdb=lightrag.relationships_vdb,
-        global_config=lightrag.__dict__,
+        global_config=build_lightrag_global_config(lightrag),
         full_entities_storage=lightrag.full_entities,
         full_relations_storage=lightrag.full_relations,
         doc_id=doc_id,

@@ -13,7 +13,7 @@ import base64
 import json
 import re
 import time
-from dataclasses import asdict, dataclass
+from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Dict, List, Tuple
 
@@ -24,7 +24,7 @@ from lightrag.utils import compute_mdhash_id, logger
 
 # Import prompt templates
 from raganything.prompt import PROMPTS
-from raganything.utils import compute_ingest_chunk_id
+from raganything.utils import build_lightrag_global_config, compute_ingest_chunk_id
 
 
 @dataclass
@@ -391,7 +391,6 @@ class BaseModalProcessor:
         # Use LightRAG's configuration and functions
         self.embedding_func = lightrag.embedding_func
         self.llm_model_func = lightrag.llm_model_func
-        self.global_config = asdict(lightrag)
         self.hashing_kv = lightrag.llm_response_cache
         self.tokenizer = lightrag.tokenizer
 
@@ -889,7 +888,7 @@ class BaseModalProcessor:
         # Extract entities and relationships
         chunk_results = await extract_entities(
             chunks=chunks,
-            global_config=self.global_config,
+            global_config=build_lightrag_global_config(self.lightrag),
             pipeline_status=pipeline_status,
             pipeline_status_lock=pipeline_status_lock,
             llm_response_cache=self.hashing_kv,
@@ -941,7 +940,7 @@ class BaseModalProcessor:
                 knowledge_graph_inst=self.knowledge_graph_inst,
                 entity_vdb=self.entities_vdb,
                 relationships_vdb=self.relationships_vdb,
-                global_config=self.global_config,
+                global_config=build_lightrag_global_config(self.lightrag),
                 full_entities_storage=self.lightrag.full_entities,
                 full_relations_storage=self.lightrag.full_relations,
                 doc_id=doc_id,

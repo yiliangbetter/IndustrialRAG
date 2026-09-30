@@ -139,6 +139,7 @@ from .ingest_coalesce import (  # noqa: F401
 from .ingest_insert import (  # noqa: F401
     _resolve_ingest_segments,
     _status_field,
+    build_lightrag_global_config,
     compute_ingest_chunk_id,
     get_processor_for_type,
     get_processor_supports,
