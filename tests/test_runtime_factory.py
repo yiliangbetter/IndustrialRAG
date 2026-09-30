@@ -21,6 +21,7 @@ _PROVIDER_ENV = (
     "EMBEDDING_BACKEND",
     "EMBEDDING_DIM",
     "EMBEDDING_MODEL",
+    "KEYWORD_LLM_ENABLE_THINKING",
 )
 
 
@@ -69,6 +70,24 @@ def test_streaming_cot_default_preserves_caller_override(kwargs, expected):
     assert factory._with_streaming_cot(kwargs) == expected
 
 
+def test_keyword_thinking_hint_preserves_caller_override():
+    assert factory._with_keyword_thinking({}, None) == {}
+    assert factory._with_keyword_thinking({}, False) == {
+        "extra_body": {"enable_thinking": False}
+    }
+    assert factory._with_keyword_thinking(
+        {"extra_body": {"enable_thinking": True, "other": "value"}}, False
+    ) == {"extra_body": {"enable_thinking": True, "other": "value"}}
+
+
+def test_keyword_thinking_setting_rejects_invalid_bool(monkeypatch, tmp_path):
+    monkeypatch.setenv("OPENAI_API_KEY", "llm-key")
+    monkeypatch.setenv("KEYWORD_LLM_ENABLE_THINKING", "sometimes")
+
+    with pytest.raises(SystemExit, match="KEYWORD_LLM_ENABLE_THINKING"):
+        factory.ProviderSettings.from_env(factory.RuntimeOptions(project_root=tmp_path))
+
+
 def test_provider_settings_require_host_specific_embedding_key(monkeypatch, tmp_path):
     monkeypatch.setenv("OPENAI_API_KEY", "llm-key")
     monkeypatch.setenv("EMBEDDING_BINDING_HOST", "https://embed.example/v1")
@@ -92,6 +111,7 @@ async def test_create_runtime_wires_openai_models_and_light_rag(monkeypatch, tmp
     monkeypatch.setenv("EMBEDDING_BINDING_HOST", "https://embed.example/v1")
     monkeypatch.setenv("LLM_MODEL", "text-model")
     monkeypatch.setenv("VISION_MODEL", "vision-model")
+    monkeypatch.setenv("KEYWORD_LLM_ENABLE_THINKING", "false")
 
     completions = []
     hf_home_calls = []
@@ -178,6 +198,32 @@ async def test_create_runtime_wires_openai_models_and_light_rag(monkeypatch, tmp
     assert await llm("private stream", stream=True, enable_cot=False) == "response"
     assert completions[-1][1]["enable_cot"] is False
 
+    keyword_llm = light_rag.kwargs["role_llm_configs"]["keyword"]["func"]
+    assert (
+        await keyword_llm(
+            "keywords",
+            response_format={"type": "json_object"},
+            extra_body={"provider_option": "kept"},
+        )
+        == "response"
+    )
+    assert completions[-1][1]["extra_body"] == {
+        "provider_option": "kept",
+        "enable_thinking": False,
+    }
+    assert (
+        await keyword_llm(
+            "keywords",
+            extra_body={"enable_thinking": True},
+        )
+        == "response"
+    )
+    assert completions[-1][1]["extra_body"] == {"enable_thinking": True}
+
+    assert await llm("final answer", stream=True) == "response"
+    assert "extra_body" not in completions[-1][1]
+    assert completions[-1][1]["enable_cot"] is True
+
     assert await vision("inspect", image_data="abc") == "response"
     args, kwargs = completions[-1]
     assert args == ("vision-model", "")
@@ -230,6 +276,7 @@ async def test_create_runtime_preserves_sync_wrapper_and_hf_backend(
     assert await llm("question") == "response"
     assert local_calls == [((1024,), {"embedding_model": "BAAI/bge-m3"})]
     assert runtime.rag.kwargs["embedding_func"] is local_embedding
+    assert "role_llm_configs" not in runtime.rag.kwargs["lightrag"].kwargs
 
 
 def test_cli_scripts_use_the_shared_runtime_factory():

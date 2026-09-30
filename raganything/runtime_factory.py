@@ -12,6 +12,28 @@ from typing import Any
 from .config import RAGAnythingConfig
 
 
+def _optional_env_bool(name: str) -> bool | None:
+    raw = os.getenv(name, "").strip().lower()
+    if not raw:
+        return None
+    if raw in {"1", "true", "yes", "on"}:
+        return True
+    if raw in {"0", "false", "no", "off"}:
+        return False
+    raise SystemExit(f"{name} must be true/false when set.")
+
+
+def _with_keyword_thinking(
+    kwargs: dict[str, Any], enabled: bool | None
+) -> dict[str, Any]:
+    """Apply a provider thinking hint without overriding an explicit caller value."""
+    if enabled is None:
+        return kwargs
+    extra_body = dict(kwargs.get("extra_body") or {})
+    extra_body.setdefault("enable_thinking", enabled)
+    return {**kwargs, "extra_body": extra_body}
+
+
 @dataclass(frozen=True)
 class RuntimeOptions:
     """Caller-specific LightRAG options that should not be hidden in the factory."""
@@ -39,6 +61,7 @@ class ProviderSettings:
     embedding_backend: str
     embedding_dim: int
     embedding_model: str
+    keyword_llm_enable_thinking: bool | None
 
     @classmethod
     def from_env(cls, options: RuntimeOptions) -> ProviderSettings:
@@ -85,6 +108,9 @@ class ProviderSettings:
             embedding_backend=backend,
             embedding_dim=int(os.getenv("EMBEDDING_DIM", str(defaults[0]))),
             embedding_model=os.getenv("EMBEDDING_MODEL", defaults[1]).strip(),
+            keyword_llm_enable_thinking=_optional_env_bool(
+                "KEYWORD_LLM_ENABLE_THINKING"
+            ),
         )
 
 
@@ -223,6 +249,28 @@ async def create_rag_runtime(
         llm_model_func = call_llm
         vision_model_func = call_vision
 
+    keyword_llm_model_func = None
+    if settings.keyword_llm_enable_thinking is not None:
+        if options.await_model_calls:
+
+            async def keyword_llm_model_func(*args, **kwargs):
+                return await llm_model_func(
+                    *args,
+                    **_with_keyword_thinking(
+                        kwargs, settings.keyword_llm_enable_thinking
+                    ),
+                )
+
+        else:
+
+            def keyword_llm_model_func(*args, **kwargs):
+                return llm_model_func(
+                    *args,
+                    **_with_keyword_thinking(
+                        kwargs, settings.keyword_llm_enable_thinking
+                    ),
+                )
+
     if settings.embedding_backend == "hf":
         embedding = deps.local_embedding(
             settings.embedding_dim,
@@ -250,6 +298,10 @@ async def create_rag_runtime(
     }
     if options.enable_rerank:
         light_rag_kwargs["rerank_model_func"] = deps.build_reranker()
+    if keyword_llm_model_func is not None:
+        light_rag_kwargs["role_llm_configs"] = {
+            "keyword": {"func": keyword_llm_model_func}
+        }
     light_rag = deps.light_rag(**light_rag_kwargs)
     await light_rag.initialize_storages()
 
