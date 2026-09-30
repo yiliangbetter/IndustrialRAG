@@ -582,6 +582,9 @@ async def _main(args: argparse.Namespace) -> tuple[Path, Path, bool]:
         "RAG_WEB_PARSER_OUTPUT_DIR": index["parser"],
     }
     os.environ.update(benchmark_env)
+    # The Web server's client-mode bootstrap reloads .env during import. Keep
+    # explicit shell overrides (model paths, gate settings, A/B knobs) stable.
+    isolated_environment = dict(os.environ)
     cases = _load_cases(args.cases, set(args.case_ids or []))
 
     from rag_pipeline_parse_graph_chat import _build_rag
@@ -599,7 +602,7 @@ async def _main(args: argparse.Namespace) -> tuple[Path, Path, bool]:
 
     # rag_web_server applies the development/client env at import time. Restore
     # the isolated benchmark settings before any query-time helpers read them.
-    os.environ.update(benchmark_env)
+    os.environ.update(isolated_environment)
 
     web.state.rag = rag
     web.state.config = config
