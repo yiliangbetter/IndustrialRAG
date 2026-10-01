@@ -31,6 +31,9 @@ Parser = _load_parser_class()
         ("file.pdf", False),
         ("", False),
         ("ftp://example.com/x", True),
+        # A scheme without a host is a local path, not a remote download.
+        ("file:///etc/passwd", False),
+        ("http:///missing-host/file.pdf", False),
     ],
 )
 def test_is_url(value, expected):
@@ -59,6 +62,44 @@ def test_download_file_uses_extension_from_url_path(tmp_path):
         mock_open.assert_called_once()
         _, kwargs = mock_open.call_args
         assert kwargs.get("timeout") == 30, "must pass an explicit timeout"
+    finally:
+        if downloaded.exists():
+            downloaded.unlink()
+
+
+def test_download_keeps_url_suffix_when_content_type_disagrees():
+    """The path extension selects the parser later. A mismatched Content-Type must not retarget it."""
+    parser = Parser()
+    response = _fake_response(content_type="text/html; charset=utf-8")
+
+    with patch("urllib.request.urlopen", return_value=response):
+        downloaded = parser._download_file(
+            "https://cdn.example.com/manuals/pump.pdf?token=abc"
+        )
+
+    try:
+        assert downloaded.suffix == ".pdf"
+        assert downloaded.read_bytes() == b"%PDF-1.4 fake"
+        response.close.assert_called_once()
+    finally:
+        if downloaded.exists():
+            downloaded.unlink()
+
+
+def test_download_unknown_content_type_keeps_empty_suffix():
+    """An unrecognized type with no path suffix is still saved, without a guessed extension."""
+    parser = Parser()
+    response = _fake_response(
+        body=b"raw-bytes", content_type="application/x-industrial-scan"
+    )
+
+    with patch("urllib.request.urlopen", return_value=response):
+        downloaded = parser._download_file("https://example.com/download")
+
+    try:
+        assert downloaded.suffix == ""
+        assert downloaded.read_bytes() == b"raw-bytes"
+        response.close.assert_called_once()
     finally:
         if downloaded.exists():
             downloaded.unlink()
