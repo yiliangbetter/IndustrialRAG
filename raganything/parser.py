@@ -189,6 +189,29 @@ class Parser:
         return Path(base_dir) / f"{stem}_{path_hash}"
 
     @classmethod
+    def _conversion_pdf_destination(
+        cls,
+        source_path: Union[str, Path],
+        output_dir: Optional[str],
+        default_dirname: str,
+    ) -> Path:
+        """Return a PDF path that is unique to the source file, not just its stem.
+
+        Writing ``<output>/<stem>.pdf`` makes ``a/manual.docx`` and ``b/manual.docx``
+        (or ``manual.doc`` and ``manual.docx``) share one file. MinerU then hashes
+        that PDF path for its output directory, so the second parse replaces the
+        first document's content list while both conversions report success.
+        """
+        source_path = Path(source_path)
+        if output_dir:
+            parent = Path(output_dir)
+        else:
+            parent = source_path.parent / default_dirname
+        unique_dir = cls._unique_output_dir(parent, source_path)
+        unique_dir.mkdir(parents=True, exist_ok=True)
+        return unique_dir / f"{source_path.stem}.pdf"
+
+    @classmethod
     def convert_office_to_pdf(
         cls, doc_path: Union[str, Path], output_dir: Optional[str] = None
     ) -> Path:
@@ -209,15 +232,9 @@ class Parser:
             if not doc_path.exists():
                 raise FileNotFoundError(f"Office document does not exist: {doc_path}")
 
-            name_without_suff = doc_path.stem
-
-            # Prepare output directory
-            if output_dir:
-                base_output_dir = Path(output_dir)
-            else:
-                base_output_dir = doc_path.parent / "libreoffice_output"
-
-            base_output_dir.mkdir(parents=True, exist_ok=True)
+            final_pdf_path = cls._conversion_pdf_destination(
+                doc_path, output_dir, "libreoffice_output"
+            )
 
             # Create temporary directory for PDF conversion
             with tempfile.TemporaryDirectory() as temp_dir:
@@ -332,8 +349,7 @@ class Parser:
                         "Original file may have issues or LibreOffice conversion failed."
                     )
 
-                # Copy PDF to final output directory
-                final_pdf_path = base_output_dir / f"{name_without_suff}.pdf"
+                # Copy PDF to a source-specific path so same stems do not clobber
                 import shutil
 
                 shutil.copy2(pdf_path, final_pdf_path)
@@ -389,14 +405,9 @@ class Parser:
                         f"Could not decode text file {text_path.name} with any supported encoding"
                     )
 
-            # Prepare output directory
-            if output_dir:
-                base_output_dir = Path(output_dir)
-            else:
-                base_output_dir = text_path.parent / "reportlab_output"
-
-            base_output_dir.mkdir(parents=True, exist_ok=True)
-            pdf_path = base_output_dir / f"{text_path.stem}.pdf"
+            pdf_path = cls._conversion_pdf_destination(
+                text_path, output_dir, "reportlab_output"
+            )
 
             # Convert text to PDF
             cls.logger.info(f"Converting {text_path.name} to PDF...")
