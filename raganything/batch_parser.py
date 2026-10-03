@@ -264,6 +264,8 @@ class BatchParser:
         successful_files = []
         failed_files = []
         errors = {}
+        future_to_file = {}
+        recorded_futures = set()
 
         # Create progress bar if requested
         pbar = None
@@ -273,6 +275,27 @@ class BatchParser:
                 desc=f"Processing files ({self.parser_type})",
                 unit="file",
             )
+
+        def _record_completed(future) -> None:
+            """Record one finished future exactly once."""
+            if future in recorded_futures:
+                return
+            recorded_futures.add(future)
+            file_path = future_to_file.get(future, "unknown")
+            try:
+                success, file_path, error_msg = future.result()
+            except Exception as exc:
+                failed_files.append(file_path)
+                errors[file_path] = str(exc)
+                self.logger.error(f"Batch processing failed for {file_path}: {exc}")
+            else:
+                if success:
+                    successful_files.append(file_path)
+                else:
+                    failed_files.append(file_path)
+                    errors[file_path] = error_msg
+            if pbar:
+                pbar.update(1)
 
         try:
             with ThreadPoolExecutor(max_workers=self.max_workers) as executor:
@@ -288,33 +311,36 @@ class BatchParser:
                     for file_path in supported_files
                 }
 
-                # Process completed tasks
-                for future in as_completed(
-                    future_to_file, timeout=self.timeout_per_file
-                ):
-                    success, file_path, error_msg = future.result()
-
-                    if success:
-                        successful_files.append(file_path)
-                    else:
-                        failed_files.append(file_path)
-                        errors[file_path] = error_msg
-
-                    if pbar:
-                        pbar.update(1)
+                # as_completed(timeout=) is one deadline for the whole batch, not
+                # per file. Leaving the executor waits for work still running, so
+                # those completions must be recorded after this loop.
+                try:
+                    for future in as_completed(
+                        future_to_file, timeout=self.timeout_per_file
+                    ):
+                        _record_completed(future)
+                except TimeoutError as e:
+                    self.logger.warning(
+                        f"Batch wait exceeded {self.timeout_per_file}s ({e}); "
+                        "collecting results from files that finish during shutdown"
+                    )
 
         except Exception as e:
             self.logger.error(f"Batch processing failed: {str(e)}")
-            # Mark remaining files as failed
-            for future in future_to_file:
-                if not future.done():
-                    file_path = future_to_file[future]
-                    failed_files.append(file_path)
-                    errors[file_path] = f"Processing interrupted: {str(e)}"
-                    if pbar:
-                        pbar.update(1)
 
         finally:
+            # Executor shutdown waits for queued work before this runs. Record
+            # every finished file. Only futures that never started stay failed.
+            for future, file_path in future_to_file.items():
+                if future in recorded_futures:
+                    continue
+                if future.done() and not future.cancelled():
+                    _record_completed(future)
+                    continue
+                failed_files.append(file_path)
+                errors[file_path] = "Processing interrupted before the file started"
+                if pbar:
+                    pbar.update(1)
             if pbar:
                 pbar.close()
 
