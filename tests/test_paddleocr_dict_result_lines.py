@@ -1,11 +1,13 @@
 """PaddleOCR dict and result-object text extraction.
 
-Newer PaddleOCR builds return a page object (or a dict) with ``rec_texts``
-plus geometry, instead of the classic ``[box, (text, score)]`` tuples covered
-by ``tests/testpaddleocr_parser.py``. Walking every dict value after reading
-``rec_texts`` / ``text`` / ``texts`` would insert each line twice. Dropping
-``to_dict()`` would insert nothing. A single result object whose ``to_dict``
-fails must not discard the rest of the page.
+Newer PaddleOCR builds return a page object whose ``to_dict()`` holds
+``rec_texts`` plus geometry, instead of the classic ``[box, (text, score)]``
+tuples on ``main``. Walking ``rec_texts``, ``text``, and ``texts`` a second
+time while scanning the rest of the dict would insert each OCR line twice.
+A result object whose ``to_dict()`` fails must not discard a later page in
+the same result list.
+
+Confidence pairs and a lone failed ``to_dict()`` are covered elsewhere.
 """
 
 import importlib.util
@@ -79,11 +81,6 @@ def test_blank_and_non_text_rec_items_are_dropped():
     assert lines == ["Keep"]
 
 
-def test_text_score_pair_does_not_stringify_the_score():
-    parser = PaddleOCRParser()
-    assert parser._extract_text_lines(["  score-line  ", 0.87]) == ["score-line"]
-
-
 def test_broken_to_dict_does_not_drop_sibling_pages():
     parser = PaddleOCRParser()
     lines = parser._extract_text_lines(
@@ -93,8 +90,3 @@ def test_broken_to_dict_does_not_drop_sibling_pages():
         ]
     )
     assert lines == ["kept"]
-
-
-def test_to_dict_failure_on_the_only_result_returns_no_lines():
-    parser = PaddleOCRParser()
-    assert parser._extract_text_lines(_BrokenResult()) == []
