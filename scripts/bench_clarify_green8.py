@@ -40,7 +40,8 @@ sys.path.insert(0, str(_ROOT / "scripts"))
 load_dotenv(_ROOT / ".env", override=False)
 
 spec = importlib.util.spec_from_file_location(
-    "rag_pipeline_parse_graph_chat", _ROOT / "scripts" / "rag_pipeline_parse_graph_chat.py"
+    "rag_pipeline_parse_graph_chat",
+    _ROOT / "scripts" / "rag_pipeline_parse_graph_chat.py",
 )
 rpc = importlib.util.module_from_spec(spec)
 assert spec.loader is not None
@@ -230,7 +231,9 @@ def _format_gate_timing_lines(timing: dict[str, Any]) -> list[str]:
         parts.append(f"澄清循环={_fmt_duration_s(loop_s)}")
         lines.append(f"  小计 {' '.join(parts)}")
     if timing.get("gate_total_s") is not None:
-        lines.append(f"  门控合计(原问+澄清): {_fmt_duration_s(timing.get('gate_total_s'))}")
+        lines.append(
+            f"  门控合计(原问+澄清): {_fmt_duration_s(timing.get('gate_total_s'))}"
+        )
     return lines
 
 
@@ -468,9 +471,7 @@ async def _bench_case(
                     row["answer_preview"] = ans[:240].replace("\n", " ")
                     row["aquery_error"] = err
 
-    _finalize_timings(
-        row, gate_ms=gate_ms, answer_ms=answer_ms if answer_ms else None
-    )
+    _finalize_timings(row, gate_ms=gate_ms, answer_ms=answer_ms if answer_ms else None)
     row["answer_status"] = _answer_status(row)
     return row
 
@@ -577,9 +578,7 @@ def _format_report(rows: list[dict[str, Any]], *, source: str) -> str:
         for c in r.get("candidates") or []:
             fs = c.get("final_score")
             fs_label = fs if fs is not None else "llm_only"
-            lines.append(
-                f"  候选 [{c.get('id')}] final={fs_label} | {c.get('text')}"
-            )
+            lines.append(f"  候选 [{c.get('id')}] final={fs_label} | {c.get('text')}")
         if r.get("candidate_answers"):
             lines.append("  各候选答题 (--answer-all-candidates):")
             for ca in r["candidate_answers"]:
@@ -590,7 +589,9 @@ def _format_report(rows: list[dict[str, Any]], *, source: str) -> str:
                 )
                 if ca.get("answer_preview"):
                     lines.append(f"      摘要: {ca.get('answer_preview')}")
-        if r.get("picked_query") and r.get("pick_kind") not in ("all_candidates_sample",):
+        if r.get("picked_query") and r.get("pick_kind") not in (
+            "all_candidates_sample",
+        ):
             lines.append(
                 f"  点选: [{r.get('pick_candidate_id')}] final={r.get('pick_final_score')} | "
                 f"{r.get('picked_query')}"
@@ -610,8 +611,7 @@ async def _main(args: argparse.Namespace) -> None:
         os.getenv("RAG_WEB_WORKING_DIR") or (_ROOT / "data" / "rag_storage")
     ).resolve()
     pod = Path(
-        os.getenv("RAG_WEB_PARSER_OUTPUT_DIR")
-        or (_ROOT / "data" / "pipeline_parse")
+        os.getenv("RAG_WEB_PARSER_OUTPUT_DIR") or (_ROOT / "data" / "pipeline_parse")
     ).resolve()
     if not wd.is_dir():
         raise SystemExit(f"working_dir not found: {wd}")
@@ -669,7 +669,9 @@ async def _main(args: argparse.Namespace) -> None:
 
 
 def main() -> None:
-    p = argparse.ArgumentParser(description="Benchmark clarify gate v4 with phase timings.")
+    p = argparse.ArgumentParser(
+        description="Benchmark clarify gate v4 with phase timings."
+    )
     p.add_argument("--source", default="green8", help="green8, shili17, voice29, all")
     p.add_argument("--ids", default=None, help="Comma-separated case ids, e.g. 2,11,26")
     p.add_argument("--mode", default="mix")

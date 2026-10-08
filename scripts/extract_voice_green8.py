@@ -92,7 +92,9 @@ def main() -> None:
         "cases": cases,
     }
     args.out_json.parent.mkdir(parents=True, exist_ok=True)
-    args.out_json.write_text(json.dumps(green8, ensure_ascii=False, indent=2), encoding="utf-8")
+    args.out_json.write_text(
+        json.dumps(green8, ensure_ascii=False, indent=2), encoding="utf-8"
+    )
 
     txt_lines = [
         "# Excel A列标绿 — 技术话术 8 题",

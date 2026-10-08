@@ -39,7 +39,8 @@ sys.path.insert(0, str(_ROOT / "scripts"))
 load_dotenv(_ROOT / ".env", override=False)
 
 spec = importlib.util.spec_from_file_location(
-    "rag_pipeline_parse_graph_chat", _ROOT / "scripts" / "rag_pipeline_parse_graph_chat.py"
+    "rag_pipeline_parse_graph_chat",
+    _ROOT / "scripts" / "rag_pipeline_parse_graph_chat.py",
 )
 rpc = importlib.util.module_from_spec(spec)
 assert spec.loader is not None
@@ -167,7 +168,9 @@ def _format_context_reference_lines(refs: list[dict[str, Any]] | None) -> list[s
     return rows
 
 
-def _refs_detail_from_llm_input(llm_input: dict[str, Any] | None) -> tuple[int, list[str]]:
+def _refs_detail_from_llm_input(
+    llm_input: dict[str, Any] | None,
+) -> tuple[int, list[str]]:
     if not isinstance(llm_input, dict):
         return 0, []
     refs = llm_input.get("references")
@@ -200,10 +203,14 @@ def _refs_from_bundle(bundle: Any | None) -> int:
     return count
 
 
-def _check_probe_score_logic(row: dict[str, Any], *, min_thr: float) -> tuple[bool, list[str]]:
+def _check_probe_score_logic(
+    row: dict[str, Any], *, min_thr: float
+) -> tuple[bool, list[str]]:
     """C1: answerable iff final_score present (qualifying chunks exist)."""
     issues: list[str] = []
-    final_score = _fscore(row.get("original_final_score") or row.get("original_max_rerank"))
+    final_score = _fscore(
+        row.get("original_final_score") or row.get("original_max_rerank")
+    )
     answerable = bool(row.get("original_answerable"))
     chunks = int(row.get("original_llm_chunks") or 0)
 
@@ -226,7 +233,9 @@ def _check_gate_outcome_logic(
     outcome = row.get("gate_outcome")
     reason = row.get("gate_reason") or ""
     bypass = row.get("gate_bypass")
-    final_score = _fscore(row.get("original_final_score") or row.get("original_max_rerank"))
+    final_score = _fscore(
+        row.get("original_final_score") or row.get("original_max_rerank")
+    )
     cands = list(row.get("candidates") or [])
 
     effective = outcome or bypass
@@ -278,12 +287,16 @@ def _check_candidates_logic(
 
 
 def _attach_design_checks(row: dict[str, Any]) -> None:
-    min_thr = float(row.get("min_rerank_threshold") or clarify_candidate_min_rerank_score())
+    min_thr = float(
+        row.get("min_rerank_threshold") or clarify_candidate_min_rerank_score()
+    )
     direct_min = float(row.get("direct_rerank_min") or clarify_direct_rerank_min())
     k = int(row.get("k_required") or clarify_candidate_k())
     ok1, i1 = _check_probe_score_logic(row, min_thr=min_thr)
     ok2, i2 = _check_gate_outcome_logic(row, k=k, direct_min=direct_min)
-    ok3, i3 = _check_candidates_logic(list(row.get("candidates") or []), direct_min=direct_min)
+    ok3, i3 = _check_candidates_logic(
+        list(row.get("candidates") or []), direct_min=direct_min
+    )
 
     pick_ok = True
     pick_issues: list[str] = []
@@ -291,7 +304,8 @@ def _attach_design_checks(row: dict[str, Any]) -> None:
         picked = {
             "id": row.get("pick_candidate_id"),
             "chunk_count": row.get("pick_chunk_count"),
-            "final_score": row.get("pick_final_score") or row.get("pick_max_rerank_score"),
+            "final_score": row.get("pick_final_score")
+            or row.get("pick_max_rerank_score"),
             "max_rerank_score": row.get("pick_max_rerank_score"),
         }
         pick_ok, pick_issues = _check_candidates_logic([picked], direct_min=direct_min)
@@ -531,7 +545,9 @@ async def _replay_case(
     row["has_answer"] = bool(ans)
     row["answer_chars"] = len(ans)
     row["answer_has_reference"] = bool(aquery_meta.get("answer_has_reference"))
-    row["answer_reference_lines"] = list(aquery_meta.get("answer_reference_lines") or [])
+    row["answer_reference_lines"] = list(
+        aquery_meta.get("answer_reference_lines") or []
+    )
     row["llm_input_reference_count"] = int(
         aquery_meta.get("llm_input_reference_count") or 0
     )
@@ -580,13 +596,48 @@ _SOURCE_PRESETS: dict[str, Path | list[Path]] = {
 # Builtin fallback when data/voice_script_green8.json is absent (bench / replay).
 _BUILTIN_GREEN8_CASES: list[dict[str, Any]] = [
     {"id": 2, "standard_question": "漏胶", "category": "封边", "utterances": ["漏胶"]},
-    {"id": 4, "standard_question": "仿形效果不好", "category": "封边", "utterances": ["仿形效果不好"]},
-    {"id": 6, "standard_question": "气压报警？", "category": "所有", "utterances": ["气压报警？"]},
-    {"id": 7, "standard_question": "靠板上限？", "category": "电脑锯", "utterances": ["靠板上限？"]},
-    {"id": 11, "standard_question": "三相电异常", "category": "数控", "utterances": ["三相电异常"]},
-    {"id": 14, "standard_question": "变频器异常报警", "category": "数控", "utterances": ["变频器异常报警"]},
-    {"id": 26, "standard_question": "未检测到工作（板材）", "category": "数控", "utterances": ["未检测到工作（板材）"]},
-    {"id": 28, "standard_question": "未检测到工件", "category": "数控", "utterances": ["未检测到工件"]},
+    {
+        "id": 4,
+        "standard_question": "仿形效果不好",
+        "category": "封边",
+        "utterances": ["仿形效果不好"],
+    },
+    {
+        "id": 6,
+        "standard_question": "气压报警？",
+        "category": "所有",
+        "utterances": ["气压报警？"],
+    },
+    {
+        "id": 7,
+        "standard_question": "靠板上限？",
+        "category": "电脑锯",
+        "utterances": ["靠板上限？"],
+    },
+    {
+        "id": 11,
+        "standard_question": "三相电异常",
+        "category": "数控",
+        "utterances": ["三相电异常"],
+    },
+    {
+        "id": 14,
+        "standard_question": "变频器异常报警",
+        "category": "数控",
+        "utterances": ["变频器异常报警"],
+    },
+    {
+        "id": 26,
+        "standard_question": "未检测到工作（板材）",
+        "category": "数控",
+        "utterances": ["未检测到工作（板材）"],
+    },
+    {
+        "id": 28,
+        "standard_question": "未检测到工件",
+        "category": "数控",
+        "utterances": ["未检测到工件"],
+    },
 ]
 
 
@@ -606,7 +657,9 @@ def _missing_source_hint(path: Path) -> str:
     return f"用例文件不存在: {path}"
 
 
-def _load_all_cases(source_key: str, *, limit: int) -> tuple[list[dict[str, Any]], list[str]]:
+def _load_all_cases(
+    source_key: str, *, limit: int
+) -> tuple[list[dict[str, Any]], list[str]]:
     preset = _SOURCE_PRESETS.get(source_key, source_key)
     if isinstance(preset, list):
         rows: list[dict[str, Any]] = []
@@ -685,9 +738,7 @@ def _format_report(
     for r in rows:
         lines.append("-" * 72)
         src = r.get("source_set") or ""
-        lines.append(
-            f"#{r['id']} [{src}/{r.get('category','')}] {r['original_query']}"
-        )
+        lines.append(f"#{r['id']} [{src}/{r.get('category','')}] {r['original_query']}")
         lines.append(
             f"  gate_outcome={r.get('gate_outcome')} "
             f"clarify={'YES' if r['clarify_triggered'] else 'NO'}"
@@ -702,11 +753,17 @@ def _format_report(
         )
         if r["clarify_triggered"]:
             if r.get("gate_outcome") == "reject":
-                lines.append(f"  拒答 ({r.get('gate_reason')}): {r.get('pick_text') or ''}")
+                lines.append(
+                    f"  拒答 ({r.get('gate_reason')}): {r.get('pick_text') or ''}"
+                )
             else:
                 lines.append("  澄清推荐问法:")
                 for c in r.get("candidates") or []:
-                    rs = c.get("final_score") if c.get("final_score") is not None else c.get("max_rerank_score")
+                    rs = (
+                        c.get("final_score")
+                        if c.get("final_score") is not None
+                        else c.get("max_rerank_score")
+                    )
                     cc = c.get("chunk_count")
                     lines.append(
                         f"    - [{c.get('id')}] chunks={cc} final={rs} | {c.get('text')}"
@@ -871,7 +928,9 @@ def _format_design_report(
                 )
                 if r.get("has_answer"):
                     preview = (r.get("answer") or "").replace("\n", " ")[:160]
-                    lines.append(f"  回答摘要: {preview}{'…' if len(r.get('answer') or '') > 160 else ''}")
+                    lines.append(
+                        f"  回答摘要: {preview}{'…' if len(r.get('answer') or '') > 160 else ''}"
+                    )
         elif r.get("gate_outcome") == "reject":
             lines.append(f"  拒答: {r.get('pick_text') or ''}")
 
@@ -892,10 +951,17 @@ def _format_design_report(
         for r in failed:
             dc = r.get("design_checks") or {}
             parts = []
-            for k in ("c1_probe_score", "c2_gate_outcome", "c3_candidates_listed", "c3_picked_answer"):
+            for k in (
+                "c1_probe_score",
+                "c2_gate_outcome",
+                "c3_candidates_listed",
+                "c3_picked_answer",
+            ):
                 if not (dc.get(k) or {}).get("ok", True):
                     parts.extend((dc.get(k) or {}).get("issues") or [k])
-            lines.append(f"  #{r['id']} {r['original_query']}: {', '.join(parts) or 'unknown'}")
+            lines.append(
+                f"  #{r['id']} {r['original_query']}: {', '.join(parts) or 'unknown'}"
+            )
     lines.append("")
     return "\n".join(lines) + "\n"
 
@@ -906,8 +972,7 @@ async def _main(args: argparse.Namespace) -> None:
         os.getenv("RAG_WEB_WORKING_DIR") or (_ROOT / "data" / "rag_storage")
     ).resolve()
     pod = Path(
-        os.getenv("RAG_WEB_PARSER_OUTPUT_DIR")
-        or (_ROOT / "data" / "pipeline_parse")
+        os.getenv("RAG_WEB_PARSER_OUTPUT_DIR") or (_ROOT / "data" / "pipeline_parse")
     ).resolve()
     if not wd.is_dir():
         raise SystemExit(f"working_dir not found: {wd}")
@@ -926,7 +991,10 @@ async def _main(args: argparse.Namespace) -> None:
     try:
         for i, case in enumerate(cases, 1):
             q = case.get("query") or case.get("standard_question")
-            print(f"[{i}/{len(cases)}] {case.get('source_set')}#{case.get('id')} {q}", flush=True)
+            print(
+                f"[{i}/{len(cases)}] {case.get('source_set')}#{case.get('id')} {q}",
+                flush=True,
+            )
             row = await _replay_case(
                 rag,
                 case,
@@ -1028,9 +1096,7 @@ def main() -> None:
         args.out_report = _ROOT / "logs" / f"clarify_gate_{name}_replay_{ts}.txt"
     if args.out_design_report is None:
         name = args.source.replace("/", "_")
-        args.out_design_report = (
-            _ROOT / "logs" / f"clarify_gate_{name}_design_{ts}.txt"
-        )
+        args.out_design_report = _ROOT / "logs" / f"clarify_gate_{name}_design_{ts}.txt"
     asyncio.run(_main(args))
 
 

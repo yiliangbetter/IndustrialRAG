@@ -75,7 +75,9 @@ def _parse_voice_script_cases(
     return rows
 
 
-def _load_cases(source: Path, *, limit: int, group: str | None = None) -> list[dict[str, str]]:
+def _load_cases(
+    source: Path, *, limit: int, group: str | None = None
+) -> list[dict[str, str]]:
     if source.suffix.lower() == ".json":
         return _parse_voice_script_cases(source, limit=limit, group=group)
     return _parse_shili_questions(source, limit=limit)

@@ -18,7 +18,8 @@ sys.path.insert(0, str(_ROOT / "scripts"))
 load_dotenv(_ROOT / ".env", override=False)
 
 spec = importlib.util.spec_from_file_location(
-    "rag_pipeline_parse_graph_chat", _ROOT / "scripts" / "rag_pipeline_parse_graph_chat.py"
+    "rag_pipeline_parse_graph_chat",
+    _ROOT / "scripts" / "rag_pipeline_parse_graph_chat.py",
 )
 rpc = importlib.util.module_from_spec(spec)
 assert spec.loader is not None
@@ -33,8 +34,12 @@ CASES = [
 async def main() -> None:
     from raganything.clarify_gate import ClarifyRequired, evaluate_clarify_gate
 
-    wd = Path(os.getenv("RAG_WEB_WORKING_DIR") or (_ROOT / "data" / "rag_storage")).resolve()
-    pod = Path(os.getenv("RAG_WEB_PARSER_OUTPUT_DIR") or (_ROOT / "data" / "pipeline_parse")).resolve()
+    wd = Path(
+        os.getenv("RAG_WEB_WORKING_DIR") or (_ROOT / "data" / "rag_storage")
+    ).resolve()
+    pod = Path(
+        os.getenv("RAG_WEB_PARSER_OUTPUT_DIR") or (_ROOT / "data" / "pipeline_parse")
+    ).resolve()
     rag, _, _ = await rpc._build_rag(wd, pod)
     try:
         for cid, q in CASES:

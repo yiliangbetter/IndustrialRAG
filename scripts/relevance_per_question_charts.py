@@ -313,8 +313,12 @@ renderTable();
 
 def main() -> None:
     p = argparse.ArgumentParser(description=__doc__)
-    p.add_argument("--shili", type=Path, default=_ROOT / "logs" / "relevance_shili17.jsonl")
-    p.add_argument("--voice", type=Path, default=_ROOT / "logs" / "relevance_voice_tech29.jsonl")
+    p.add_argument(
+        "--shili", type=Path, default=_ROOT / "logs" / "relevance_shili17.jsonl"
+    )
+    p.add_argument(
+        "--voice", type=Path, default=_ROOT / "logs" / "relevance_voice_tech29.jsonl"
+    )
     p.add_argument(
         "--out",
         type=Path,

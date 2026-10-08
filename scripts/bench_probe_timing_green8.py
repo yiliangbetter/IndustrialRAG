@@ -38,7 +38,8 @@ sys.path.insert(0, str(_ROOT / "scripts"))
 load_dotenv(_ROOT / ".env", override=False)
 
 spec = importlib.util.spec_from_file_location(
-    "rag_pipeline_parse_graph_chat", _ROOT / "scripts" / "rag_pipeline_parse_graph_chat.py"
+    "rag_pipeline_parse_graph_chat",
+    _ROOT / "scripts" / "rag_pipeline_parse_graph_chat.py",
 )
 rpc = importlib.util.module_from_spec(spec)
 assert spec.loader is not None
@@ -97,9 +98,7 @@ def _install_merge_pool_hook() -> None:
     ):
         global _merge_pool_size
         _merge_pool_size = len(retrieved_docs or [])
-        return await native(
-            query, retrieved_docs, global_config, enable_rerank, top_n
-        )
+        return await native(query, retrieved_docs, global_config, enable_rerank, top_n)
 
     _wrapped._bench_probe_pool_hook = True  # type: ignore[attr-defined]
     ut.apply_rerank_if_enabled = _wrapped  # type: ignore[method-assign]
@@ -185,7 +184,9 @@ def _format_report(rows: list[dict[str, Any]], *, meta: dict[str, Any]) -> str:
                 continue
             lines.append(
                 f"  #{cid}: {times[0]:.1f}s -> {times[1]:.1f}s "
-                f"(ratio={times[1]/times[0]:.2f})" if times[0] > 0 else f"  #{cid}: {times}"
+                f"(ratio={times[1]/times[0]:.2f})"
+                if times[0] > 0
+                else f"  #{cid}: {times}"
             )
 
     probe_times = [float(r.get("probe_s") or 0) for r in rows if r.get("try") == 1]
@@ -199,14 +200,20 @@ def _format_report(rows: list[dict[str, Any]], *, meta: dict[str, Any]) -> str:
             ]
         )
     lines.append("")
-    lines.append("对照: 若 probe 方差大但 standalone_rerank_stress 稳定 → 瓶颈在 mix 检索/多路 merge，")
-    lines.append("      而非 rerank 模型显存泄漏。用 --repeat-each 2 区分「同问变慢」与「难问本身慢」。")
+    lines.append(
+        "对照: 若 probe 方差大但 standalone_rerank_stress 稳定 → 瓶颈在 mix 检索/多路 merge，"
+    )
+    lines.append(
+        "      而非 rerank 模型显存泄漏。用 --repeat-each 2 区分「同问变慢」与「难问本身慢」。"
+    )
     return "\n".join(lines) + "\n"
 
 
 async def _main(args: argparse.Namespace) -> None:
     _install_merge_pool_hook()
-    wd = Path(os.getenv("RAG_WEB_WORKING_DIR") or (_ROOT / "data" / "rag_storage")).resolve()
+    wd = Path(
+        os.getenv("RAG_WEB_WORKING_DIR") or (_ROOT / "data" / "rag_storage")
+    ).resolve()
     pod = Path(
         os.getenv("RAG_WEB_PARSER_OUTPUT_DIR") or (_ROOT / "data" / "pipeline_parse")
     ).resolve()
@@ -250,11 +257,17 @@ async def _main(args: argparse.Namespace) -> None:
         "shuffle": args.shuffle,
     }
     ts = datetime.now().strftime("%Y%m%d_%H%M%S")
-    out_json = args.out_json or (_ROOT / "logs" / f"bench_probe_timing_green8_{ts}.json")
-    out_txt = args.out_report or (_ROOT / "logs" / f"bench_probe_timing_green8_{ts}.txt")
+    out_json = args.out_json or (
+        _ROOT / "logs" / f"bench_probe_timing_green8_{ts}.json"
+    )
+    out_txt = args.out_report or (
+        _ROOT / "logs" / f"bench_probe_timing_green8_{ts}.txt"
+    )
     payload = {"meta": meta, "rows": rows}
     out_json.parent.mkdir(parents=True, exist_ok=True)
-    out_json.write_text(json.dumps(payload, ensure_ascii=False, indent=2), encoding="utf-8")
+    out_json.write_text(
+        json.dumps(payload, ensure_ascii=False, indent=2), encoding="utf-8"
+    )
     report = _format_report(rows, meta=meta)
     out_txt.write_text(report, encoding="utf-8")
     print(report)
@@ -265,8 +278,14 @@ async def _main(args: argparse.Namespace) -> None:
 def main() -> None:
     p = argparse.ArgumentParser(description=__doc__)
     p.add_argument("--mode", default="mix")
-    p.add_argument("--repeat-each", type=int, default=1, help="Re-run each query N times")
-    p.add_argument("--gc-between", action="store_true", help="gc + cuda.empty_cache before each probe")
+    p.add_argument(
+        "--repeat-each", type=int, default=1, help="Re-run each query N times"
+    )
+    p.add_argument(
+        "--gc-between",
+        action="store_true",
+        help="gc + cuda.empty_cache before each probe",
+    )
     p.add_argument("--shuffle", action="store_true")
     p.add_argument("--seed", type=int, default=42)
     p.add_argument("--out-json", type=Path, default=None)

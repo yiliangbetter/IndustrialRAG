@@ -534,8 +534,11 @@ def _write_markdown(path: Path, payload: dict[str, Any]) -> None:
         "| Case | Runs | First status p50 | First interaction p50 | Initial done p50 | Final response p50 | First answer p50 | Done p50 | Quality | Gate offers |",
         "|---|---:|---:|---:|---:|---:|---:|---:|---:|---:|",
     ]
+
+    def fmt(value: float | None) -> str:
+        return "—" if value is None else f"{value:.3f}s"
+
     for row in payload["summary"]:
-        fmt = lambda value: "—" if value is None else f"{value:.3f}s"
         lines.append(
             f"| {row['case_id']} | {row['runs']} | {fmt(row['first_status_median_s'])} | "
             f"{fmt(row['first_interaction_median_s'])} | "

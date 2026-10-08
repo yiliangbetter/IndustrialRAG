@@ -17,7 +17,7 @@ def _load(path: Path, label: str) -> list[dict]:
         c = o["case"]
         q = float(s["query"]["max_cosine_similarity"])
         h = float(s["high_level"]["max_cosine_similarity"])
-        l = float(s["low_level"]["max_cosine_similarity"])
+        low = float(s["low_level"]["max_cosine_similarity"])
         rows.append(
             {
                 "set": label,
@@ -25,13 +25,13 @@ def _load(path: Path, label: str) -> list[dict]:
                 "query": (c.get("query") or "")[:60],
                 "q": q,
                 "h": h,
-                "l": l,
+                "l": low,
                 "dh": h - q,
-                "dl": l - q,
-                "min_qlh": min(q, h, l),
-                "max_qlh": max(q, h, l),
-                "spread": max(q, h, l) - min(q, h, l),
-                "avg_qlh": (q + h + l) / 3,
+                "dl": low - q,
+                "min_qlh": min(q, h, low),
+                "max_qlh": max(q, h, low),
+                "spread": max(q, h, low) - min(q, h, low),
+                "avg_qlh": (q + h + low) / 3,
             }
         )
     return rows
@@ -121,7 +121,9 @@ def main() -> None:
             mark = f"  ← shili 全过，green 仅 {gc}/8"
         lines.append(f"  T={t:.2f}  shili误澄清={sc}/17  green命中={gc}/8{mark}")
     lines.append("")
-    lines.append("结论：不存在 query 阈值使 shili=0 且 green=8（绿标含 0.854 气压报警，shili 最高 0.902）")
+    lines.append(
+        "结论：不存在 query 阈值使 shili=0 且 green=8（绿标含 0.854 气压报警，shili 最高 0.902）"
+    )
     lines.append("")
 
     lines.append("四、组合规则网格搜索")
@@ -140,7 +142,9 @@ def main() -> None:
                     _clarify_rule(r, qt=qt, spread_t=spread_t, distort=distort)
                     for r in green
                 )
-                rule = f"q<{qt:.2f}|min<{qt:.2f}|spread>{spread_t:.2f}|distort={distort}"
+                rule = (
+                    f"q<{qt:.2f}|min<{qt:.2f}|spread>{spread_t:.2f}|distort={distort}"
+                )
                 if sc == 0 and gc == 8:
                     perfect.append(f"  {rule}  → shili=0 green=8")
                 elif sc <= 1 and gc >= 7:
@@ -163,13 +167,19 @@ def main() -> None:
     lines.append("")
     lines.append("   A. 问法形态门控（优先，与 Excel 绿标一致）")
     lines.append("      · 完整问句 + 明确设备/部件/动作 → 倾向不澄清（shili17 模式）")
-    lines.append("      · 短句/报警码/口语碎片（≤N 字、无问号结构）→ 倾向澄清（green8 模式）")
+    lines.append(
+        "      · 短句/报警码/口语碎片（≤N 字、无问号结构）→ 倾向澄清（green8 模式）"
+    )
     lines.append("      · green8 平均题干远短于 shili17，这是最强先验")
     lines.append("")
     lines.append("   B. naive 向量辅助信号（在形态门控之后或叠加）")
     lines.append("      · primary = query 分；辅助看 spread=max(q,h,l)-min(q,h,l)")
-    lines.append("      · spread > 0.10 或 |high-query|>0.10 或 |low-query|>0.08 → 澄清候选")
-    lines.append("        shili 误伤：Q8(high失真), Q7/Q2(low失真) 共 3 条；green 命中约 5/8")
+    lines.append(
+        "      · spread > 0.10 或 |high-query|>0.10 或 |low-query|>0.08 → 澄清候选"
+    )
+    lines.append(
+        "        shili 误伤：Q8(high失真), Q7/Q2(low失真) 共 3 条；green 命中约 5/8"
+    )
     lines.append("      · query < 0.70 且 min(q,h,l) < 0.65 → 澄清候选")
     lines.append("        可抓到 green 漏胶/三相电等，但 shili Q16(0.658) 会误澄清")
     lines.append("")
@@ -179,8 +189,12 @@ def main() -> None:
     lines.append("")
     lines.append("   D. 推荐默认 pipeline（澄清前）")
     lines.append("      Step1: 若在 green8/口语短句库 → clarify")
-    lines.append("      Step2: elif 问句长度≥20 且含「怎么/哪些/多久/步骤」等完整问法 → pass")
-    lines.append("      Step3: elif query<0.70 OR spread>0.12 OR keyword_distortion → clarify")
+    lines.append(
+        "      Step2: elif 问句长度≥20 且含「怎么/哪些/多久/步骤」等完整问法 → pass"
+    )
+    lines.append(
+        "      Step3: elif query<0.70 OR spread>0.12 OR keyword_distortion → clarify"
+    )
     lines.append("      Step4: else pass")
     lines.append("")
 
@@ -189,7 +203,8 @@ def main() -> None:
         if r["set"] == "green8":
             return True
         if len(r.get("query", "")) >= 20 and any(
-            w in r.get("query", "") for w in ("怎么", "哪些", "多久", "步骤", "适用于", "要不要")
+            w in r.get("query", "")
+            for w in ("怎么", "哪些", "多久", "步骤", "适用于", "要不要")
         ):
             return False
         if r["q"] < 0.70 or r["spread"] > 0.12:

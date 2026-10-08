@@ -40,7 +40,9 @@ def _load_rows(path: Path, *, sheets: tuple[str, ...] = _DEFAULT_SHEETS) -> list
     except ImportError:
         import subprocess
 
-        subprocess.check_call([sys.executable, "-m", "pip", "install", "openpyxl", "-q"])
+        subprocess.check_call(
+            [sys.executable, "-m", "pip", "install", "openpyxl", "-q"]
+        )
         from openpyxl import load_workbook
 
     wb = load_workbook(path, read_only=True, data_only=True)
@@ -55,7 +57,13 @@ def _load_rows(path: Path, *, sheets: tuple[str, ...] = _DEFAULT_SHEETS) -> list
         all_rows = list(ws.iter_rows(values_only=True))
         if len(all_rows) < 3:
             continue
-        group = "商务" if "商务" in sheet_name else "技术" if "技术" in sheet_name else "综合"
+        group = (
+            "商务"
+            if "商务" in sheet_name
+            else "技术"
+            if "技术" in sheet_name
+            else "综合"
+        )
         for raw in all_rows[2:]:
             cells = [str(c).strip() if c is not None else "" for c in raw]
             if len(cells) < 6:
@@ -244,7 +252,9 @@ def _write_md(cases: list[dict], path: Path) -> None:
 
 
 def main() -> int:
-    parser = argparse.ArgumentParser(description="Build voice script test cases from Excel")
+    parser = argparse.ArgumentParser(
+        description="Build voice script test cases from Excel"
+    )
     parser.add_argument("--xlsx", type=Path, default=_DEFAULT_XLSX)
     parser.add_argument("--out-json", type=Path, default=_OUT_JSON)
     parser.add_argument("--out-md", type=Path, default=_OUT_MD)

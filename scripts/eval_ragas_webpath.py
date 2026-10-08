@@ -444,12 +444,16 @@ def run_ragas_eval(rows: list[dict[str, Any]]) -> dict[str, Any]:
 
     summary: dict[str, float | None] = {}
     for col in metric_cols:
-        vals = [r["scores"].get(col) for r in per_case if r["scores"].get(col) is not None]
+        vals = [
+            r["scores"].get(col) for r in per_case if r["scores"].get(col) is not None
+        ]
         summary[col] = round(sum(vals) / len(vals), 4) if vals else None
 
     ragas_score_vals = [v for v in summary.values() if v is not None]
     summary["ragas_score"] = (
-        round(sum(ragas_score_vals) / len(ragas_score_vals), 4) if ragas_score_vals else None
+        round(sum(ragas_score_vals) / len(ragas_score_vals), 4)
+        if ragas_score_vals
+        else None
     )
 
     return {
@@ -475,12 +479,16 @@ def _write_results(
     run_path = out_dir / "run.jsonl"
     _write_jsonl(run_path, rows)
     meta_path = out_dir / "meta.json"
-    meta_path.write_text(json.dumps(meta, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
+    meta_path.write_text(
+        json.dumps(meta, ensure_ascii=False, indent=2) + "\n", encoding="utf-8"
+    )
 
     csv_path: Path | None = None
     if ragas:
         ragas_path = out_dir / "ragas.json"
-        ragas_path.write_text(json.dumps(ragas, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
+        ragas_path.write_text(
+            json.dumps(ragas, ensure_ascii=False, indent=2) + "\n", encoding="utf-8"
+        )
         csv_path = out_dir / "ragas_scores.csv"
         with csv_path.open("w", encoding="utf-8", newline="") as f:
             writer = csv.writer(f)
@@ -522,7 +530,9 @@ def _format_report(
         for key, val in (ragas.get("summary") or {}).items():
             lines.append(f"  {key}: {val}")
         lines.append("")
-        lines.append("id   faithfulness  answer_relevancy  context_recall  context_precision")
+        lines.append(
+            "id   faithfulness  answer_relevancy  context_recall  context_precision"
+        )
         for item in ragas.get("per_case") or []:
             s = item.get("scores") or {}
 
@@ -622,7 +632,9 @@ def main() -> None:
         default="",
         help="Comma-separated case ids (default: all in dataset)",
     )
-    p.add_argument("--mode", default="", help="LightRAG mode (default: RAG_QUERY_MODE or mix)")
+    p.add_argument(
+        "--mode", default="", help="LightRAG mode (default: RAG_QUERY_MODE or mix)"
+    )
     p.add_argument(
         "--collect-only",
         action="store_true",

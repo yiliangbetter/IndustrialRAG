@@ -37,7 +37,9 @@ ANSWERS = {
 
 def main() -> None:
     store = json.loads(
-        (_ROOT / "data/rag_storage/kv_store_text_chunks.json").read_text(encoding="utf-8")
+        (_ROOT / "data/rag_storage/kv_store_text_chunks.json").read_text(
+            encoding="utf-8"
+        )
     )
     fig_chunk = None
     title_chunk = None
@@ -69,9 +71,7 @@ def main() -> None:
     for name, ans in ANSWERS.items():
         blob = _answer_body_for_citation_match(ans)
         score = _chunk_citation_score(blob, fig_chunk or "")
-        kept, meta = filter_docs_cited_by_answer(
-            ans, docs, query=QUERY, pool=docs
-        )
+        kept, meta = filter_docs_cited_by_answer(ans, docs, query=QUERY, pool=docs)
         print(f"{name}: score={score:.3f} kept={len(kept)} mode={meta.get('mode')}")
         if meta.get("kept_scores"):
             print(f"  kept_scores={meta['kept_scores']}")

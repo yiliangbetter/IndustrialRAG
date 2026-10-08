@@ -56,7 +56,9 @@ def cuda_snapshot(reset_peak: bool = False) -> dict[str, Any]:
     return out
 
 
-def _merge_snap(label: str, snap: dict[str, Any], *, elapsed_s: float | None = None) -> dict[str, Any]:
+def _merge_snap(
+    label: str, snap: dict[str, Any], *, elapsed_s: float | None = None
+) -> dict[str, Any]:
     row = {"label": label, **snap}
     if elapsed_s is not None:
         row["elapsed_s"] = round(elapsed_s, 3)
@@ -78,7 +80,8 @@ def _print_row(row: dict[str, Any]) -> None:
 
 def _load_rpc():
     spec = importlib.util.spec_from_file_location(
-        "rag_pipeline_parse_graph_chat", _ROOT / "scripts" / "rag_pipeline_parse_graph_chat.py"
+        "rag_pipeline_parse_graph_chat",
+        _ROOT / "scripts" / "rag_pipeline_parse_graph_chat.py",
     )
     rpc = importlib.util.module_from_spec(spec)
     assert spec.loader is not None
@@ -107,13 +110,20 @@ async def scenario_embed_resident(*, iterations: int) -> list[dict[str, Any]]:
         t0 = time.perf_counter()
         await embed.func([query])
         rows.append(
-            _merge_snap(f"embed_encode_{i:03d}", cuda_snapshot(), elapsed_s=time.perf_counter() - t0)
+            _merge_snap(
+                f"embed_encode_{i:03d}",
+                cuda_snapshot(),
+                elapsed_s=time.perf_counter() - t0,
+            )
         )
     return rows
 
 
 async def scenario_rerank_cycle(*, iterations: int, pairs: int) -> list[dict[str, Any]]:
-    from raganything.pipeline_rerank import hf_cross_encoder_rerank, release_cross_encoder
+    from raganything.pipeline_rerank import (
+        hf_cross_encoder_rerank,
+        release_cross_encoder,
+    )
 
     docs = _sample_docs(pairs)
     query = "封边机维护保养手册适用哪些型号"
@@ -124,7 +134,11 @@ async def scenario_rerank_cycle(*, iterations: int, pairs: int) -> list[dict[str
         t0 = time.perf_counter()
         await hf_cross_encoder_rerank(query, docs, top_n=24)
         rows.append(
-            _merge_snap(f"rerank_cycle_{i:03d}", cuda_snapshot(), elapsed_s=time.perf_counter() - t0)
+            _merge_snap(
+                f"rerank_cycle_{i:03d}",
+                cuda_snapshot(),
+                elapsed_s=time.perf_counter() - t0,
+            )
         )
     release_cross_encoder()
     gc.collect()
@@ -139,8 +153,13 @@ async def scenario_rerank_cycle(*, iterations: int, pairs: int) -> list[dict[str
     return rows
 
 
-async def scenario_rerank_resident(*, iterations: int, pairs: int) -> list[dict[str, Any]]:
-    from raganything.pipeline_rerank import hf_cross_encoder_rerank, release_cross_encoder
+async def scenario_rerank_resident(
+    *, iterations: int, pairs: int
+) -> list[dict[str, Any]]:
+    from raganything.pipeline_rerank import (
+        hf_cross_encoder_rerank,
+        release_cross_encoder,
+    )
 
     docs = _sample_docs(pairs)
     query = "封边机维护保养手册适用哪些型号"
@@ -151,7 +170,11 @@ async def scenario_rerank_resident(*, iterations: int, pairs: int) -> list[dict[
         t0 = time.perf_counter()
         await hf_cross_encoder_rerank(query, docs, top_n=24)
         rows.append(
-            _merge_snap(f"rerank_resident_{i:03d}", cuda_snapshot(), elapsed_s=time.perf_counter() - t0)
+            _merge_snap(
+                f"rerank_resident_{i:03d}",
+                cuda_snapshot(),
+                elapsed_s=time.perf_counter() - t0,
+            )
         )
     release_cross_encoder()
     gc.collect()
@@ -166,7 +189,9 @@ async def scenario_rerank_resident(*, iterations: int, pairs: int) -> list[dict[
     return rows
 
 
-async def scenario_rebuild_rag(*, iterations: int, wd: Path, pod: Path) -> list[dict[str, Any]]:
+async def scenario_rebuild_rag(
+    *, iterations: int, wd: Path, pod: Path
+) -> list[dict[str, Any]]:
     rpc = _load_rpc()
     rows: list[dict[str, Any]] = []
     rows.append(_merge_snap("rebuild_rag_baseline", cuda_snapshot(reset_peak=True)))
@@ -188,12 +213,18 @@ async def scenario_rebuild_rag(*, iterations: int, wd: Path, pod: Path) -> list[
         except ImportError:
             pass
         rows.append(
-            _merge_snap(f"rebuild_rag_{i:03d}", cuda_snapshot(), elapsed_s=time.perf_counter() - t0)
+            _merge_snap(
+                f"rebuild_rag_{i:03d}",
+                cuda_snapshot(),
+                elapsed_s=time.perf_counter() - t0,
+            )
         )
     return rows
 
 
-async def scenario_query_pattern(*, iterations: int, pairs: int) -> list[dict[str, Any]]:
+async def scenario_query_pattern(
+    *, iterations: int, pairs: int
+) -> list[dict[str, Any]]:
     """One question ≈ gate probe rerank + aquery rerank, embedding encode in between."""
     from raganything.local_hf_embedding import make_local_hf_embedding_func
     from raganything.pipeline_rerank import hf_cross_encoder_rerank
@@ -212,7 +243,11 @@ async def scenario_query_pattern(*, iterations: int, pairs: int) -> list[dict[st
         await embed.func([query, query])
         await hf_cross_encoder_rerank(query, docs, top_n=24)  # aquery-like
         rows.append(
-            _merge_snap(f"query_pattern_{i:03d}", cuda_snapshot(), elapsed_s=time.perf_counter() - t0)
+            _merge_snap(
+                f"query_pattern_{i:03d}",
+                cuda_snapshot(),
+                elapsed_s=time.perf_counter() - t0,
+            )
         )
     return rows
 
@@ -246,11 +281,15 @@ def _summarize(rows: list[dict[str, Any]]) -> dict[str, Any]:
         "reserved_gb_delta": round(reserved[-1] - reserved[0], 3),
         "elapsed_s_last": elapsed[-1] if elapsed else None,
         "elapsed_s_first": elapsed[0] if elapsed else None,
-        "elapsed_s_ratio": round(elapsed[-1] / elapsed[0], 2) if len(elapsed) >= 2 and elapsed[0] > 0 else None,
+        "elapsed_s_ratio": round(elapsed[-1] / elapsed[0], 2)
+        if len(elapsed) >= 2 and elapsed[0] > 0
+        else None,
     }
 
 
-async def _run_scenario(name: str, *, iterations: int, pairs: int, wd: Path, pod: Path) -> dict[str, Any]:
+async def _run_scenario(
+    name: str, *, iterations: int, pairs: int, wd: Path, pod: Path
+) -> dict[str, Any]:
     fn = SCENARIOS[name]
     print(f"\n=== {name} (iterations={iterations}) ===", flush=True)
     if name in ("rerank_cycle", "rerank_resident", "query_pattern"):
@@ -262,15 +301,27 @@ async def _run_scenario(name: str, *, iterations: int, pairs: int, wd: Path, pod
     for row in rows:
         _print_row(row)
     summary = _summarize(rows)
-    print(f"  >> summary: reserved_delta={summary.get('reserved_gb_delta')}G "
-          f"alloc_delta={summary.get('alloc_gb_delta')}G "
-          f"elapsed_ratio={summary.get('elapsed_s_ratio')}", flush=True)
-    return {"scenario": name, "iterations": iterations, "rows": rows, "summary": summary}
+    print(
+        f"  >> summary: reserved_delta={summary.get('reserved_gb_delta')}G "
+        f"alloc_delta={summary.get('alloc_gb_delta')}G "
+        f"elapsed_ratio={summary.get('elapsed_s_ratio')}",
+        flush=True,
+    )
+    return {
+        "scenario": name,
+        "iterations": iterations,
+        "rows": rows,
+        "summary": summary,
+    }
 
 
 async def main_async(args: argparse.Namespace) -> int:
-    wd = Path(os.getenv("RAG_WEB_WORKING_DIR", str(_ROOT / "data" / "rag_storage"))).resolve()
-    pod = Path(os.getenv("RAG_WEB_PARSER_OUTPUT_DIR", str(_ROOT / "data" / "pipeline_parse"))).resolve()
+    wd = Path(
+        os.getenv("RAG_WEB_WORKING_DIR", str(_ROOT / "data" / "rag_storage"))
+    ).resolve()
+    pod = Path(
+        os.getenv("RAG_WEB_PARSER_OUTPUT_DIR", str(_ROOT / "data" / "pipeline_parse"))
+    ).resolve()
 
     names = list(SCENARIOS.keys()) if args.scenario == "all" else [args.scenario]
     env_snapshot = {
@@ -304,20 +355,26 @@ async def main_async(args: argparse.Namespace) -> int:
     out_dir.mkdir(parents=True, exist_ok=True)
     stamp = datetime.now().strftime("%Y%m%d_%H%M%S")
     out_path = out_dir / f"{stamp}_stress.json"
-    out_path.write_text(json.dumps(report, ensure_ascii=False, indent=2), encoding="utf-8")
+    out_path.write_text(
+        json.dumps(report, ensure_ascii=False, indent=2), encoding="utf-8"
+    )
     print(f"\nWrote {out_path}", flush=True)
     return 0
 
 
 def main() -> None:
-    p = argparse.ArgumentParser(description="GPU VRAM stress test (embedding vs rerank).")
+    p = argparse.ArgumentParser(
+        description="GPU VRAM stress test (embedding vs rerank)."
+    )
     p.add_argument(
         "--scenario",
         choices=[*SCENARIOS.keys(), "all"],
         default="all",
         help="Which pattern to run (default: all).",
     )
-    p.add_argument("--iterations", type=int, default=15, help="Loop count per scenario.")
+    p.add_argument(
+        "--iterations", type=int, default=15, help="Loop count per scenario."
+    )
     p.add_argument(
         "--pairs",
         type=int,

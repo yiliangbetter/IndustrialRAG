@@ -47,7 +47,9 @@ def _load_workbook(path: Path):
     except ImportError:
         import subprocess
 
-        subprocess.check_call([sys.executable, "-m", "pip", "install", "openpyxl", "-q"])
+        subprocess.check_call(
+            [sys.executable, "-m", "pip", "install", "openpyxl", "-q"]
+        )
         from openpyxl import load_workbook
     return load_workbook(path)
 
@@ -92,11 +94,15 @@ def fill_xlsx(
 
 
 def main() -> int:
-    parser = argparse.ArgumentParser(description="Fill RAG answers into voice script Excel")
+    parser = argparse.ArgumentParser(
+        description="Fill RAG answers into voice script Excel"
+    )
     parser.add_argument("--xlsx", type=Path, default=_DEFAULT_XLSX)
     parser.add_argument("--report", type=Path, default=_DEFAULT_REPORT)
     parser.add_argument("--sheet", default=_SHEET)
-    parser.add_argument("--out", type=Path, default=None, help="Output xlsx (default: *_RAG填答_*.xlsx)")
+    parser.add_argument(
+        "--out", type=Path, default=None, help="Output xlsx (default: *_RAG填答_*.xlsx)"
+    )
     args = parser.parse_args()
 
     if not args.xlsx.is_file():
