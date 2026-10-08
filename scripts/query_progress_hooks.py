@@ -1,0 +1,978 @@
+"""Monkeypatch LightRAG query stages to emit real progress events (Web UI SSE)."""
+
+from __future__ import annotations
+
+import asyncio
+import contextlib
+import copy
+from collections.abc import AsyncIterator
+from contextvars import ContextVar
+from dataclasses import dataclass, field
+from pathlib import Path
+import threading
+from typing import Any
+
+PHASE_RETRIEVE = "retrieve"
+PHASE_RERANK = "rerank"
+PHASE_GENERATE = "generate"
+PHASE_BUNDLE = "bundle"
+PHASE_CLARIFY = "clarify"
+
+PHASE_TEXT = {
+    PHASE_RETRIEVE: "正在检索知识库…",
+    PHASE_RERANK: "正在 Rerank…",
+    PHASE_GENERATE: "正在生成回答…",
+    PHASE_BUNDLE: "正在复用检索结果…",
+    PHASE_CLARIFY: "正在生成推荐问法…",
+}
+
+
+def progress_hooks_active() -> bool:
+    """True when ``query_progress_hooks()`` is active in this async context."""
+    return _progress_queue.get() is not None
+
+
+async def emit_query_phase(phase: str) -> None:
+    """Emit a UI status line for the current query phase (gate or answer)."""
+    await _emit(phase)
+
+
+_progress_queue: ContextVar[asyncio.Queue[dict[str, str]] | None] = ContextVar(
+    "progress_queue", default=None
+)
+_gate_probe_active: ContextVar[bool] = ContextVar("gate_probe_active", default=False)
+
+
+@contextlib.contextmanager
+def gate_probe_scope():
+    """Mark ``aquery_data`` as clarify-gate probe; suppress answer-phase SSE noise."""
+    token = _gate_probe_active.set(True)
+    try:
+        yield
+    finally:
+        _gate_probe_active.reset(token)
+
+
+def gate_probe_active() -> bool:
+    return _gate_probe_active.get()
+
+
+_retrieval_context: ContextVar[str | None] = ContextVar(
+    "retrieval_context", default=None
+)
+_retrieved_docs_text: ContextVar[str | None] = ContextVar(
+    "retrieved_docs_text", default=None
+)
+_media_roots: ContextVar[list[Path] | None] = ContextVar("media_roots", default=None)
+_query_text: ContextVar[str | None] = ContextVar("query_text", default=None)
+_retrieved_docs: ContextVar[list[dict] | None] = ContextVar(
+    "retrieved_docs", default=None
+)
+_llm_chunks_for_images: ContextVar[list[dict] | None] = ContextVar(
+    "llm_chunks_for_images", default=None
+)
+_rerank_docs: ContextVar[list[dict] | None] = ContextVar("rerank_docs", default=None)
+_rerank_docs_raw: ContextVar[list[dict] | None] = ContextVar(
+    "rerank_docs_raw", default=None
+)
+_rerank_figure_pool: ContextVar[list[dict] | None] = ContextVar(
+    "rerank_figure_pool", default=None
+)
+_llm_chunks_rerank_figure_supplement: ContextVar[int] = ContextVar(
+    "llm_chunks_rerank_figure_supplement", default=0
+)
+_llm_chunks_table_matrix_supplement: ContextVar[int] = ContextVar(
+    "llm_chunks_table_matrix_supplement", default=0
+)
+_related_images_selected: ContextVar[list[dict[str, Any]] | None] = ContextVar(
+    "related_images_selected", default=None
+)
+_answer_text: ContextVar[str | None] = ContextVar("answer_text", default=None)
+_inline_placements: ContextVar[list[dict[str, Any]] | None] = ContextVar(
+    "inline_placements", default=None
+)
+_last_image_debug: ContextVar[dict[str, Any] | None] = ContextVar(
+    "last_image_debug", default=None
+)
+_steering_report: ContextVar[dict[str, Any] | None] = ContextVar(
+    "steering_report", default=None
+)
+_llm_input: ContextVar[dict[str, Any] | None] = ContextVar("llm_input", default=None)
+_last_probe_raw_data: ContextVar[dict[str, Any] | None] = ContextVar(
+    "last_probe_raw_data", default=None
+)
+_clarify_context_injection: ContextVar[dict[str, Any] | None] = ContextVar(
+    "clarify_context_injection", default=None
+)
+
+
+@dataclass
+class _QueryHookState:
+    """Mutable per-request state shared with worker tasks through ContextVar copying."""
+
+    debug_snapshot: dict[str, Any] = field(default_factory=dict)
+    retained_debug_snapshot: dict[str, Any] = field(default_factory=dict)
+    retained_llm_chunks_for_images: list[dict[str, Any]] = field(default_factory=list)
+    retained_rerank_docs: list[dict[str, Any]] = field(default_factory=list)
+    retained_rerank_docs_raw: list[dict[str, Any]] = field(default_factory=list)
+
+
+_query_hook_state: ContextVar[_QueryHookState | None] = ContextVar(
+    "query_hook_state", default=None
+)
+_query_hooks_install_lock = threading.Lock()
+_query_hooks_installed = False
+
+
+def _current_query_hook_state() -> _QueryHookState:
+    state = _query_hook_state.get()
+    if state is None:
+        state = _QueryHookState()
+        _query_hook_state.set(state)
+    return state
+
+
+def _chunks_from_hook_raw_data(raw_data: Any) -> list[dict]:
+    if not isinstance(raw_data, dict):
+        return []
+    data = raw_data.get("data")
+    if not isinstance(data, dict):
+        return []
+    return [c for c in (data.get("chunks") or []) if isinstance(c, dict)]
+
+
+def _docs_for_image_finalize(snap: dict[str, Any] | None = None) -> list[dict]:
+    """LLM chunks visible to ``finalize_inline_images`` (worker-safe)."""
+    state = _current_query_hook_state()
+    live = _llm_chunks_for_images.get()
+    if live:
+        return list(live)
+    if state.retained_llm_chunks_for_images:
+        return list(state.retained_llm_chunks_for_images)
+    snap = snap if isinstance(snap, dict) else _active_query_debug_snapshot()
+    from_snap = snap.get("llm_chunks_for_images")
+    if isinstance(from_snap, list) and from_snap:
+        return list(from_snap)
+    llm_input = snap.get("llm_input")
+    if isinstance(llm_input, dict):
+        from_input = llm_input.get("chunks")
+        if isinstance(from_input, list) and from_input:
+            return [c for c in from_input if isinstance(c, dict)]
+    retrieved = snap.get("retrieved_docs")
+    if isinstance(retrieved, list) and retrieved:
+        return list(retrieved)
+    return list(_retrieved_docs.get() or [])
+
+
+def _retain_query_debug_snapshot() -> None:
+    state = _current_query_hook_state()
+    if not state.debug_snapshot:
+        return
+    state.retained_debug_snapshot.clear()
+    state.retained_debug_snapshot.update(state.debug_snapshot)
+
+
+def _active_query_debug_snapshot() -> dict[str, Any]:
+    state = _current_query_hook_state()
+    if state.debug_snapshot:
+        return dict(state.debug_snapshot)
+    if state.retained_debug_snapshot:
+        return dict(state.retained_debug_snapshot)
+    return {}
+
+
+def _sync_query_debug_snapshot() -> None:
+    snapshot = _current_query_hook_state().debug_snapshot
+    snapshot.clear()
+    snapshot.update(
+        {
+            "retrieval_context": _retrieval_context.get(),
+            "retrieved_docs_text": _retrieved_docs_text.get(),
+            "retrieved_docs": _retrieved_docs.get(),
+            "llm_chunks_for_images": _llm_chunks_for_images.get(),
+            "llm_chunks_rerank_figure_supplement": _llm_chunks_rerank_figure_supplement.get()
+            or 0,
+            "llm_chunks_table_matrix_supplement": _llm_chunks_table_matrix_supplement.get()
+            or 0,
+            "related_images": list(_related_images_selected.get() or []),
+            "inline_placements": list(_inline_placements.get() or []),
+            "steering_report": dict(_steering_report.get() or {}),
+            "images_debug": dict(_last_image_debug.get() or {}),
+            "llm_input": dict(_llm_input.get() or {})
+            if isinstance(_llm_input.get(), dict)
+            else _llm_input.get(),
+        }
+    )
+
+
+def get_query_debug_state() -> dict[str, Any]:
+    """Snapshot hook state for query debug dumps."""
+    state = _current_query_hook_state()
+    snap = _active_query_debug_snapshot()
+    live = {
+        "retrieval_context": _retrieval_context.get(),
+        "retrieved_docs_text": _retrieved_docs_text.get(),
+        "retrieved_docs": _retrieved_docs.get(),
+        "llm_chunks_for_images": _llm_chunks_for_images.get()
+        or list(state.retained_llm_chunks_for_images)
+        or None,
+        "related_images": list(_related_images_selected.get() or []),
+        "inline_placements": list(_inline_placements.get() or []),
+        "steering_report": dict(_steering_report.get() or {}),
+        "images_debug": dict(_last_image_debug.get() or {}),
+        "llm_input": _llm_input.get(),
+    }
+    if not snap:
+        return live
+    merged = dict(snap)
+    for key, val in live.items():
+        if val is None or val == [] or val == {}:
+            continue
+        if not merged.get(key):
+            merged[key] = val
+    return merged
+
+
+def get_answer_text_for_images() -> str | None:
+    return _answer_text.get()
+
+
+def set_query_media_roots(roots: list[Path]) -> None:
+    _media_roots.set(roots)
+
+
+def set_query_text_for_images(query: str) -> None:
+    _query_text.set(query)
+
+
+def set_answer_text_for_images(answer: str) -> None:
+    _answer_text.set((answer or "").strip() or None)
+
+
+def get_retrieval_context() -> str | None:
+    return _retrieval_context.get()
+
+
+def get_llm_input() -> dict[str, Any] | None:
+    val = _llm_input.get()
+    return dict(val) if isinstance(val, dict) else None
+
+
+def get_last_probe_raw_data() -> dict[str, Any] | None:
+    val = _last_probe_raw_data.get()
+    return copy.deepcopy(val) if isinstance(val, dict) else None
+
+
+def set_clarify_context_injection(bundle: Any) -> None:
+    """Inject a cached clarify bundle so ``_build_query_context`` skips retrieval."""
+    if bundle is None:
+        _clarify_context_injection.set(None)
+        return
+    if hasattr(bundle, "to_injection"):
+        _clarify_context_injection.set(bundle.to_injection())
+        return
+    if isinstance(bundle, dict):
+        _clarify_context_injection.set(dict(bundle))
+
+
+def clear_clarify_context_injection() -> None:
+    _clarify_context_injection.set(None)
+
+
+def get_clarify_context_injection() -> dict[str, Any] | None:
+    val = _clarify_context_injection.get()
+    return dict(val) if isinstance(val, dict) else None
+
+
+def _capture_llm_context_from_build_result(ctx: Any) -> None:
+    """Persist answer-LLM context from LightRAG ``QueryContextResult`` or legacy str."""
+    context_str: str | None = None
+    raw_data: dict[str, Any] | None = None
+    if isinstance(ctx, str):
+        context_str = ctx.strip() or None
+    elif ctx is not None:
+        maybe_ctx = getattr(ctx, "context", None)
+        if isinstance(maybe_ctx, str) and maybe_ctx.strip():
+            context_str = maybe_ctx.strip()
+        maybe_raw = getattr(ctx, "raw_data", None)
+        if isinstance(maybe_raw, dict):
+            raw_data = maybe_raw
+            _last_probe_raw_data.set(copy.deepcopy(maybe_raw))
+    if raw_data is not None:
+        from raganything.clarify_context import scope_kg_to_llm_chunks  # noqa: WPS433
+
+        context_str, raw_data = scope_kg_to_llm_chunks(raw_data, context_str)
+    if context_str:
+        _retrieval_context.set(context_str)
+    if raw_data is not None:
+        from query_debug_dump import build_llm_input_snapshot  # noqa: WPS433
+
+        _llm_input.set(build_llm_input_snapshot(raw_data, context_str=context_str))
+    elif context_str:
+        _llm_input.set(
+            {
+                "context_chars": len(context_str),
+                "counts": {
+                    "entities": 0,
+                    "relationships": 0,
+                    "chunks": 0,
+                    "references": 0,
+                },
+                "entities": [],
+                "relationships": [],
+                "chunks": [],
+                "references": [],
+            }
+        )
+
+
+def _apply_kg_scope_to_query_context(ctx: Any) -> Any:
+    """Filter KG on the live ``QueryContextResult`` before the answer LLM runs."""
+    if ctx is None or isinstance(ctx, str):
+        return ctx
+    context_str = getattr(ctx, "context", None)
+    raw_data = getattr(ctx, "raw_data", None)
+    if not isinstance(raw_data, dict):
+        return ctx
+    from lightrag.base import QueryContextResult  # noqa: WPS433
+    from raganything.clarify_context import scope_kg_to_llm_chunks  # noqa: WPS433
+
+    scoped_context, scoped_raw = scope_kg_to_llm_chunks(
+        raw_data,
+        context_str if isinstance(context_str, str) else None,
+    )
+    return QueryContextResult(
+        context=scoped_context or "",
+        raw_data=scoped_raw or raw_data,
+    )
+
+
+def finalize_inline_images(
+    *,
+    limit: int | None = None,
+    answer_text: str | None = None,
+) -> dict[str, Any]:
+    """Resolve inline figures cited by the generated answer (Plan A + placements)."""
+    from iqr_figure_target import _is_multi_machine_comparison_query  # noqa: WPS433
+    from iqr_store import _dedupe_doc_list, _doc_content  # noqa: WPS433
+    from image_query_refs import (  # noqa: WPS433
+        build_inline_placements,
+        default_image_selection_limit,
+        extract_image_refs_from_context,
+        filter_docs_cited_by_answer,
+        resolve_query_images,
+        text_from_retrieved_docs,
+    )
+    from query_doc_steering import detect_table_filter_signal  # noqa: WPS433
+
+    if limit is None:
+        limit = default_image_selection_limit()
+
+    snap = get_query_debug_state()
+    docs = _docs_for_image_finalize(snap)
+    roots = _media_roots.get()
+    q = (_query_text.get() or "").strip()
+    answer = (answer_text or _answer_text.get() or "").strip()
+    if answer:
+        set_answer_text_for_images(answer)
+    empty: dict[str, Any] = {"images": [], "placements": [], "debug": {}}
+    if not roots or not q:
+        _related_images_selected.set([])
+        _inline_placements.set([])
+        return empty
+
+    full_primary = text_from_retrieved_docs(docs).strip()
+    if full_primary and detect_table_filter_signal(q, full_primary):
+        debug: dict[str, Any] = {
+            "gate": {"ok": False, "reason": "table_filter_listing"},
+            "llm_chunk_count": len(docs),
+        }
+        _last_image_debug.set(debug)
+        _related_images_selected.set([])
+        _inline_placements.set([])
+        _sync_query_debug_snapshot()
+        return {**empty, "debug": debug}
+
+    docs_before_cite = list(docs)
+    cite_pool = list(docs_before_cite)
+    anchor_pool = list(docs_before_cite)
+    cite_meta: dict[str, Any] = {}
+    if answer:
+        cite_pool = list(docs_before_cite)
+        rerank_pool = list(_rerank_docs.get() or [])
+        figure_pool = list(_rerank_figure_pool.get() or [])
+        if rerank_pool:
+            cite_pool = _dedupe_doc_list(cite_pool + rerank_pool)
+        anchor_pool = cite_pool
+        if figure_pool:
+            anchor_pool = _dedupe_doc_list(cite_pool + figure_pool)
+        if _is_multi_machine_comparison_query(q) and rerank_pool:
+            multi_fig = [
+                doc
+                for doc in rerank_pool
+                if extract_image_refs_from_context(_doc_content(doc).strip())
+            ]
+            if multi_fig:
+                anchor_pool = _dedupe_doc_list(anchor_pool + multi_fig)
+        from iqr_anchor import (  # noqa: WPS433
+            _load_figure_chunks_for_manual_paths,
+            _should_expand_cited_manual_kv_pool,
+        )
+        from iqr_figure_target import _cited_manual_hints_from_answer  # noqa: WPS433
+        from iqr_store import _doc_basename  # noqa: WPS433
+
+        if _should_expand_cited_manual_kv_pool(q, answer):
+            cited = _cited_manual_hints_from_answer(answer)
+            allowed: set[str] = set(cited)
+            for doc in cite_pool + rerank_pool + figure_pool:
+                fp = _doc_basename(doc)
+                if fp:
+                    allowed.add(fp)
+            if allowed:
+                kv_extra = _load_figure_chunks_for_manual_paths(allowed, q)
+                if kv_extra:
+                    anchor_pool = _dedupe_doc_list(anchor_pool + kv_extra)
+        docs, cite_meta = filter_docs_cited_by_answer(
+            answer,
+            docs,
+            query=q,
+            pool=cite_pool,
+            anchor_pool=anchor_pool,
+        )
+        cite_meta["cite_pool_size"] = len(cite_pool)
+        if figure_pool:
+            cite_meta["anchor_pool_size"] = len(anchor_pool)
+            cite_meta["cite_figure_pool_size"] = len(figure_pool)
+    docs_text = text_from_retrieved_docs(docs).strip() if docs else ""
+    if not docs_text:
+        debug = {
+            "gate": {"ok": False, "reason": "no_answer_cited_chunks"},
+            "answer_citation": cite_meta,
+            "llm_chunk_count": len(docs),
+        }
+        _last_image_debug.set(debug)
+        _related_images_selected.set([])
+        _inline_placements.set([])
+        _sync_query_debug_snapshot()
+        return {**empty, "debug": debug}
+
+    images, debug = resolve_query_images(
+        docs_text,
+        roots,
+        query=q,
+        retrieved_docs=docs,
+        figure_pool=anchor_pool,
+        limit=limit,
+        answer=answer or None,
+    )
+    if not images:
+        gate = dict(debug.get("gate") or {})
+        if gate.get("ok") is not False:
+            debug["gate"] = {"ok": False, "reason": "no_inline_in_cited"}
+        _last_image_debug.set(debug)
+        _related_images_selected.set([])
+        _inline_placements.set([])
+        _sync_query_debug_snapshot()
+        return {**empty, "debug": debug}
+
+    placements: list[dict[str, Any]] = []
+    if answer:
+        images_copy = list(images)
+        placements = build_inline_placements(
+            answer,
+            images_copy,
+            query=q,
+            retrieved_docs=docs,
+        )
+        if placements:
+            images = images_copy
+        else:
+            images = images_copy
+            debug["placement_fallback"] = "gallery_no_inline_anchors"
+
+    supplement = int(snap.get("llm_chunks_rerank_figure_supplement") or 0)
+    if cite_meta.get("mode") == "answer_citation":
+        debug["image_source"] = "llm_chunks+answer_citation"
+    else:
+        debug["image_source"] = (
+            "llm_chunks+rerank_inline_figures" if supplement else "llm_chunks"
+        )
+    debug["answer_citation"] = cite_meta
+    debug["llm_chunk_count"] = len(docs)
+    debug["inline_placements"] = placements
+    if supplement:
+        debug["rerank_figure_supplement"] = supplement
+    _last_image_debug.set(debug)
+    _related_images_selected.set(list(images))
+    _inline_placements.set(list(placements))
+    _sync_query_debug_snapshot()
+    return {"images": images, "placements": placements, "debug": debug}
+
+
+def finalize_related_images(
+    *,
+    limit: int | None = None,
+    answer_text: str | None = None,
+) -> list[dict[str, Any]]:
+    """Backward-compatible wrapper returning only the image list."""
+    result = finalize_inline_images(limit=limit, answer_text=answer_text)
+    return list(result.get("images") or [])
+
+
+def _sync_llm_chunks_for_images(query: str, chunks: list[dict]) -> None:
+    """Persist LLM input chunks (same batch the answer LLM sees)."""
+    if not chunks:
+        return
+    try:
+        from query_doc_steering import filter_retrieved_docs_by_query  # noqa: WPS433
+
+        filtered = filter_retrieved_docs_by_query(query, chunks)
+        merged = filtered if filtered else chunks
+    except Exception:
+        merged = list(chunks)
+    rerank_pool = list(_rerank_docs.get() or [])
+    _llm_chunks_rerank_figure_supplement.set(0)
+    try:
+        from query_doc_steering import (  # noqa: WPS433
+            record_catalog_boost,
+            record_table_matrix_boost,
+            supplement_llm_catalog_chunks,
+            supplement_llm_table_matrix_chunks,
+        )
+
+        merged, catalog_added = supplement_llm_catalog_chunks(
+            query, merged, rerank_pool=rerank_pool
+        )
+        if catalog_added:
+            record_catalog_boost(llm=catalog_added)
+        merged, matrix_added = supplement_llm_table_matrix_chunks(
+            query, merged, rerank_pool=rerank_pool
+        )
+        if matrix_added:
+            record_table_matrix_boost(llm=matrix_added)
+    except Exception:
+        matrix_added = 0
+    _llm_chunks_table_matrix_supplement.set(matrix_added)
+    _llm_chunks_for_images.set(merged)
+    retained = _current_query_hook_state().retained_llm_chunks_for_images
+    retained.clear()
+    retained.extend(merged)
+    _retrieved_docs.set(merged)
+    if not (_rerank_figure_pool.get() or []):
+        try:
+            from iqr_store import _doc_content  # noqa: WPS433
+            from image_query_refs import extract_image_refs_from_context  # noqa: WPS433
+
+            fig_docs = [
+                doc
+                for doc in merged
+                if extract_image_refs_from_context(_doc_content(doc).strip())
+            ]
+            if fig_docs:
+                _rerank_figure_pool.set(fig_docs)
+        except Exception:
+            pass
+    from image_query_refs import text_from_retrieved_docs  # noqa: WPS433
+
+    docs_text = text_from_retrieved_docs(merged).strip()
+    if docs_text:
+        _retrieved_docs_text.set(docs_text)
+    _sync_query_debug_snapshot()
+
+
+def _sync_retrieved_docs_after_rerank(final_docs: list[dict]) -> None:
+    """Snapshot rerank pool for optional subject-figure supplement at LLM chunk sync."""
+    docs = list(final_docs or [])
+    _rerank_docs.set(docs)
+    retained = _current_query_hook_state().retained_rerank_docs
+    retained.clear()
+    retained.extend(docs)
+
+
+def _sync_rerank_docs_raw(docs: list[dict]) -> None:
+    """CrossEncoder output before catalog KV boost (gate scoring)."""
+    raw = list(docs or [])
+    _rerank_docs_raw.set(raw)
+    retained = _current_query_hook_state().retained_rerank_docs_raw
+    retained.clear()
+    retained.extend(raw)
+
+
+def get_rerank_pool_chunks() -> list[dict]:
+    """Post-rerank document pool (includes ``rerank_score`` when rerank ran)."""
+    rerank = _rerank_docs.get()
+    if rerank:
+        return list(rerank)
+    retained = _current_query_hook_state().retained_rerank_docs
+    if retained:
+        return list(retained)
+    return []
+
+
+def get_rerank_pool_chunks_raw() -> list[dict]:
+    """CrossEncoder scores before catalog KV supplement (for gate on catalog queries)."""
+    raw = _rerank_docs_raw.get()
+    if raw:
+        return list(raw)
+    retained = _current_query_hook_state().retained_rerank_docs_raw
+    if retained:
+        return list(retained)
+    return []
+
+
+def get_llm_input_chunks() -> list[dict]:
+    """LLM-bound chunks from the latest hooked query (includes ``rerank_score`` when rerank ran)."""
+    raw = _llm_chunks_for_images.get() or _retrieved_docs.get() or []
+    if raw:
+        return list(raw)
+    # Gate probe uses ``only_need_context`` (no ``process_chunks_unified``); scores live on rerank pool.
+    return get_rerank_pool_chunks()
+
+
+def _install_query_hooks_unlocked() -> None:
+    """Install process-wide dispatchers once; request data stays in ContextVars."""
+    global _query_hooks_installed
+
+    import lightrag.operate as op
+    import lightrag.utils as ut
+
+    orig_build_ctx = op._build_query_context
+    orig_naive_query = op.naive_query
+    orig_rerank = ut.apply_rerank_if_enabled
+    # operate.py imports process_chunks_unified at module load; patch both bindings.
+    orig_process_chunks = op.process_chunks_unified
+
+    async def _build_query_context(*args: Any, **kwargs: Any):
+        if not progress_hooks_active():
+            return await orig_build_ctx(*args, **kwargs)
+        injected = get_clarify_context_injection()
+        if injected:
+            from lightrag.base import QueryContextResult  # noqa: WPS433
+
+            try:
+                from raganything.query_timing_trace import trace_event
+
+                trace_event("clarify_inject", skipped="retrieve_and_rerank")
+            except ImportError:
+                pass
+            await _emit(PHASE_BUNDLE)
+            query = args[0] if args else kwargs.get("query", "")
+            if isinstance(query, str) and query.strip():
+                _query_text.set(query)
+                try:
+                    from query_doc_steering import (  # noqa: WPS433
+                        supplement_clarify_injection_catalog,
+                    )
+
+                    injected = supplement_clarify_injection_catalog(query, injected)
+                except Exception:
+                    pass
+            ctx = QueryContextResult(
+                context=str(injected.get("context_str") or ""),
+                raw_data=copy.deepcopy(injected.get("raw_data") or {}),
+            )
+            ctx = _apply_kg_scope_to_query_context(ctx)
+            _capture_llm_context_from_build_result(ctx)
+            bundle_chunks = _chunks_from_hook_raw_data(getattr(ctx, "raw_data", None))
+            if bundle_chunks and isinstance(query, str) and query.strip():
+                _sync_llm_chunks_for_images(query, bundle_chunks)
+            _sync_query_debug_snapshot()
+            return ctx
+
+        await _emit(PHASE_RETRIEVE)
+        query = args[0] if args else kwargs.get("query", "")
+        if isinstance(query, str) and query.strip():
+            _query_text.set(query)
+        ctx = await orig_build_ctx(*args, **kwargs)
+        ctx = _apply_kg_scope_to_query_context(ctx)
+        _capture_llm_context_from_build_result(ctx)
+        if gate_probe_active() and isinstance(query, str) and query.strip():
+            rerank_docs = list(_rerank_docs.get() or [])
+            if rerank_docs:
+                _sync_llm_chunks_for_images(query, rerank_docs)
+            else:
+                bundle_chunks = _chunks_from_hook_raw_data(
+                    getattr(ctx, "raw_data", None)
+                )
+                if bundle_chunks:
+                    _sync_llm_chunks_for_images(query, bundle_chunks)
+        _sync_query_debug_snapshot()
+        return ctx
+
+    async def _naive_query(*args: Any, **kwargs: Any):
+        if not progress_hooks_active():
+            return await orig_naive_query(*args, **kwargs)
+        await _emit(PHASE_RETRIEVE)
+        query = args[0] if args else kwargs.get("query", "")
+        if isinstance(query, str) and query.strip():
+            _query_text.set(query)
+        return await orig_naive_query(*args, **kwargs)
+
+    async def _apply_rerank_if_enabled(
+        query: str,
+        retrieved_docs: list[dict],
+        global_config: dict,
+        enable_rerank: bool = True,
+        top_n: int | None = None,
+    ):
+        if not progress_hooks_active():
+            return await orig_rerank(
+                query, retrieved_docs, global_config, enable_rerank, top_n
+            )
+        if enable_rerank and retrieved_docs:
+            await _emit(PHASE_RERANK)
+        _query_text.set(query)
+        pool = list(retrieved_docs or [])
+        try:
+            from query_doc_steering import (  # noqa: WPS433
+                record_table_matrix_boost,
+                supplement_table_matrix_before_rerank,
+            )
+
+            pool, matrix_pre = supplement_table_matrix_before_rerank(query, pool)
+            if matrix_pre:
+                record_table_matrix_boost(pre_rerank=matrix_pre)
+        except Exception:
+            pass
+        docs = await orig_rerank(query, pool, global_config, enable_rerank, top_n)
+        _sync_rerank_docs_raw(list(docs or []))
+        try:
+            from query_doc_steering import (  # noqa: WPS433
+                record_catalog_boost,
+                supplement_catalog_product_model_chunks,
+            )
+
+            before_catalog = len(docs)
+            docs = supplement_catalog_product_model_chunks(
+                query, docs, rerank_pool=docs
+            )
+            if len(docs) > before_catalog:
+                record_catalog_boost(post_rerank=len(docs) - before_catalog)
+        except Exception:
+            pass
+        try:
+            from query_doc_steering import filter_retrieved_docs_by_query  # noqa: WPS433
+
+            filtered = filter_retrieved_docs_by_query(query, docs)
+            final_docs = filtered if filtered else docs
+        except Exception:
+            final_docs = docs
+        _sync_retrieved_docs_after_rerank(final_docs)
+        try:
+            from iqr_align import (  # noqa: WPS433
+                _chunk_figure_context_aligns_query,
+                _chunk_subject_score,
+            )
+            from iqr_store import _doc_content  # noqa: WPS433
+            from image_query_refs import extract_image_refs_from_context  # noqa: WPS433
+
+            fig_candidates: list[tuple[float, dict]] = []
+            for doc in retrieved_docs or []:
+                content = _doc_content(doc).strip()
+                if not content or not extract_image_refs_from_context(content):
+                    continue
+                if not _chunk_figure_context_aligns_query(query, content):
+                    continue
+                score = _chunk_subject_score(query, content)
+                if score < 0.25:
+                    continue
+                fig_candidates.append((score, doc))
+            fig_candidates.sort(key=lambda pair: pair[0], reverse=True)
+            fig_docs = [doc for _, doc in fig_candidates[:16]]
+            try:
+                from query_doc_steering import _is_cross_manual_listing_query  # noqa: WPS433
+
+                if _is_cross_manual_listing_query(query):
+                    from iqr_anchor import _load_figure_chunks_for_manual_paths  # noqa: WPS433
+                    from iqr_store import _doc_basename  # noqa: WPS433
+
+                    allowed = {
+                        fp for doc in retrieved_docs or [] if (fp := _doc_basename(doc))
+                    }
+                    kv_fig = _load_figure_chunks_for_manual_paths(
+                        allowed, query, max_per_manual=8
+                    )
+                    if kv_fig:
+                        seen_ids = {id(d) for d in fig_docs}
+                        for doc in kv_fig:
+                            if id(doc) not in seen_ids:
+                                fig_docs.append(doc)
+                                seen_ids.add(id(doc))
+            except Exception:
+                pass
+            _rerank_figure_pool.set(fig_docs)
+        except Exception:
+            _rerank_figure_pool.set([])
+        return final_docs
+
+    async def _process_chunks_unified(*args: Any, **kwargs: Any):
+        if not progress_hooks_active():
+            return await orig_process_chunks(*args, **kwargs)
+        query = args[0] if args else kwargs.get("query", "")
+        if isinstance(query, str) and query.strip():
+            _query_text.set(query)
+        proc_args = args
+        proc_kwargs = kwargs
+        try:
+            from image_query_refs import (  # noqa: WPS433
+                llm_chunk_locality_enabled,
+                supplement_unique_chunks_with_order_neighbors,
+            )
+
+            if llm_chunk_locality_enabled():
+                unique_chunks = (
+                    args[1] if len(args) > 1 else kwargs.get("unique_chunks")
+                )
+                if isinstance(unique_chunks, list) and unique_chunks:
+                    expanded, _loc_meta = supplement_unique_chunks_with_order_neighbors(
+                        query, unique_chunks
+                    )
+                    if len(expanded) > len(unique_chunks):
+                        if len(args) > 1:
+                            proc_args = (args[0], expanded) + args[2:]
+                        else:
+                            proc_kwargs = dict(kwargs)
+                            proc_kwargs["unique_chunks"] = expanded
+        except Exception:
+            pass
+        chunks = await orig_process_chunks(*proc_args, **proc_kwargs)
+        if isinstance(chunks, list) and chunks:
+            try:
+                from image_query_refs import (  # noqa: WPS433
+                    merge_order_neighbors_into_llm_chunks,
+                )
+
+                gconf = (
+                    proc_args[3]
+                    if len(proc_args) > 3
+                    else proc_kwargs.get("global_config")
+                )
+                qparam = (
+                    proc_args[2]
+                    if len(proc_args) > 2
+                    else proc_kwargs.get("query_param")
+                )
+                chunks = merge_order_neighbors_into_llm_chunks(
+                    query,
+                    chunks,
+                    global_config=gconf if isinstance(gconf, dict) else {},
+                    query_param=qparam,
+                )
+            except Exception:
+                pass
+            # Plan B: passthrough chunks to the answer LLM (demo granularity).
+            # Snapshot the same batch for Plan A inline images; do not narrow/sanitize return.
+            _sync_llm_chunks_for_images(query, chunks)
+            if not gate_probe_active():
+                await _emit(PHASE_GENERATE)
+            try:
+                import sys
+
+                scripts_dir = Path(__file__).resolve().parent
+                if str(scripts_dir) not in sys.path:
+                    sys.path.insert(0, str(scripts_dir))
+                from query_doc_steering import consume_filter_report  # noqa: WPS433
+
+                report = consume_filter_report()
+                if report:
+                    _steering_report.set(report)
+                    if not gate_probe_active():
+                        q = _progress_queue.get()
+                        if q is not None:
+                            q.put_nowait(report)
+            except Exception:
+                pass
+            return chunks
+        if not gate_probe_active():
+            await _emit(PHASE_GENERATE)
+        try:
+            import sys
+
+            scripts_dir = Path(__file__).resolve().parent
+            if str(scripts_dir) not in sys.path:
+                sys.path.insert(0, str(scripts_dir))
+            from query_doc_steering import consume_filter_report  # noqa: WPS433
+
+            report = consume_filter_report()
+            if report:
+                _steering_report.set(report)
+                if not gate_probe_active():
+                    q = _progress_queue.get()
+                    if q is not None:
+                        q.put_nowait(report)
+        except Exception:
+            pass
+        return chunks
+
+    op._build_query_context = _build_query_context  # type: ignore[method-assign]
+    op.naive_query = _naive_query  # type: ignore[method-assign]
+    ut.apply_rerank_if_enabled = _apply_rerank_if_enabled  # type: ignore[method-assign]
+    op.process_chunks_unified = _process_chunks_unified  # type: ignore[method-assign]
+    ut.process_chunks_unified = _process_chunks_unified  # type: ignore[method-assign]
+    _query_hooks_installed = True
+
+
+def _install_query_hooks() -> None:
+    if _query_hooks_installed:
+        return
+    with _query_hooks_install_lock:
+        if not _query_hooks_installed:
+            _install_query_hooks_unlocked()
+
+
+@contextlib.asynccontextmanager
+async def query_progress_hooks() -> AsyncIterator[asyncio.Queue[dict[str, str]]]:
+    """Activate per-request progress capture on install-once LightRAG hooks."""
+    _install_query_hooks()
+    q: asyncio.Queue[dict[str, str]] = asyncio.Queue(maxsize=32)
+    token = _progress_queue.set(q)
+    state = _QueryHookState()
+    _query_hook_state.set(state)
+
+    try:
+        yield q
+    finally:
+        _progress_queue.reset(token)
+        _retrieval_context.set(None)
+        _retrieved_docs_text.set(None)
+        _media_roots.set(None)
+        _query_text.set(None)
+        _answer_text.set(None)
+        _retrieved_docs.set(None)
+        _llm_chunks_for_images.set(None)
+        _rerank_docs.set(None)
+        _rerank_docs_raw.set(None)
+        _rerank_figure_pool.set(None)
+        _llm_chunks_rerank_figure_supplement.set(0)
+        _llm_chunks_table_matrix_supplement.set(0)
+        _related_images_selected.set(None)
+        _inline_placements.set(None)
+        _steering_report.set(None)
+        _last_image_debug.set(None)
+        _llm_input.set(None)
+        _last_probe_raw_data.set(None)
+        clear_clarify_context_injection()
+        _retain_query_debug_snapshot()
+        state.debug_snapshot.clear()
+
+
+async def _emit(phase: str) -> None:
+    try:
+        from raganything.query_timing_trace import trace_event
+
+        trace_event("phase", phase=phase)
+    except ImportError:
+        pass
+    q = _progress_queue.get()
+    if q is None:
+        return
+    try:
+        q.put_nowait(
+            {
+                "type": "status",
+                "phase": phase,
+                "text": PHASE_TEXT.get(phase, phase),
+            }
+        )
+    except asyncio.QueueFull:
+        pass
