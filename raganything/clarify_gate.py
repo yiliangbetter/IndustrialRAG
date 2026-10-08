@@ -291,9 +291,9 @@ async def probe_llm_retrieval_full(
             progress_hooks_active = hooks_mod.progress_hooks_active
             query_progress_hooks = hooks_mod.query_progress_hooks
 
-            def _probe_chunks_and_stats() -> tuple[
-                list[dict[str, Any]], dict[str, Any]
-            ]:
+            def _probe_chunks_and_stats() -> (
+                tuple[list[dict[str, Any]], dict[str, Any]]
+            ):
                 def _pick_best(
                     *candidates: tuple[list[dict[str, Any]], dict[str, Any]],
                 ) -> tuple[list[dict[str, Any]], dict[str, Any]]:

@@ -15,7 +15,9 @@ from raganything.utils import (
 
 
 def _img(path: str) -> str:
-    return build_image_ref_block(img_path=path, page_idx=5, context="保养内容：清洁外观")
+    return build_image_ref_block(
+        img_path=path, page_idx=5, context="保养内容：清洁外观"
+    )
 
 
 def _record(i: int, closer: str = "保养步骤") -> list:
