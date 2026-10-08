@@ -75,7 +75,9 @@ def main() -> int:
         )
         return int(result.returncode or 0)
     except OSError as exc:
-        _show_error("Nanxing RAG 启动失败", f"无法启动服务：\n{exc}\n\n请联系技术支持。")
+        _show_error(
+            "Nanxing RAG 启动失败", f"无法启动服务：\n{exc}\n\n请联系技术支持。"
+        )
         return 1
 
 

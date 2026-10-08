@@ -129,7 +129,9 @@ def resolve_multimodal_enabled() -> bool:
     return skip not in ("1", "true", "yes", "on")
 
 
-def _hub_model_ready(hub_root: Path, hub_dir: str, weight_names: tuple[str, ...]) -> bool:
+def _hub_model_ready(
+    hub_root: Path, hub_dir: str, weight_names: tuple[str, ...]
+) -> bool:
     base = hub_root / "hub" / hub_dir
     if not base.is_dir():
         return False
@@ -186,7 +188,9 @@ def check_bundled_models() -> list[dict[str, Any]]:
                 }
             )
             continue
-        weight_files = tuple(spec.get("weight_files", ("pytorch_model.bin", "model.safetensors")))
+        weight_files = tuple(
+            spec.get("weight_files", ("pytorch_model.bin", "model.safetensors"))
+        )
         ok = False
         found_path = ""
         for root in candidates:
@@ -313,8 +317,10 @@ def _rag_storage_status(wd: Path) -> dict[str, Any]:
     partial_index = full_doc_count > 0 and chunk_count == 0
     has_failures = failed_count > 0 or in_progress > 0
     ok = success_count > 0 and chunk_count > 0 and not has_failures
-    partial = partial_index or (success_count > 0 and has_failures) or (
-        success_count == 0 and (failed_count > 0 or in_progress > 0)
+    partial = (
+        partial_index
+        or (success_count > 0 and has_failures)
+        or (success_count == 0 and (failed_count > 0 or in_progress > 0))
     )
 
     if success_count == 0 and failed_count == 0 and record_count == 0:
