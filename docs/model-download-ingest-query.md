@@ -159,9 +159,9 @@ uv run python .\scripts\rag_pipeline_parse_graph_chat.py `
 
 **`.env` 中与多模态相关的开关**（在 **`--no-skip-multimodal`** 时由 **`_build_rag`** 读取；未写时默认视为 **true**）：
 
-- **`ENABLE_TABLE_PROCESSING`**：表格处理器
-- **`ENABLE_IMAGE_PROCESSING`**：图片（可能使用 **`VISION_MODEL`**）
-- **`ENABLE_EQUATION_PROCESSING`**：公式
+- **`ENABLE_TABLE_PROCESSING`**：表格处理器  
+- **`ENABLE_IMAGE_PROCESSING`**：图片（可能使用 **`VISION_MODEL`**）  
+- **`ENABLE_EQUATION_PROCESSING`**：公式  
 
 **仅表格、关闭图片与公式** 示例：
 
@@ -205,7 +205,7 @@ uv run python .\scripts\rag_pipeline_parse_graph_chat.py `
 
 - **`--query-mode`**：如 **`mix`**（图+向量）、**`naive`**（仅向量 chunk）等；也可在 `.env` 设 **`RAG_QUERY_MODE`**。
 - **LightRAG 常用 `.env` 项**（与「图 vs chunk 预算」相关，详见 LightRAG 文档）：**`TOP_K`**、**`CHUNK_TOP_K`**、**`COSINE_THRESHOLD`**、**`MAX_ENTITY_TOKENS`**、**`MAX_RELATION_TOKENS`**、**`MAX_TOTAL_TOKENS`**、**`RERANK_BY_DEFAULT`**。
-- **重排序（rerank）**：LightRAG 在 **`RERANK_BY_DEFAULT=true`** 时会对检索到的 chunk 做重排，但必须在构建 **`LightRAG`** 时提供 **`rerank_model_func`**。本仓库的 **`scripts/rag_pipeline_parse_graph_chat.py`**（以及依赖其 **`_build_rag`** 的 **`dump_query_context.py`**）已按环境变量注入该函数。请在 `.env` 中配置（详见根目录 **`env.example`** 中 `### Rerank` 段）：
+- **重排序（rerank）**：LightRAG 在 **`RERANK_BY_DEFAULT=true`** 时会对检索到的 chunk 做重排，但必须在构建 **`LightRAG`** 时提供 **`rerank_model_func`**。本仓库的 **`scripts/rag_pipeline_parse_graph_chat.py`**（及依赖其 **`_build_rag`** 的 **`dump_query_context.py`**）已按环境变量注入该函数。请在 `.env` 中配置（详见根目录 **`env.example`** 中 `### Rerank` 段）：
   - **`RERANK_BINDING=none`**（或不设）：不重排（与「关掉 rerank」一致）。
   - **`RERANK_BINDING=jina` / `cohere` / `aliyun`**：使用对应云端 API，需 **`RERANK_BINDING_API_KEY`**（或各厂商同名变量），**`RERANK_MODEL`** 填该 API 支持的模型名。
   - **`RERANK_BINDING=hf`**：本地 **`sentence_transformers.CrossEncoder`**，需 **`uv sync --extra local-embed`**，并用 **`huggingface-cli download`** 把 **`RERANK_MODEL`**（默认 **`BAAI/bge-reranker-base`**）下载到与 **`HF_HOME`** 一致的 Hub 缓存。加载时会自动解析 **`HF_HOME/hub/models--…--…/snapshots/<hash>`**（以目录内 **`config.json`** 为准；CrossEncoder 仓库**没有** embedding 用的 **`modules.json`**，属正常现象）。若仍尝试连 Hub，请设 **`HF_EMBED_OFFLINE=1`** 或 **`RERANK_HF_OFFLINE=1`**（与脚本里已设的 **`HF_HUB_OFFLINE`** 一致），并确认 **`HF_HOME`** 指向已含该模型的缓存目录。
@@ -217,20 +217,16 @@ uv run python .\scripts\rag_pipeline_parse_graph_chat.py `
 
 ## 4. 检索自检（可选）
 
-**推荐脚本**：`scripts/dump_query_context.py`（完整工程 / 后续 tooling PR 提供；只跑 `aquery_data`、**不调 LLM**，导出实体/关系/chunk，用于判断「表内容有没有进检索」）。
+**脚本**：[**`scripts/dump_query_context.py`**](../scripts/dump_query_context.py)
+
+**作用**：对某条问题调用 **`aquery_data`**，把 **最终要送给 LLM 的实体/关系/chunk 原文** 写入 UTF-8 文件，**不调大模型**，用于判断「表里内容有没有进 chunk」。
 
 ```powershell
-# 未写问题时可用环境变量 DUMP_QUERY_DEFAULT；输出默认 docs/query_context_dump.txt
+# 未写问题时使用脚本内置默认问题；输出默认 docs/query_context_dump.txt
 uv run python .\scripts\dump_query_context.py -w .\rag_storage_run --query-mode mix
 
 # 指定问题（位置参数，放在选项之后）；自定义输出文件
 uv run python .\scripts\dump_query_context.py -w .\rag_storage_run --query-mode naive --out .\docs\query_context_dump_naive.txt "你的问题全文"
-```
-
-若当前检出**没有**该文件，可用主脚本 **`--query-only`** 做端到端自检兜底：
-
-```powershell
-uv run python .\scripts\rag_pipeline_parse_graph_chat.py --query-only -w .\rag_storage_run --query "你的问题全文"
 ```
 
 ---

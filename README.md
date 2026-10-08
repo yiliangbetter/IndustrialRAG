@@ -319,6 +319,8 @@ python -c "from raganything import RAGAnything; rag = RAGAnything(); print('✅ 
 
 Models are downloaded automatically on first use. For manual download, refer to [MinerU Model Source Configuration](https://github.com/opendatalab/MinerU/blob/master/README.md#22-model-source-configuration).
 
+**Pipeline CLI walkthrough** (pre-fetch MinerU / Hugging Face weights, `--ingest-only`, `--query-only`, context dumps): [Model download, ingest-only, and query-only](docs/model-download-ingest-query.md) (Chinese prose; English filename for stable links).
+
 ### Usage Examples
 
 #### 1. End-to-End Document Processing
