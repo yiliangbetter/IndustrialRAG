@@ -1,5 +1,6 @@
 #!/usr/bin/env python3
 """Audit Q15 电控板 section chunks after re-ingest."""
+
 from __future__ import annotations
 
 import json
@@ -74,8 +75,10 @@ def main() -> int:
             cid = str(doc.get("id", ""))[:22]
             refs = iq.extract_image_refs_from_context(content)
 
-            if "3.2 电控" in content or "3.14.5" in content or (
-                content.strip().startswith("3.2") and "电控" in content[:30]
+            if (
+                "3.2 电控" in content
+                or "3.14.5" in content
+                or (content.strip().startswith("3.2") and "电控" in content[:30])
             ):
                 heading_only.append((idx, cid, content[:100].replace("\n", " ")))
 
@@ -129,13 +132,13 @@ def main() -> int:
                 print(f"      ctx={ctx}")
 
         missing_good = [
-            p
-            for p in exp["preferred_imgs"]
-            if not any(p[:8] in g for g in found_good)
+            p for p in exp["preferred_imgs"] if not any(p[:8] in g for g in found_good)
         ]
         has_bad = bool(found_bad)
         warn_in_chunk = any(
-            "Warning" in lab or "警告" in lab for row in figure_hits for _h, lab, _ctx in row["refs"]
+            "Warning" in lab or "警告" in lab
+            for row in figure_hits
+            for _h, lab, _ctx in row["refs"]
         )
         caption_ok = any(
             exp["caption_hint"] and exp["caption_hint"] in lab
@@ -150,15 +153,25 @@ def main() -> int:
         if hint == "自动封边机" and warn_in_chunk:
             issues.append(f"{hint}: Warning label still in 电控 chunk")
         if hint == "高速智能封边机" and exp["caption_hint"] and not caption_ok:
-            issues.append(f"{hint}: caption '{exp['caption_hint']}' not found on figure ref")
+            issues.append(
+                f"{hint}: caption '{exp['caption_hint']}' not found on figure ref"
+            )
 
-        ok = not missing_good and not has_bad and not (
-            hint == "自动封边机" and warn_in_chunk
+        ok = (
+            not missing_good
+            and not has_bad
+            and not (hint == "自动封边机" and warn_in_chunk)
         )
-        summary.append((hint, "PASS" if ok else "FAIL", len(figure_hits), len(heading_only)))
-        print(f"  VERDICT: {'PASS' if ok else 'FAIL'} | good={sorted(found_good)} bad={sorted(found_bad)}")
+        summary.append(
+            (hint, "PASS" if ok else "FAIL", len(figure_hits), len(heading_only))
+        )
+        print(
+            f"  VERDICT: {'PASS' if ok else 'FAIL'} | good={sorted(found_good)} bad={sorted(found_bad)}"
+        )
         if hint == "高速智能封边机":
-            print(f"  caption '{exp['caption_hint']}': {'found' if caption_ok else 'missing'}")
+            print(
+                f"  caption '{exp['caption_hint']}': {'found' if caption_ok else 'missing'}"
+            )
         print()
 
     print("=" * 70)

@@ -22,7 +22,9 @@ _ROOT = Path(__file__).resolve().parent.parent
 _SCRIPTS = _ROOT / "scripts"
 sys.path.insert(0, str(_SCRIPTS))
 
-spec = importlib.util.spec_from_file_location("run_web_path_q1_17", _SCRIPTS / "run_web_path_q1_17.py")
+spec = importlib.util.spec_from_file_location(
+    "run_web_path_q1_17", _SCRIPTS / "run_web_path_q1_17.py"
+)
 _web = importlib.util.module_from_spec(spec)
 assert spec.loader is not None
 spec.loader.exec_module(_web)
@@ -30,35 +32,21 @@ REF = _web.REF
 
 # Reference answer text synthesized from docs/测试例参考答案.md (for RAGAS context_recall).
 GROUND_TRUTH: dict[int, str] = {
-    1: (
-        "高速智能封边机维护保养手册适用于 NB9-Smart 和 NB10-Smart 两种产品型号。"
-    ),
-    2: (
-        "开机前应检查电源开关的外观和作用是否良好，并检查接地装置是否完整。"
-    ),
-    3: (
-        "机床床身（机床外部）清洁应每天保养一次。"
-    ),
+    1: ("高速智能封边机维护保养手册适用于 NB9-Smart 和 NB10-Smart 两种产品型号。"),
+    2: ("开机前应检查电源开关的外观和作用是否良好，并检查接地装置是否完整。"),
+    3: ("机床床身（机床外部）清洁应每天保养一次。"),
     4: (
         "机床内部清洁步骤：工作结束后，需用吸尘机或碎布清洁封边机内外各功能单元"
         "储藏的刮削、灰尘等杂物，并擦拭干净表面的油污。"
     ),
-    5: (
-        "清理压带轮残胶应使用刮刀，操作时注意不要划伤压带轮表面涂层。"
-    ),
+    5: ("清理压带轮残胶应使用刮刀，操作时注意不要划伤压带轮表面涂层。"),
     6: (
         "输送链条保养时应加注润滑脂2#（润滑脂 2#），可使用手动黄油枪从黄油杯处加注，"
         "直至链条侧面有黄油溢出。"
     ),
-    7: (
-        "进料部分保养时需使用百分表，表针跳动读数须小于 0.15mm。"
-    ),
-    8: (
-        "更换预铣刀时，第一把预铣刀刀刃为顺铣方向，第二把预铣刀刀刃为逆铣方向。"
-    ),
-    9: (
-        "注油泵油位过低时，应注入美孚品牌的长效液压油（美孚长效液压油）。"
-    ),
+    7: ("进料部分保养时需使用百分表，表针跳动读数须小于 0.15mm。"),
+    8: ("更换预铣刀时，第一把预铣刀刀刃为顺铣方向，第二把预铣刀刀刃为逆铣方向。"),
+    9: ("注油泵油位过低时，应注入美孚品牌的长效液压油（美孚长效液压油）。"),
     10: (
         "需要使用美孚长效液压油润滑的部件共九项：自动注油泵；辅助进料导轨/滑块；"
         "进料靠板部分；预铣机构导轨/滑块；平切机构导轨/滑块；精修导轨/滑块；"
@@ -140,7 +128,9 @@ def main() -> None:
     }
     out = args.out.expanduser().resolve()
     out.parent.mkdir(parents=True, exist_ok=True)
-    out.write_text(json.dumps(payload, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
+    out.write_text(
+        json.dumps(payload, ensure_ascii=False, indent=2) + "\n", encoding="utf-8"
+    )
     print(f"Wrote {len(cases)} cases -> {out}", flush=True)
 
 

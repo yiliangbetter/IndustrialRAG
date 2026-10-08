@@ -98,8 +98,7 @@ async def run_cases(
     include_skip: bool,
 ) -> list[dict]:
     rpc = _load_rpc()
-    rag, _, pod = await rpc._build_rag(wd, wd)
-    parser_root = pod.resolve()
+    rag, _, _ = await rpc._build_rag(wd, wd)
     from query_doc_steering import strip_manual_circled_step_markers
     from query_progress_hooks import query_progress_hooks, set_query_text_for_images
     from stream_cot_parser import parse_complete_cot
@@ -164,7 +163,7 @@ def write_report(path: Path, rows: list[dict], *, query_mode: str, wd: Path) -> 
         f"- 时间：{datetime.now().astimezone().isoformat()}",
         f"- RAG 模式：{query_mode}",
         f"- 工作目录：`{wd}`",
-        f"- 参考答案：`docs/AI智能客服话术测试参考答案.md`",
+        "- 参考答案：`docs/AI智能客服话术测试参考答案.md`",
         f"- 通过：**{passed}/{len(rows)}**",
         "",
         "## 汇总",
@@ -206,10 +205,14 @@ def main() -> int:
     parser.add_argument("--cases", type=Path, default=_DEFAULT_CASES)
     parser.add_argument("--ids", type=str, default="", help="Comma IDs e.g. 1,3,5")
     parser.add_argument("--group", choices=["商务", "技术", "综合", ""], default="技术")
-    parser.add_argument("--expect", choices=["script", "transfer", "technical", ""], default="")
+    parser.add_argument(
+        "--expect", choices=["script", "transfer", "technical", ""], default=""
+    )
     parser.add_argument("--include-skip", action="store_true")
     parser.add_argument("--mode", choices=["rag", "local"], default="rag")
-    parser.add_argument("--response", type=str, default="", help="local mode: answer text")
+    parser.add_argument(
+        "--response", type=str, default="", help="local mode: answer text"
+    )
     parser.add_argument("--case-id", type=int, default=0, help="local mode: case id")
     parser.add_argument("--query-mode", default=os.getenv("RAG_QUERY_MODE", "mix"))
     parser.add_argument(
@@ -220,7 +223,10 @@ def main() -> int:
     args = parser.parse_args()
 
     if not args.cases.is_file():
-        print(f"Cases file missing. Run: python scripts/build_voice_script_tests.py", file=sys.stderr)
+        print(
+            "Cases file missing. Run: python scripts/build_voice_script_tests.py",
+            file=sys.stderr,
+        )
         return 1
 
     payload = json.loads(args.cases.read_text(encoding="utf-8"))

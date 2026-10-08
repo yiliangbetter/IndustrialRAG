@@ -166,7 +166,9 @@ def main() -> None:
         help="Question bank file (default: docs/测试例.txt)",
     )
     p.add_argument("--max-id", type=int, default=15, help="Last question id to run")
-    p.add_argument("--ids", type=str, default="", help="Comma-separated ids, e.g. 1,3,11")
+    p.add_argument(
+        "--ids", type=str, default="", help="Comma-separated ids, e.g. 1,3,11"
+    )
     p.add_argument("-w", "--working-dir", type=Path, default=None)
     p.add_argument("--parser-output-dir", type=Path, default=None)
     p.add_argument("--mode", default=os.getenv("RAG_QUERY_MODE", "mix"))
@@ -198,9 +200,7 @@ def main() -> None:
 
     print(f"Running {len(cases)} case(s) mode={args.mode}")
     print(f"  working_dir={wd}")
-    results = asyncio.run(
-        _run_cases(cases, mode=args.mode.strip(), wd=wd, pod=pod)
-    )
+    results = asyncio.run(_run_cases(cases, mode=args.mode.strip(), wd=wd, pod=pod))
 
     meta = {
         "generated_at": datetime.now(timezone.utc).isoformat(),

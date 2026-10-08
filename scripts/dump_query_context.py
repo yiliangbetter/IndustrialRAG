@@ -34,7 +34,8 @@ if (os.getenv("HF_EMBED_OFFLINE") or "").strip().lower() in ("1", "true", "yes")
     os.environ.setdefault("TRANSFORMERS_OFFLINE", "1")
 
 spec = importlib.util.spec_from_file_location(
-    "rag_pipeline_parse_graph_chat", _ROOT / "scripts" / "rag_pipeline_parse_graph_chat.py"
+    "rag_pipeline_parse_graph_chat",
+    _ROOT / "scripts" / "rag_pipeline_parse_graph_chat.py",
 )
 rpc = importlib.util.module_from_spec(spec)
 assert spec.loader is not None
@@ -99,7 +100,9 @@ async def _async_main() -> None:
     )
     args = p.parse_args()
 
-    query = (args.query or "").strip() or (os.getenv("DUMP_QUERY_DEFAULT") or "").strip()
+    query = (args.query or "").strip() or (
+        os.getenv("DUMP_QUERY_DEFAULT") or ""
+    ).strip()
     if not query:
         p.error(
             "Missing QUERY: pass it as the last argument, e.g. "
@@ -140,7 +143,9 @@ async def _async_main() -> None:
     entities = inner.get("entities") or []
     rels = inner.get("relationships") or []
     chunks = inner.get("chunks") or []
-    out(f"\n=== counts: entities={len(entities)} relations={len(rels)} chunks={len(chunks)} ===")
+    out(
+        f"\n=== counts: entities={len(entities)} relations={len(rels)} chunks={len(chunks)} ==="
+    )
 
     all_chunk_text = "\n".join((c.get("content") or "") for c in chunks)
     if markers:
@@ -148,7 +153,9 @@ async def _async_main() -> None:
         for m in markers:
             out(f"  {m!r}: {m in all_chunk_text}")
     else:
-        out("\n=== marker hits (skipped; pass --markers 'a,b,c' to scan substrings) ===")
+        out(
+            "\n=== marker hits (skipped; pass --markers 'a,b,c' to scan substrings) ==="
+        )
 
     out(f"\n=== chunk previews (query_mode={args.query_mode!r}) ===\n")
     for i, c in enumerate(chunks):

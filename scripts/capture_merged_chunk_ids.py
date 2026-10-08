@@ -61,7 +61,8 @@ async def _async_main() -> None:
     _install_merge_hook(args.out.expanduser().resolve())
 
     spec = importlib.util.spec_from_file_location(
-        "rag_pipeline_parse_graph_chat", _ROOT / "scripts" / "rag_pipeline_parse_graph_chat.py"
+        "rag_pipeline_parse_graph_chat",
+        _ROOT / "scripts" / "rag_pipeline_parse_graph_chat.py",
     )
     rpc = importlib.util.module_from_spec(spec)
     assert spec.loader is not None

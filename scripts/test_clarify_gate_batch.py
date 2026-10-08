@@ -19,7 +19,8 @@ sys.path.insert(0, str(_ROOT / "scripts"))
 load_dotenv(_ROOT / ".env", override=False)
 
 spec = importlib.util.spec_from_file_location(
-    "rag_pipeline_parse_graph_chat", _ROOT / "scripts" / "rag_pipeline_parse_graph_chat.py"
+    "rag_pipeline_parse_graph_chat",
+    _ROOT / "scripts" / "rag_pipeline_parse_graph_chat.py",
 )
 rpc = importlib.util.module_from_spec(spec)
 assert spec.loader is not None
@@ -68,9 +69,7 @@ async def _run(source: Path, *, limit: int, out: Path | None) -> None:
                 f"#{cid} final={final_score} {outcome}/{reason} candidates={n_cand}  {q[:50]}"
             )
         elif isinstance(result, ClarifyBypass):
-            lines.append(
-                f"#{cid} final={final_score} bypass={result.reason}  {q[:50]}"
-            )
+            lines.append(f"#{cid} final={final_score} bypass={result.reason}  {q[:50]}")
         else:
             lines.append(f"#{cid} final={final_score} unknown  {q[:50]}")
 

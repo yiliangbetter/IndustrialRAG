@@ -51,7 +51,9 @@ def _parse_terminal(path: Path) -> tuple[list[dict[str, Any]], list[str]]:
         m = _SUMMARY.match(raw)
         if m and current is not None:
             chunks_raw, rerank_raw, gate, cands, design = m.groups()
-            current["original_llm_chunks"] = int(chunks_raw) if chunks_raw != "None" else 0
+            current["original_llm_chunks"] = (
+                int(chunks_raw) if chunks_raw != "None" else 0
+            )
             current["original_max_rerank"] = (
                 None if rerank_raw == "None" else float(rerank_raw)
             )
@@ -113,8 +115,12 @@ def _format_report(
     lines.append("")
     lines.append("说明:")
     lines.append("  - 门控统计与随机点选问句来自中断前的终端日志。")
-    lines.append("  - 推荐问列表来自 gate-jsonl（同日 gate-only 重跑，文本可能与中断跑略有差异）。")
-    lines.append("  - LLM 答案 / References 未写入日志，无法恢复；标记为 aquery_done_no_text。")
+    lines.append(
+        "  - 推荐问列表来自 gate-jsonl（同日 gate-only 重跑，文本可能与中断跑略有差异）。"
+    )
+    lines.append(
+        "  - LLM 答案 / References 未写入日志，无法恢复；标记为 aquery_done_no_text。"
+    )
     lines.append("")
 
     n_offer = 0
@@ -157,7 +163,9 @@ def _format_report(
         if pick_text:
             n_picked += 1
             lines.append(f"  随机选用: [{pick_id or '?'}] {pick_text}")
-            lines.append("  LLM: aquery_done_no_text (答案未落盘，需账户恢复后重跑该题)")
+            lines.append(
+                "  LLM: aquery_done_no_text (答案未落盘，需账户恢复后重跑该题)"
+            )
             lines.append("  References 证据: UNKNOWN (答案未落盘)")
         else:
             lines.append("  随机选用: (无 — 本题为 reject 或中断前未点选)")
@@ -173,14 +181,18 @@ def _format_report(
 
 def main() -> None:
     p = argparse.ArgumentParser(description=__doc__)
-    p.add_argument("--terminal", type=Path, required=True, help="Crashed run terminal log")
+    p.add_argument(
+        "--terminal", type=Path, required=True, help="Crashed run terminal log"
+    )
     p.add_argument(
         "--gate-jsonl",
         type=Path,
         default=_ROOT / "logs" / "clarify_gate_voice29_replay.jsonl",
         help="Gate-only JSONL for candidate reference (optional)",
     )
-    p.add_argument("--seed", type=int, default=42, help="Random pick seed used in crashed run")
+    p.add_argument(
+        "--seed", type=int, default=42, help="Random pick seed used in crashed run"
+    )
     p.add_argument("--out", type=Path, default=None)
     args = p.parse_args()
 

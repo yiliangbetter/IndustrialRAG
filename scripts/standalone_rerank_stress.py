@@ -19,7 +19,6 @@ import json
 import os
 import statistics
 import subprocess
-import sys
 import time
 from datetime import datetime, timezone
 from pathlib import Path
@@ -59,7 +58,11 @@ def _hub_snapshot(repo_id: str, hf_home: Path) -> Path | None:
             if (snap / "config.json").is_file():
                 return snap
     snaps = sorted(
-        (p for p in (repo_dir / "snapshots").iterdir() if (p / "config.json").is_file()),
+        (
+            p
+            for p in (repo_dir / "snapshots").iterdir()
+            if (p / "config.json").is_file()
+        ),
         key=lambda p: p.stat().st_mtime,
         reverse=True,
     )
@@ -92,7 +95,9 @@ def _torch_mem() -> dict[str, float]:
         return {
             "allocated_mb": round(torch.cuda.memory_allocated() / 1024 / 1024, 1),
             "reserved_mb": round(torch.cuda.memory_reserved() / 1024 / 1024, 1),
-            "max_allocated_mb": round(torch.cuda.max_memory_allocated() / 1024 / 1024, 1),
+            "max_allocated_mb": round(
+                torch.cuda.max_memory_allocated() / 1024 / 1024, 1
+            ),
         }
     except Exception:
         return {}
@@ -159,7 +164,9 @@ def _slug_model(model: str) -> str:
     return model.split("/")[-1].replace(".", "_").lower()
 
 
-def _format_report(payload: dict[str, Any], *, title: str = "Standalone rerank stress") -> str:
+def _format_report(
+    payload: dict[str, Any], *, title: str = "Standalone rerank stress"
+) -> str:
     s = payload.get("summary") or {}
     lines = [
         "=" * 72,
@@ -246,7 +253,10 @@ def _run_stress(args: argparse.Namespace) -> dict[str, Any]:
         min_chars=args.min_chunk_chars,
         max_chars=args.max_chunk_chars,
     )
-    print(f"Document pool: {len(docs)} chunks, chars min={min(len(d) for d in docs)} max={max(len(d) for d in docs)}", flush=True)
+    print(
+        f"Document pool: {len(docs)} chunks, chars min={min(len(d) for d in docs)} max={max(len(d) for d in docs)}",
+        flush=True,
+    )
 
     queries = list(_DEFAULT_QUERIES)
     while len(queries) < args.rounds:
@@ -271,9 +281,13 @@ def _run_stress(args: argparse.Namespace) -> dict[str, Any]:
 
         t0 = time.perf_counter()
         if args.per_batch_timing:
-            scores, batch_times = _predict_batched(ce, pairs, batch_size=args.batch_size)
+            scores, batch_times = _predict_batched(
+                ce, pairs, batch_size=args.batch_size
+            )
         else:
-            scores = ce.predict(pairs, batch_size=args.batch_size, show_progress_bar=True)
+            scores = ce.predict(
+                pairs, batch_size=args.batch_size, show_progress_bar=True
+            )
             batch_times = []
             if hasattr(scores, "tolist"):
                 scores = scores.tolist()
@@ -291,7 +305,9 @@ def _run_stress(args: argparse.Namespace) -> dict[str, Any]:
             "total_s": total_s,
             "batch_times_s": batch_times,
             "first_batch_s": batch_times[0] if batch_times else None,
-            "rest_batches_max_s": max(batch_times[1:], default=None) if len(batch_times) > 1 else None,
+            "rest_batches_max_s": max(batch_times[1:], default=None)
+            if len(batch_times) > 1
+            else None,
             "top_score": round(top, 4) if top is not None else None,
             "torch_mem_before": mem_before,
             "torch_mem_after": mem_after,
@@ -309,7 +325,10 @@ def _run_stress(args: argparse.Namespace) -> dict[str, Any]:
         smi = ""
         if smi_after:
             smi = f" vram={smi_after[0]:.0f}MB util={smi_after[2]:.0f}%"
-        print(f"  [{i:2d}/{args.rounds}] {total_s:7.2f}s top={row['top_score']}{bt}{smi} | {query[:28]}", flush=True)
+        print(
+            f"  [{i:2d}/{args.rounds}] {total_s:7.2f}s top={row['top_score']}{bt}{smi} | {query[:28]}",
+            flush=True,
+        )
 
         if args.gc_each:
             gc.collect()
@@ -317,7 +336,9 @@ def _run_stress(args: argparse.Namespace) -> dict[str, Any]:
                 torch.cuda.empty_cache()
 
     totals = [r["total_s"] for r in rounds_out]
-    first_batch = [r["first_batch_s"] for r in rounds_out if r.get("first_batch_s") is not None]
+    first_batch = [
+        r["first_batch_s"] for r in rounds_out if r.get("first_batch_s") is not None
+    ]
     summary = {
         "model": args.model,
         "load_path": load_path,
@@ -333,8 +354,12 @@ def _run_stress(args: argparse.Namespace) -> dict[str, Any]:
         "total_s_max": max(totals),
         "round1_s": totals[0],
         "round2_s": totals[1] if len(totals) > 1 else None,
-        "slowdown_round2_vs_1": round(totals[1] / totals[0], 2) if len(totals) > 1 and totals[0] > 0 else None,
-        "slowdown_max_vs_round1": round(max(totals) / totals[0], 2) if totals[0] > 0 else None,
+        "slowdown_round2_vs_1": round(totals[1] / totals[0], 2)
+        if len(totals) > 1 and totals[0] > 0
+        else None,
+        "slowdown_max_vs_round1": round(max(totals) / totals[0], 2)
+        if totals[0] > 0
+        else None,
         "nvidia_peak_mb": max(
             (r.get("nvidia_used_mb_after") or 0 for r in rounds_out),
             default=0,
@@ -355,7 +380,9 @@ def _run_compare(args: argparse.Namespace) -> dict[str, Any]:
     """Run each model in a fresh process (unload GPU between models)."""
     models = [
         m.strip()
-        for m in (args.compare_models or "BAAI/bge-reranker-v2-m3,Qwen/Qwen3-Reranker-0.6B").split(",")
+        for m in (
+            args.compare_models or "BAAI/bge-reranker-v2-m3,Qwen/Qwen3-Reranker-0.6B"
+        ).split(",")
         if m.strip()
     ]
     payloads: dict[str, dict[str, Any]] = {}
@@ -404,7 +431,9 @@ def _run_compare(args: argparse.Namespace) -> dict[str, Any]:
         "max_chunk_chars": args.max_chunk_chars,
         "models": [{"name": k, "summary": payloads[k]["summary"]} for k in payloads],
         "payloads": payloads,
-        "interpretation": "\n".join(interp_lines) if interp_lines else "(see per-model tables)",
+        "interpretation": "\n".join(interp_lines)
+        if interp_lines
+        else "(see per-model tables)",
     }
 
 
@@ -412,13 +441,17 @@ def main() -> None:
     root = Path(__file__).resolve().parent.parent
     p = argparse.ArgumentParser(description=__doc__)
     p.add_argument("--model", default="Qwen/Qwen3-Reranker-0.6B")
-    p.add_argument("--hf-home", default=os.getenv("HF_HOME") or str(root / "data" / "models"))
+    p.add_argument(
+        "--hf-home", default=os.getenv("HF_HOME") or str(root / "data" / "models")
+    )
     p.add_argument(
         "--chunks-json",
         default=str(root / "data" / "rag_storage" / "kv_store_text_chunks.json"),
         help="Real chunk texts for realistic lengths (set '' to use synthetic only)",
     )
-    p.add_argument("--pool-size", type=int, default=70, help="Pairs per round (~merge pool)")
+    p.add_argument(
+        "--pool-size", type=int, default=70, help="Pairs per round (~merge pool)"
+    )
     p.add_argument("--min-chunk-chars", type=int, default=80)
     p.add_argument(
         "--max-chunk-chars",
@@ -429,8 +462,14 @@ def main() -> None:
     p.add_argument("--rounds", type=int, default=16, help="Consecutive predict calls")
     p.add_argument("--batch-size", type=int, default=32)
     p.add_argument("--per-batch-timing", action="store_true", default=True)
-    p.add_argument("--no-per-batch-timing", action="store_false", dest="per_batch_timing")
-    p.add_argument("--empty-cache-each", action="store_true", help="torch.cuda.empty_cache() before each round")
+    p.add_argument(
+        "--no-per-batch-timing", action="store_false", dest="per_batch_timing"
+    )
+    p.add_argument(
+        "--empty-cache-each",
+        action="store_true",
+        help="torch.cuda.empty_cache() before each round",
+    )
     p.add_argument("--gc-each", action="store_true")
     p.add_argument(
         "--compare",
@@ -443,7 +482,12 @@ def main() -> None:
         help="Comma-separated models for --compare",
     )
     p.add_argument("--out", type=Path, default=None)
-    p.add_argument("--out-report", type=Path, default=None, help="Human-readable .txt (default: same stem as JSON)")
+    p.add_argument(
+        "--out-report",
+        type=Path,
+        default=None,
+        help="Human-readable .txt (default: same stem as JSON)",
+    )
     args = p.parse_args()
     if args.chunks_json == "":
         args.chunks_json = None
@@ -456,7 +500,9 @@ def main() -> None:
         out_json = args.out or (root_logs / f"standalone_rerank_compare_{stamp}.json")
         out_txt = args.out_report or out_json.with_suffix(".txt")
         out_json.parent.mkdir(parents=True, exist_ok=True)
-        out_json.write_text(json.dumps(comparison, ensure_ascii=False, indent=2), encoding="utf-8")
+        out_json.write_text(
+            json.dumps(comparison, ensure_ascii=False, indent=2), encoding="utf-8"
+        )
         report = _format_compare_report(comparison)
         out_txt.write_text(report, encoding="utf-8")
         print(report, flush=True)
@@ -469,7 +515,9 @@ def main() -> None:
     print("\n=== Summary ===", flush=True)
     print(json.dumps(s, ensure_ascii=False, indent=2), flush=True)
 
-    out = args.out or (root_logs / f"standalone_rerank_stress_{_slug_model(args.model)}_{stamp}.json")
+    out = args.out or (
+        root_logs / f"standalone_rerank_stress_{_slug_model(args.model)}_{stamp}.json"
+    )
     out.parent.mkdir(parents=True, exist_ok=True)
     out.write_text(json.dumps(payload, ensure_ascii=False, indent=2), encoding="utf-8")
     report = _format_report(payload)
