@@ -4,19 +4,19 @@
 
 ---
 
- 
+
 
 步骤1：计算原始问题与数据库的匹配度 score
 
- 
+
 
 步骤2：根据 score 分情况处理
 
- 
+
 
 情况A：score < threshold_lower（匹配度极低）
 
- 
+
 
 · 说明：原始问题与数据库几乎不相关，搜索出来的信息无效。
 
@@ -30,11 +30,11 @@
 
  4. 返回所有匹配度 > threshold_upper 的问题（或按策略返回第一个满足条件的）。
 
- 
+
 
 情况B：threshold_lower ≤ score < threshold_upper（匹配度较低但有一定指向性）
 
- 
+
 
 · 说明：问题模糊，但搜索结果有一定参考价值。
 
@@ -74,7 +74,7 @@ KG
 
 我看了，所谓的document chunks就是llm_chunks。
 doc chunks是向量chunks+KG反查chunks合并后再过滤后的结果。
-这个如果是空的，那就没有reference。所以当前reference逻辑是没问题的。 
+这个如果是空的，那就没有reference。所以当前reference逻辑是没问题的。
 
 现在要改的点：
 1.把naive mode评分取消掉，澄清门控根据document chunks来判断，如果有document chunks，则在保持原问的同时再生成两个推荐问题，推荐问题要确保其检索出的chunks，包括向量chunks和KG反查chunks，能过0.28过滤（可答且答案有依据）。
