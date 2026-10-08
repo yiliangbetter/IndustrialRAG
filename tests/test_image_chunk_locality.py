@@ -87,7 +87,9 @@ def test_locality_refs_skip_far_pur_when_anchor_text_only(monkeypatch):
         "id": "chunk-sib",
         "file_path": "双端封边机维护保养手册 新版8-24最终版.pdf",
         "chunk_order_index": 193,
-        "content": _img_block("fdf72fc8p20", page=20, context="保养内容： 检查电控板设备"),
+        "content": _img_block(
+            "fdf72fc8p20", page=20, context="保养内容： 检查电控板设备"
+        ),
     }
     pur = {
         "id": "chunk-pur",

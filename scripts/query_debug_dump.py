@@ -116,12 +116,12 @@ def build_llm_input_snapshot(
         data.get("relationships") if isinstance(data.get("relationships"), list) else []
     )
     chunks = data.get("chunks") if isinstance(data.get("chunks"), list) else []
-    references = data.get("references") if isinstance(data.get("references"), list) else []
+    references = (
+        data.get("references") if isinstance(data.get("references"), list) else []
+    )
 
     meta = raw_data.get("metadata") if isinstance(raw_data, dict) else None
-    processing = (
-        meta.get("processing_info") if isinstance(meta, dict) else None
-    )
+    processing = meta.get("processing_info") if isinstance(meta, dict) else None
 
     snapshot: dict[str, Any] = {
         "context_chars": len(context_str) if isinstance(context_str, str) else 0,
@@ -143,7 +143,9 @@ def build_llm_input_snapshot(
     return snapshot
 
 
-def _serialize_docs(docs: list[dict[str, Any]] | None, *, limit: int = 24) -> list[dict[str, Any]]:
+def _serialize_docs(
+    docs: list[dict[str, Any]] | None, *, limit: int = 24
+) -> list[dict[str, Any]]:
     rows: list[dict[str, Any]] = []
     for doc in (docs or [])[:limit]:
         if not isinstance(doc, dict):
@@ -297,7 +299,9 @@ def persist_query_debug_dump(
         answer=answer,
         error=error,
         duration_ms=duration_ms,
-        retrieval_context=retrieval_context if isinstance(retrieval_context, str) else None,
+        retrieval_context=retrieval_context
+        if isinstance(retrieval_context, str)
+        else None,
         retrieved_docs=retrieved_docs if isinstance(retrieved_docs, list) else None,
         retrieved_docs_text=docs_text if isinstance(docs_text, str) else None,
         related_images=related_images if isinstance(related_images, list) else None,
@@ -318,7 +322,9 @@ def list_recent_dumps(*, limit: int = 15) -> list[dict[str, Any]]:
     dump_dir = get_query_dump_dir()
     if not dump_dir.is_dir():
         return []
-    files = sorted(dump_dir.glob("*.json"), key=lambda item: item.stat().st_mtime, reverse=True)
+    files = sorted(
+        dump_dir.glob("*.json"), key=lambda item: item.stat().st_mtime, reverse=True
+    )
     rows: list[dict[str, Any]] = []
     for path in files[:limit]:
         try:
@@ -330,7 +336,9 @@ def list_recent_dumps(*, limit: int = 15) -> list[dict[str, Any]]:
                 "name": path.name,
                 "path": str(path),
                 "size_bytes": stat.st_size,
-                "mtime": datetime.fromtimestamp(stat.st_mtime, timezone.utc).isoformat(),
+                "mtime": datetime.fromtimestamp(
+                    stat.st_mtime, timezone.utc
+                ).isoformat(),
             }
         )
     return rows
