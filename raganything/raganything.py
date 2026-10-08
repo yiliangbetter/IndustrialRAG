@@ -450,8 +450,9 @@ class RAGAnything(QueryMixin, ProcessorMixin, BatchMixin):
                 self.logger.debug("Scheduled parse cache finalization")
 
             # Finalize LightRAG storages if LightRAG is initialized
-            if self.lightrag is not None:
-                tasks.append(self.lightrag.finalize_storages())
+            finalize_lightrag = getattr(self.lightrag, "finalize_storages", None)
+            if callable(finalize_lightrag):
+                tasks.append(finalize_lightrag())
                 self.logger.debug("Scheduled LightRAG storages finalization")
 
             # Run all finalization tasks concurrently

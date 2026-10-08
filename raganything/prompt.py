@@ -353,6 +353,10 @@ Content: {content}
 Analysis: {enhanced_caption}"""
 
 # Query-related prompts
+PROMPTS["QUERY_USER_CONTEXT"] = "User query: {query}"
+
+PROMPTS["QUERY_RELATED_CONTENT"] = "\nRelated {content_type} content: {description}"
+
 PROMPTS["QUERY_IMAGE_DESCRIPTION"] = (
     "Please briefly describe the main content, key elements, and important information in this image."
 )

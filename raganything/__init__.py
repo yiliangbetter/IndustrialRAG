@@ -1,5 +1,13 @@
 from .raganything import RAGAnything as RAGAnything
 from .config import RAGAnythingConfig as RAGAnythingConfig
+from .clarify_gate import (
+    evaluate_clarify_gate as evaluate_clarify_gate,
+    finalize_clarify_bypass_consumption as finalize_clarify_bypass_consumption,
+    is_clarify_gate_enabled as is_clarify_gate_enabled,
+    probe_llm_retrieval as probe_llm_retrieval,
+    ClarifyBypass as ClarifyBypass,
+    ClarifyRequired as ClarifyRequired,
+)
 
 # Core parser class is always available.
 from .parser import Parser as Parser
@@ -65,6 +73,12 @@ __all__ = [
     "RAGAnything",
     "RAGAnythingConfig",
     "Parser",
+    "evaluate_clarify_gate",
+    "finalize_clarify_bypass_consumption",
+    "is_clarify_gate_enabled",
+    "probe_llm_retrieval",
+    "ClarifyBypass",
+    "ClarifyRequired",
 ]
 
 # Feature-gated exports: only add names that are actually available in this build.
