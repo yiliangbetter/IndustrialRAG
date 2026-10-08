@@ -1,7 +1,7 @@
 # 澄清门控区分问题 — 讨论纪要（导出）
 
-> 导出日期：2026-06-16  
-> 项目：RAG-Anything  
+> 导出日期：2026-06-16
+> 项目：RAG-Anything
 > 目的：记录「如何用 naive relevance 分数区分需澄清 vs 不需澄清」的完整讨论与实验结论，便于对外分享。
 
 ---
@@ -187,7 +187,7 @@ uv run python scripts/score_query_relevance.py -w data/rag_storage \
 
 把 T、S、是否启用失真、多条 OR 组合等在合理范围内排列组合 → **没有任何组合达到完美分离**。
 
-完整数值报告：`logs/clarify_threshold_analysis.txt`  
+完整数值报告：`logs/clarify_threshold_analysis.txt`
 复现脚本：`scripts/analyze_clarify_threshold.py`
 
 ---

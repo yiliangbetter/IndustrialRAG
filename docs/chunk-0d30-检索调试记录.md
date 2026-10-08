@@ -19,15 +19,15 @@
 
 ## 2. 使用到的命令与脚本
 
-- **合并后、rerank 前的 chunk id**  
-  `uv run python scripts/capture_merged_chunk_ids.py -w .\rag_storage_run "四种封边机的电控板的保养周期分别是多久"`  
+- **合并后、rerank 前的 chunk id**
+  `uv run python scripts/capture_merged_chunk_ids.py -w .\rag_storage_run "四种封边机的电控板的保养周期分别是多久"`
   输出：`docs/merged_pre_rerank_chunk_ids.txt`（及 `.meta.txt` 中的条数）。
 
-- **最终进入上下文的 chunk（不调 LLM）**  
-  `uv run python scripts/dump_query_context.py -w .\rag_storage_run "四种封边机的电控板的保养周期分别是多久" [--out 某文件]`  
+- **最终进入上下文的 chunk（不调 LLM）**
+  `uv run python scripts/dump_query_context.py -w .\rag_storage_run "四种封边机的电控板的保养周期分别是多久" [--out 某文件]`
   查看 `metadata.processing_info`、`chunks=` 与各条 `chunk_id`。
 
-- **对照实验（仓库外可在一小段内联脚本中完成）**  
+- **对照实验（仓库外可在一小段内联脚本中完成）**
   同一进程内 `await rag.lightrag.aquery_data(..., QueryParam(mode="mix", max_total_tokens=...))` 扫描 `max_total_tokens`，避免反复 `import`/重建模型导致 GPU OOM。
 
 ---
