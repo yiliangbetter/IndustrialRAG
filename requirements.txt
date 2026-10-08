@@ -1,11 +1,11 @@
 huggingface_hub
 # LightRAG packages
-lightrag-hku
+lightrag-hku==1.5.7
 # MinerU 2.0 packages (replaces magic-pdf) - handles PDF parsing with multiple backends
 mineru[core]
 # Progress bars for batch processing
 tqdm
-# Note: Optional dependencies are now defined in setup.py extras_require:
+# Note: Optional dependencies are defined in pyproject.toml:
 # - [image]: Pillow>=10.0.0 (for BMP, TIFF, GIF, WebP format conversion)
 # - [text]: reportlab>=4.0.0 (for TXT, MD to PDF conversion)
 # - [paddleocr]: paddleocr + pypdfium2 (for parser='paddleocr' - better OCR for scanned PDFs)
