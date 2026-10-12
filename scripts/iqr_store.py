@@ -12,17 +12,17 @@ import re
 from functools import lru_cache
 from pathlib import Path
 from typing import Any
+
+from iqr_config import _min_substantive_term_len
 from iqr_protocol import (
     _is_image_metadata_line,
     extract_image_refs_from_context,
     normalize_image_path,
 )
-from iqr_config import _min_substantive_term_len
 from iqr_terms import (
     _query_subject_needles,
     _term_overlap_ratio,
 )
-
 
 logger = logging.getLogger(__name__)
 
@@ -450,12 +450,55 @@ def _collect_figure_refs(
     return _eligible_figure_refs(context)
 
 
+_PARSER_MEDIA_DIR_NAMES = frozenset(
+    {
+        "asset",
+        "assets",
+        "auto",
+        "figure",
+        "figures",
+        "image",
+        "images",
+        "media",
+        "txt",
+    }
+)
+
+
 def _source_key_from_path(path_str: str) -> str:
-    """Group images by parser output folder (one key per ingested document tree)."""
-    path = Path(normalize_image_path(path_str))
-    parts = [p for p in path.parts if p.lower() not in {"images", "auto", "figures"}]
-    if len(parts) >= 2:
-        return parts[-2]
+    """Return the nearest document folder above parser-owned media folders.
+
+    MinerU-style output is normally ``<document>/txt/images/<file>``.  Looking
+    at a fixed parent depth (or merely removing ``images``) therefore labels
+    every document as ``txt``.  Walking outwards also handles the older
+    ``<document>/images`` and ``<document>/auto`` layouts without encoding a
+    particular parser output root.
+    """
+    normalized = normalize_image_path(path_str).replace("\\", "/")
+    path = Path(normalized)
+    parts = list(path.parts)
+    lowered = [part.casefold() for part in parts]
+    # MinerU may add subdirectories below ``images``.  The document folder is
+    # above the parser-owned ``txt``/``auto`` tree, not simply the nearest
+    # non-``images`` parent.
+    for marker in ("txt", "auto", "images", "figures", "image", "figure"):
+        indexes = [index for index, part in enumerate(lowered) if part == marker]
+        for index in reversed(indexes):
+            cursor = index - 1
+            while cursor >= 0 and lowered[cursor] in _PARSER_MEDIA_DIR_NAMES:
+                cursor -= 1
+            if cursor >= 0:
+                name = parts[cursor].strip()
+                if name and not re.fullmatch(r"[A-Za-z]:", name):
+                    return name
+    for parent in path.parents:
+        name = parent.name.strip()
+        if (
+            name
+            and name.casefold() not in _PARSER_MEDIA_DIR_NAMES
+            and not re.fullmatch(r"[A-Za-z]:", name)
+        ):
+            return name
     return path.stem
 
 

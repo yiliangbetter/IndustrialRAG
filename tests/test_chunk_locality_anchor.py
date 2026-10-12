@@ -13,19 +13,19 @@ SCRIPTS = ROOT / "scripts"
 if str(SCRIPTS) not in sys.path:
     sys.path.insert(0, str(SCRIPTS))
 
-from iqr_anchor import (  # noqa: E402
+from iqr_anchor import (
     _best_anchor_chunk,
     _chunk_anchor_structural_adjustment,
     _figure_doc_for_anchor_neighbor,
 )
-from iqr_figure_target import (  # noqa: E402
+from iqr_figure_target import (
     _chunk_is_table_heavy,
     _refs_from_unified_figure_targets,
     _resolve_doc_with_order_index,
     _should_use_unified_figure_targets,
     extract_figure_targets,
 )
-from iqr_placement import build_inline_placements  # noqa: E402
+from iqr_placement import build_inline_placements
 
 
 def test_table_heavy_detects_appendix_table():
@@ -95,12 +95,14 @@ def test_refs_from_chunk_locality_listing_four_machines(monkeypatch):
         base = _normalize_key(manual_hint)
         heading = {
             "id": f"chunk-h-{base}",
+            "full_doc_id": f"doc-{base}",
             "chunk_order_index": 20,
             "file_path": f"{manual_hint}.pdf",
             "content": "3.2 电控板\n\n电控板检查：每半年保养一次",
         }
         fig = {
             "id": f"chunk-f-{base}",
+            "full_doc_id": f"doc-{base}",
             "chunk_order_index": 21,
             "file_path": f"{manual_hint}.pdf",
             "content": (
@@ -131,9 +133,92 @@ def test_refs_from_chunk_locality_listing_four_machines(monkeypatch):
     assert meta["picked"] == 4
     assert meta["mode"] == "unified_figure_targets"
     assert len(refs) == 4
-    for row in meta["targets"]:
+    for index, (ref, row) in enumerate(zip(refs, meta["targets"], strict=True)):
         if row.get("status") == "ok":
             assert row.get("anchor_idx") is not None
+        assert ref["target_id"] == f"target-{index + 1}"
+        assert ref["target_order"] == index
+        assert ref["target_anchor"]
+        assert ref["target_component"] == ""
+        assert ref["source_document_id"].startswith("doc-")
+        assert ref["source_document"].endswith(".pdf")
+        assert ref["evidence_chunk_id"].startswith("chunk-f-")
+        assert ref["figure_id"].startswith("figure-")
+
+
+def test_selection_dedupes_full_path_not_basename(monkeypatch):
+    answer = "* **自动封边机**：检查电控板设备。\n* **双端封边机**：检查电控板设备。"
+    monkeypatch.setattr(
+        "iqr_figure_target._load_manual_chunks_for_locality", lambda _hint: []
+    )
+
+    def fake_select(target, **_kwargs):
+        return (
+            {
+                "path": f"/manuals/{target.manual_hint}/shared.jpg",
+                "caption": "检查电控板设备",
+            },
+            {
+                "status": "ok",
+                "figure_source": "test",
+                "source_document": f"{target.manual_hint}.pdf",
+            },
+        )
+
+    monkeypatch.setattr("iqr_figure_target._figure_for_target", fake_select)
+    refs, meta = _refs_from_unified_figure_targets(
+        "两种封边机电控板保养", answer, retrieved_docs=[], cite_pool=[]
+    )
+    assert len(refs) == 2
+    assert meta["picked"] == 2
+    assert Path(refs[0]["path"]).name == Path(refs[1]["path"]).name
+
+    def same_physical_path(target, **_kwargs):
+        del target
+        return (
+            {"path": "/manuals/common/shared.jpg", "caption": "检查电控板设备"},
+            {"status": "ok", "figure_source": "test"},
+        )
+
+    monkeypatch.setattr("iqr_figure_target._figure_for_target", same_physical_path)
+    refs, meta = _refs_from_unified_figure_targets(
+        "两种封边机电控板保养", answer, retrieved_docs=[], cite_pool=[]
+    )
+    assert len(refs) == 1
+    assert meta["picked"] == 1
+    assert meta["targets"][1]["status"] == "duplicate_path"
+
+
+def test_figure_ids_distinguish_same_basename_within_one_document(monkeypatch):
+    answer = "* **自动封边机**：检查电控板。\n* **双端封边机**：检查电控板。"
+    monkeypatch.setattr(
+        "iqr_figure_target._load_manual_chunks_for_locality", lambda _hint: []
+    )
+    sections = iter(("section-a", "section-b"))
+
+    def fake_select(_target, **_kwargs):
+        section = next(sections)
+        return (
+            {
+                "path": f"/parser/manual/txt/images/{section}/shared.jpg",
+                "caption": "检查电控板",
+            },
+            {
+                "status": "ok",
+                "figure_source": "test",
+                "source_document_id": "doc-shared",
+                "source_document": "manual.pdf",
+            },
+        )
+
+    monkeypatch.setattr("iqr_figure_target._figure_for_target", fake_select)
+
+    refs, meta = _refs_from_unified_figure_targets(
+        "两种封边机电控板保养", answer, retrieved_docs=[], cite_pool=[]
+    )
+
+    assert meta["picked"] == 2
+    assert len({ref["figure_id"] for ref in refs}) == 2
 
 
 def test_build_inline_placements_keeps_all_machine_bullet_images():

@@ -5,11 +5,11 @@ from __future__ import annotations
 import asyncio
 import contextlib
 import copy
+import threading
 from collections.abc import AsyncIterator
 from contextvars import ContextVar
 from dataclasses import dataclass, field
 from pathlib import Path
-import threading
 from typing import Any
 
 PHASE_RETRIEVE = "retrieve"
@@ -335,6 +335,7 @@ def _apply_kg_scope_to_query_context(ctx: Any) -> Any:
     if not isinstance(raw_data, dict):
         return ctx
     from lightrag.base import QueryContextResult  # noqa: WPS433
+
     from raganything.clarify_context import scope_kg_to_llm_chunks  # noqa: WPS433
 
     scoped_context, scoped_raw = scope_kg_to_llm_chunks(
@@ -353,8 +354,6 @@ def finalize_inline_images(
     answer_text: str | None = None,
 ) -> dict[str, Any]:
     """Resolve inline figures cited by the generated answer (Plan A + placements)."""
-    from iqr_figure_target import _is_multi_machine_comparison_query  # noqa: WPS433
-    from iqr_store import _dedupe_doc_list, _doc_content  # noqa: WPS433
     from image_query_refs import (  # noqa: WPS433
         build_inline_placements,
         default_image_selection_limit,
@@ -362,6 +361,17 @@ def finalize_inline_images(
         filter_docs_cited_by_answer,
         resolve_query_images,
         text_from_retrieved_docs,
+    )
+    from iqr_figure_target import (  # noqa: WPS433
+        _answer_abstains_from_images,
+        _figure_context_from_answer_docs,
+        _is_multi_machine_comparison_query,
+        _manual_figure_refs_for_structured_targets,
+    )
+    from iqr_placement import api_images_from_figure_refs  # noqa: WPS433
+    from iqr_store import (  # noqa: WPS433
+        _dedupe_doc_list,
+        _doc_content,
     )
     from query_doc_steering import detect_table_filter_signal  # noqa: WPS433
 
@@ -381,6 +391,17 @@ def finalize_inline_images(
         _inline_placements.set([])
         return empty
 
+    if answer and _answer_abstains_from_images(answer, q):
+        debug = {
+            "gate": {"ok": False, "reason": "answer_abstained"},
+            "llm_chunk_count": len(docs),
+        }
+        _last_image_debug.set(debug)
+        _related_images_selected.set([])
+        _inline_placements.set([])
+        _sync_query_debug_snapshot()
+        return {**empty, "debug": debug}
+
     full_primary = text_from_retrieved_docs(docs).strip()
     if full_primary and detect_table_filter_signal(q, full_primary):
         debug: dict[str, Any] = {
@@ -397,6 +418,7 @@ def finalize_inline_images(
     cite_pool = list(docs_before_cite)
     anchor_pool = list(docs_before_cite)
     cite_meta: dict[str, Any] = {}
+    structured_fallback_refs: list[dict[str, Any]] = []
     if answer:
         cite_pool = list(docs_before_cite)
         rerank_pool = list(_rerank_docs.get() or [])
@@ -443,6 +465,87 @@ def finalize_inline_images(
         if figure_pool:
             cite_meta["anchor_pool_size"] = len(anchor_pool)
             cite_meta["cite_figure_pool_size"] = len(figure_pool)
+
+        # Answer-citation filtering can legitimately leave no figure-bearing
+        # chunks even though the answer has explicit machine/component targets.
+        # Recover only exact figures selected by those structured targets from
+        # their manual KV partitions; never broaden by free-form query search.
+        aligned_context, _ = _figure_context_from_answer_docs(
+            answer,
+            docs,
+            query=q,
+        )
+        if not aligned_context.strip():
+            structured_fallback_refs, fallback_meta = (
+                _manual_figure_refs_for_structured_targets(q, answer)
+            )
+            cite_meta["structured_manual_fallback"] = fallback_meta
+
+    if structured_fallback_refs:
+        images = api_images_from_figure_refs(
+            structured_fallback_refs,
+            roots,
+            limit=limit,
+        )
+        expected_target_ids = {
+            str(ref.get("target_id") or "").strip()
+            for ref in structured_fallback_refs
+            if str(ref.get("target_id") or "").strip()
+        }
+        resolved_target_ids = {
+            str(image.get("target_id") or "").strip()
+            for image in images
+            if str(image.get("target_id") or "").strip()
+        }
+        complete_resolution = (
+            len(images) == len(structured_fallback_refs)
+            and resolved_target_ids == expected_target_ids
+        )
+        if not complete_resolution:
+            fallback_meta = cite_meta.get("structured_manual_fallback") or {}
+            fallback_meta.update(
+                {
+                    "reason": "incomplete_media_resolution",
+                    "resolved_count": len(images),
+                    "resolved_target_count": len(resolved_target_ids),
+                }
+            )
+            cite_meta["structured_manual_fallback"] = fallback_meta
+        elif images:
+            from iqr_align import _apply_unified_figure_debug  # noqa: WPS433
+
+            selection_meta = dict(
+                (cite_meta.get("structured_manual_fallback") or {}).get("selection")
+                or {}
+            )
+            debug = {
+                "gate": {"ok": True, "reason": "structured_manual_fallback"},
+                "answer_citation": cite_meta,
+                "llm_chunk_count": len(docs),
+                "image_source": "structured_manual_fallback",
+            }
+            _apply_unified_figure_debug(
+                debug,
+                structured_fallback_refs,
+                selection_meta,
+                answer=answer,
+            )
+            images_copy = list(images)
+            placements = build_inline_placements(
+                answer,
+                images_copy,
+                query=q,
+                retrieved_docs=docs,
+            )
+            images = images_copy
+            if not placements:
+                debug["placement_fallback"] = "gallery_no_inline_anchors"
+            debug["inline_placements"] = placements
+            _last_image_debug.set(debug)
+            _related_images_selected.set(list(images))
+            _inline_placements.set(list(placements))
+            _sync_query_debug_snapshot()
+            return {"images": images, "placements": placements, "debug": debug}
     docs_text = text_from_retrieved_docs(docs).strip() if docs else ""
     if not docs_text:
         debug = {
@@ -465,6 +568,8 @@ def finalize_inline_images(
         limit=limit,
         answer=answer or None,
     )
+    debug["answer_citation"] = cite_meta
+    debug["llm_chunk_count"] = len(docs)
     if not images:
         gate = dict(debug.get("gate") or {})
         if gate.get("ok") is not False:
@@ -497,8 +602,6 @@ def finalize_inline_images(
         debug["image_source"] = (
             "llm_chunks+rerank_inline_figures" if supplement else "llm_chunks"
         )
-    debug["answer_citation"] = cite_meta
-    debug["llm_chunk_count"] = len(docs)
     debug["inline_placements"] = placements
     if supplement:
         debug["rerank_figure_supplement"] = supplement
@@ -560,8 +663,8 @@ def _sync_llm_chunks_for_images(query: str, chunks: list[dict]) -> None:
     _retrieved_docs.set(merged)
     if not (_rerank_figure_pool.get() or []):
         try:
-            from iqr_store import _doc_content  # noqa: WPS433
             from image_query_refs import extract_image_refs_from_context  # noqa: WPS433
+            from iqr_store import _doc_content  # noqa: WPS433
 
             fig_docs = [
                 doc
@@ -751,7 +854,9 @@ def _install_query_hooks_unlocked() -> None:
         except Exception:
             pass
         try:
-            from query_doc_steering import filter_retrieved_docs_by_query  # noqa: WPS433
+            from query_doc_steering import (
+                filter_retrieved_docs_by_query,  # noqa: WPS433
+            )
 
             filtered = filter_retrieved_docs_by_query(query, docs)
             final_docs = filtered if filtered else docs
@@ -759,12 +864,12 @@ def _install_query_hooks_unlocked() -> None:
             final_docs = docs
         _sync_retrieved_docs_after_rerank(final_docs)
         try:
+            from image_query_refs import extract_image_refs_from_context  # noqa: WPS433
             from iqr_align import (  # noqa: WPS433
                 _chunk_figure_context_aligns_query,
                 _chunk_subject_score,
             )
             from iqr_store import _doc_content  # noqa: WPS433
-            from image_query_refs import extract_image_refs_from_context  # noqa: WPS433
 
             fig_candidates: list[tuple[float, dict]] = []
             for doc in retrieved_docs or []:
@@ -780,10 +885,14 @@ def _install_query_hooks_unlocked() -> None:
             fig_candidates.sort(key=lambda pair: pair[0], reverse=True)
             fig_docs = [doc for _, doc in fig_candidates[:16]]
             try:
-                from query_doc_steering import _is_cross_manual_listing_query  # noqa: WPS433
+                from query_doc_steering import (
+                    _is_cross_manual_listing_query,  # noqa: WPS433
+                )
 
                 if _is_cross_manual_listing_query(query):
-                    from iqr_anchor import _load_figure_chunks_for_manual_paths  # noqa: WPS433
+                    from iqr_anchor import (
+                        _load_figure_chunks_for_manual_paths,  # noqa: WPS433
+                    )
                     from iqr_store import _doc_basename  # noqa: WPS433
 
                     allowed = {

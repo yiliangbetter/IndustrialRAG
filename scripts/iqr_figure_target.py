@@ -6,57 +6,12 @@ cited-manual hints, and citation-based doc filtering.
 
 from __future__ import annotations
 
+import hashlib
 import os
 import re
 from pathlib import Path
 from typing import Any
-from raganything.utils import (
-    discriminative_terms,
-    short_label_bag_aligns,
-    substantive_bigrams,
-    text_term_alignment_symmetric,
-)
-from iqr_protocol import (
-    FigureTarget,
-    _LogicLine,
-    _append_logic_line,
-    _is_image_metadata_line,
-    _maintenance_topic_from_text,
-    extract_image_refs_from_context,
-    normalize_context_for_image_parse,
-)
-from iqr_config import (
-    _image_min_ref_align,
-    _min_substantive_term_len,
-)
-from iqr_terms import (
-    _figure_matches_query_object,
-    _is_procedure_steps_query,
-    _is_query_subject_echo,
-    _line_has_specific_query_overlap,
-    _line_spans_in_body,
-    _listing_target_head,
-    _normalize_label_key,
-    _query_subject_needles,
-    _query_terms,
-    _subject_from_machine_field_line,
-    _subject_object_bigrams,
-)
-from iqr_store import (
-    _dedupe_doc_list,
-    _dedupe_doc_list_by_chunk_identity,
-    _doc_basename,
-    _doc_chunk_order_index,
-    _doc_content,
-    _doc_matches_cited_hints,
-    _doc_storage_chunk_id,
-    _first_figure_ref_from_doc,
-    _kv_chunk_row,
-    _load_manual_chunks_for_locality,
-    _ranked_retrieval_lines,
-    _source_key_from_path,
-    text_from_retrieved_docs,
-)
+
 from iqr_align import (
     _ANSWER_REF_RE,
     _PDF_NAME_RE,
@@ -94,8 +49,24 @@ from iqr_anchor import (
     _supplement_answer_topic_figure_chunks,
     _supplement_cross_manual_figure_chunks,
 )
-from iqr_machine import known_machine_names, resolve_machine_name
+from iqr_config import (
+    _image_min_ref_align,
+    _min_substantive_term_len,
+    _multi_figure_image_limit,
+)
 from iqr_domain_schema import schema as _domain_schema
+from iqr_machine import known_machine_names, resolve_machine_name
+from iqr_protocol import (
+    FigureTarget,
+    _append_logic_line,
+    _is_image_metadata_line,
+    _LogicLine,
+    _maintenance_topic_from_text,
+    extract_image_refs_from_context,
+    image_document_relative_identity,
+    image_path_identity,
+    normalize_context_for_image_parse,
+)
 from iqr_query_intent import (  # noqa: F401 re-exports for backward compat
     _BOLD_RE,
     _BULLET_PREFIX_RE,
@@ -122,6 +93,86 @@ from iqr_query_intent import (  # noqa: F401 re-exports for backward compat
     _topic_overlaps_query,
     detect_table_filter_signal,
 )
+from iqr_store import (
+    _dedupe_doc_list,
+    _dedupe_doc_list_by_chunk_identity,
+    _doc_basename,
+    _doc_chunk_order_index,
+    _doc_content,
+    _doc_matches_cited_hints,
+    _doc_storage_chunk_id,
+    _first_figure_ref_from_doc,
+    _kv_chunk_row,
+    _load_manual_chunks_for_locality,
+    _ranked_retrieval_lines,
+    _source_key_from_path,
+    text_from_retrieved_docs,
+)
+from iqr_terms import (
+    _figure_matches_query_object,
+    _is_procedure_steps_query,
+    _is_query_subject_echo,
+    _line_has_specific_query_overlap,
+    _line_spans_in_body,
+    _listing_target_head,
+    _normalize_label_key,
+    _query_subject_needles,
+    _query_terms,
+    _subject_from_machine_field_line,
+    _subject_object_bigrams,
+)
+
+from raganything.utils import (
+    discriminative_terms,
+    short_label_bag_aligns,
+    substantive_bigrams,
+    text_term_alignment_symmetric,
+)
+
+_ANSWER_IMAGE_ABSTENTION_RE = re.compile(
+    r"(?:"
+    r"(?:没有|缺少|未(?:能)?找到|缺乏)足够(?:的)?(?:信息|资料|依据)"
+    r"|(?:未检索到|未发现|暂无|没有找到).{0,20}(?:相关)?(?:信息|内容|资料|依据)"
+    r"|(?:信息|资料|依据).{0,8}(?:不足|缺失).{0,20}(?:回答|确定|判断|说明)"
+    r"|(?:无法|不能|不足以).{0,24}(?:回答|作答|确定|判断|提供)"
+    r"|(?:知识库|上下文|文档|所提供的资料).{0,28}"
+    r"(?:没有|暂无|未(?:能)?找到|未发现|未提供|不包含|未提及).{0,28}"
+    r"(?:相关)?(?:信息|内容|依据)"
+    r"|(?:insufficient|not enough|no relevant)\s+(?:information|context|evidence)"
+    r"|(?:could not|couldn't|did not|didn't)\s+find.{0,24}"
+    r"(?:information|content|evidence)"
+    r"|(?:cannot|can't|unable to)\s+(?:answer|determine|verify)"
+    r")",
+    re.IGNORECASE | re.DOTALL,
+)
+
+_ANSWER_CLAUSE_SPLIT_RE = re.compile(r"(?<=[。！？!?；;，,])|[\r\n]+")
+_ANSWER_META_OR_ADVICE_RE = re.compile(
+    r"^\s*(?:(?:[-*•]|\d+[.)])\s*)?(?:"
+    r"建议|请(?:补充|提供|咨询|确认)|"
+    r"(?:需要|应当)?补充(?:资料|信息|设备型号|问题描述)|"
+    r"问题范围|提问范围|根据当前(?:知识库|资料|上下文)|"
+    r"仅凭当前(?:知识库|资料|上下文)|"
+    r"关于|对于|您询问|问题(?:是|为)"
+    r")",
+    re.IGNORECASE,
+)
+_ANSWER_ADVICE_VALUE_RE = re.compile(
+    r"[：:]\s*(?:建议|请(?:补充|提供|咨询|确认)|"
+    r"(?:需要|应当)?补充(?:资料|信息|设备型号|问题描述))",
+    re.IGNORECASE,
+)
+_ANSWER_PERIOD_VALUE_RE = re.compile(
+    r"(?:每\s*)?(?:班|日|天|周|月|季(?:度)?|半年|年)\s*(?:一次|\d+\s*次)?"
+)
+_ANSWER_QUANTIFIED_VALUE_RE = re.compile(
+    r"\d+(?:\.\d+)?\s*(?:%|℃|°C|mm|cm|m|MPa|kPa|Pa|bar|"
+    r"秒|分钟|小时|天|周|月|年|次|滴|圈|度)(?![A-Za-z])",
+    re.IGNORECASE,
+)
+_ANSWER_ASSERTION_RE = re.compile(
+    r"(?:应|需|必须|用于|位于|包括|采用|使用|作用(?:是|为)|(?:是|为)\s*\S{2,})"
+)
 
 
 def _answer_text_for_listing() -> str:
@@ -131,6 +182,64 @@ def _answer_text_for_listing() -> str:
         return (get_answer_text_for_images() or "").strip()
     except ImportError:
         return ""
+
+
+def _answer_clause_supports_image_claim(clause: str, query: str) -> bool:
+    """Return whether a non-refusal clause asserts something worth illustrating."""
+    text = (clause or "").strip()
+    if not text or _ANSWER_IMAGE_ABSTENTION_RE.search(text):
+        return False
+    if _ANSWER_META_OR_ADVICE_RE.search(text) or _ANSWER_ADVICE_VALUE_RE.search(text):
+        return False
+    plain = re.sub(r"[#>*|`_~]", " ", text)
+    plain = re.sub(r"^\s*(?:[-*•]|\d+[.)])\s*", "", plain).strip()
+    if len(plain) < 4 or re.fullmatch(r"[-:：\s]+", plain):
+        return False
+    if text.rstrip().endswith(("?", "？")):
+        return False
+    if query and _is_query_subject_echo(plain, query):
+        return False
+    if text.lstrip().startswith("|"):
+        cells = [cell.strip() for cell in text.strip().strip("|").split("|")]
+        if cells and all(
+            cell in _domain_schema.structural_field_keys for cell in cells
+        ):
+            return False
+
+    action_terms = tuple(_domain_schema.action_prefixes) + ("保养",)
+    if any(term and term in plain for term in action_terms):
+        return True
+    if _ANSWER_QUANTIFIED_VALUE_RE.search(plain) or _ANSWER_PERIOD_VALUE_RE.search(
+        plain
+    ):
+        return True
+    bold_field = re.search(r"\*\*([^*]+)\*\*\s*[：:]\s*(\S.{1,})", text)
+    if bold_field and not _is_answer_structural_label(bold_field.group(1)):
+        return True
+    return bool(_ANSWER_ASSERTION_RE.search(plain))
+
+
+def _answer_abstains_from_images(answer: str, query: str = "") -> bool:
+    """True when the answer explicitly says the KB cannot support an answer.
+
+    Figure selection must follow the answer's grounding disposition.  A refusal
+    has no supported claim to illustrate, even when retrieval happened to
+    return a visually similar chunk.
+    """
+    body = _REFERENCES_SPLIT_RE.split((answer or "").strip(), maxsplit=1)[0]
+    if not body:
+        return False
+    match = _ANSWER_IMAGE_ABSTENTION_RE.search(body)
+    if match is None:
+        return False
+    # A scope caveat before or after a concrete claim must not erase that
+    # claim.  Split on sentence punctuation so a supported statement followed
+    # by a limitation remains visible, while advice/scope metadata does not
+    # masquerade as evidence merely because it is formatted as a bullet.
+    for clause in _ANSWER_CLAUSE_SPLIT_RE.split(body):
+        if _answer_clause_supports_image_claim(clause, query):
+            return False
+    return True
 
 
 def _answer_bullet_component_head(line: str) -> str:
@@ -161,26 +270,6 @@ def _ref_maintenance_topic(ref: dict[str, Any]) -> str:
     topic = _SECTION_MARKER_SPLIT_RE.split(topic, maxsplit=1)[0].strip()
     topic = _PERIOD_NL_SPLIT_RE.split(topic, maxsplit=1)[0].strip()[:32]
     return topic
-
-
-def _listing_component_from_maint_chunk(content: str, topic: str) -> str:
-    """Map a ``保养内容`` line to its listing component via nearest section heading."""
-    head = _listing_target_head(topic)
-    topic_pos = content.find(topic)
-    if topic_pos < 0:
-        return head
-    best_subj = ""
-    best_dist = 10**9
-    for match in re.finditer(r"\d+(?:\.\d+)+\s*(\S+?)保养", content):
-        dist = abs(match.start() - topic_pos)
-        if dist < best_dist:
-            best_dist = dist
-            best_subj = match.group(1).strip()
-    if best_subj:
-        subj_head = _listing_target_head(best_subj)
-        if subj_head:
-            return subj_head
-    return head
 
 
 def _bullet_head_in_inline_context(head: str, ref: dict[str, Any]) -> bool:
@@ -339,7 +428,7 @@ def _answer_listing_spans(answer: str) -> list[str]:
         if not m:
             continue
         head = m.group(1).strip()
-        if re.search(r"[。；;，,]|参考|Reference|PDF", head, re.I):
+        if re.search(r"[。；;，,]|参考|Reference|PDF", head, re.IGNORECASE):
             continue
         if "[" in head or "]" in head:
             continue
@@ -793,53 +882,6 @@ def _machine_component_targets_from_answer(
     return pairs
 
 
-def _infer_listing_pairs_from_cited_chunks(
-    query: str,
-    answer: str,
-    pool: list[dict[str, Any]],
-    existing: list[tuple[str, str]],
-) -> list[tuple[str, str]]:
-    """Add (machine, component) pairs from cited chunks when answer omits distinct 保养内容 items."""
-    if not _is_component_listing_across_machines(query) or not pool:
-        return existing
-    cited = _cited_manual_hints_from_answer(answer)
-    seen = {
-        (_normalize_label_key(machine), _normalize_label_key(comp))
-        for machine, comp in existing
-    }
-    out = list(existing)
-    for doc in pool:
-        if cited and not _doc_matches_cited_hints(doc, cited):
-            continue
-        content = _doc_content(doc).strip()
-        if not content or not extract_image_refs_from_context(content):
-            continue
-        # Query-topic relevance is enforced per-component below via
-        # ``_pair_component_ref_align`` (保养内容/图注/小节主语 alignment ≥0.75);
-        # the former hard-coded 残胶/老化胶水 doc pre-filter was redundant.
-        machine = ""
-        fp = _doc_basename(doc)
-        for name in known_machine_names():
-            if name in fp:
-                machine = name
-                break
-        if not machine:
-            continue
-        refs = extract_image_refs_from_context(content)
-        for topic in _maintenance_content_spans(content):
-            comp = _listing_component_from_maint_chunk(content, topic)
-            if len(comp) < 2:
-                continue
-            key = (_normalize_label_key(machine), _normalize_label_key(comp))
-            if key in seen:
-                continue
-            if not any(_pair_component_ref_align(comp, ref) >= 0.75 for ref in refs):
-                continue
-            seen.add(key)
-            out.append((machine, comp))
-    return out
-
-
 def _machine_component_listing_pair_targets(
     query: str,
     answer: str,
@@ -848,7 +890,7 @@ def _machine_component_listing_pair_targets(
     kept: list[dict[str, Any]] | None = None,
 ) -> list[tuple[str, str]]:
     """Ordered (machine, component) pairs for cross-manual listings (Q17)."""
-    del kept
+    del kept, pool
     pairs = _machine_component_targets_from_answer(answer, query=query)
     if len(pairs) < 2:
         return []
@@ -864,10 +906,12 @@ def _machine_component_listing_pair_targets(
             continue
         seen.add(key)
         out.append((machine, comp))
-    if pool:
-        out = _infer_listing_pairs_from_cited_chunks(query, answer, pool, out)
+    # Explicit answer structure is authoritative.  Retrieval candidates are
+    # evidence for these targets, never a source of additional answer claims.
+    # Expanding here made the same answer produce a different target count as
+    # the rerank pool changed (Q17 grew from 7 targets to as many as 16).
     out = _filter_cross_listing_pair_targets(query, answer, out)
-    return out[:16]
+    return out[: _multi_figure_image_limit()]
 
 
 def _filter_cross_listing_pair_targets(
@@ -1305,7 +1349,7 @@ def extract_figure_targets(
     """Answer-structure targets for unified figure selection (not query-type routing)."""
     q = (query or "").strip()
     ans = (answer or "").strip()
-    if not ans:
+    if not ans or _answer_abstains_from_images(ans, q):
         return []
 
     if _is_component_listing_across_machines(q):
@@ -1404,6 +1448,7 @@ def _finalize_figure_target_row(
     anchor: dict[str, Any] | None,
     fig_doc: dict[str, Any] | None,
 ) -> None:
+    evidence_doc = fig_doc or anchor
     row["status"] = "ok"
     row["figure_source"] = source
     if anchor is not None:
@@ -1411,6 +1456,26 @@ def _finalize_figure_target_row(
         row["anchor_idx"] = _doc_chunk_order_index(anchor)
     if fig_doc is not None:
         row["figure_idx"] = _doc_chunk_order_index(fig_doc)
+    if evidence_doc is not None:
+        chunk_id = _doc_storage_chunk_id(evidence_doc)
+        if chunk_id:
+            row["evidence_chunk_id"] = chunk_id
+        doc_id = str(
+            evidence_doc.get("full_doc_id")
+            or evidence_doc.get("document_id")
+            or evidence_doc.get("doc_id")
+            or ""
+        ).strip()
+        if doc_id:
+            row["source_document_id"] = doc_id
+        source_document = str(
+            evidence_doc.get("file_path")
+            or evidence_doc.get("source")
+            or evidence_doc.get("path")
+            or ""
+        ).strip()
+        if source_document:
+            row["source_document"] = source_document
     row["path"] = Path(str(ref.get("path") or "")).name
 
 
@@ -1472,9 +1537,13 @@ def _figure_for_target(
         ):
             row["status"] = "align_gate"
             return None, row
-        row["status"] = "ok"
-        row["figure_source"] = "component_pool"
-        row["path"] = Path(str(ref.get("path") or "")).name
+        _finalize_figure_target_row(
+            row,
+            ref,
+            source="component_pool",
+            anchor=fig_doc,
+            fig_doc=fig_doc,
+        )
         return ref, row
 
     anchor_search_text = target.anchor_text
@@ -1531,7 +1600,7 @@ def _figure_for_target(
     ) -> tuple[dict[str, Any] | None, dict[str, Any]]:
         if ref is None:
             return None, row
-        path_key = Path(str(ref.get("path") or "")).name
+        path_key = image_path_identity(str(ref.get("path") or ""))
         if path_key and path_key in excluded_paths:
             return None, row
         fig_cid = _doc_storage_chunk_id(fig_doc) if fig_doc else ""
@@ -1730,7 +1799,7 @@ def _refs_from_unified_figure_targets(
         if hint_key not in manual_cache:
             manual_cache[hint_key] = _load_manual_chunks_for_locality(machine)
 
-    for target in targets:
+    for target_order, target in enumerate(targets):
         ref, row = _figure_for_target(
             target,
             query=query,
@@ -1741,7 +1810,7 @@ def _refs_from_unified_figure_targets(
         meta["targets"].append(row)
         if ref is None:
             continue
-        path_key = Path(str(ref.get("path") or "")).name
+        path_key = image_path_identity(str(ref.get("path") or ""))
         if not path_key or path_key in seen_paths:
             row["status"] = "duplicate_path"
             continue
@@ -1750,12 +1819,80 @@ def _refs_from_unified_figure_targets(
             continue
         seen_paths.add(path_key)
         ref = dict(ref)
+        target_id = f"target-{target_order + 1}"
+        ref["target_id"] = target_id
+        ref["target_order"] = target_order
+        ref["target_anchor"] = target.anchor_text
+        ref["target_component"] = target.component
         ref["figure_target_kind"] = target.kind
         ref["locality_machine"] = target.manual_hint
         ref["locality_source"] = row.get("figure_source")
-        ref["source_key"] = _source_key_from_path(str(ref.get("path") or ""))
+        for key in (
+            "source_document_id",
+            "source_document",
+            "evidence_chunk_id",
+        ):
+            if row.get(key):
+                ref[key] = row[key]
+        document_identity = str(
+            ref.get("source_document_id") or ref.get("source_document") or ""
+        )
+        source_key = _source_key_from_path(str(ref.get("path") or ""))
+        image_identity = (
+            image_document_relative_identity(path_key, source_key)
+            if document_identity
+            else path_key
+        )
+        figure_identity = f"{document_identity}\0{image_identity}"
+        ref["figure_id"] = (
+            "figure-" + hashlib.sha256(figure_identity.encode("utf-8")).hexdigest()[:24]
+        )
+        ref["source_key"] = source_key
         refs.append(ref)
 
+    meta["picked"] = len(refs)
+    return refs, meta
+
+
+def _manual_figure_refs_for_structured_targets(
+    query: str,
+    answer: str,
+) -> tuple[list[dict[str, Any]], dict[str, Any]]:
+    """Strictly selected figure refs for explicit multi-target answer structure.
+
+    This is a narrow recovery path for finalization when answer-cited chunks do
+    not contain an aligned image.  It deliberately requires multiple explicit
+    answer targets with manual hints and reuses the normal strict selector;
+    arbitrary query similarity can therefore never activate this fallback.
+    """
+    targets = extract_figure_targets(query, answer)
+    meta: dict[str, Any] = {
+        "mode": "structured_manual_fallback",
+        "target_count": len(targets),
+        "picked": 0,
+    }
+    allowed_kinds = {"machine_component_pair", "machine_bullet", "answer_bullet"}
+    if (
+        not _chunk_locality_image_enabled()
+        or len(targets) < 2
+        or any(target.kind not in allowed_kinds for target in targets)
+        or any(not target.manual_hint.strip() for target in targets)
+    ):
+        meta["reason"] = "no_safe_structured_targets"
+        return [], meta
+
+    refs, selection_meta = _refs_from_unified_figure_targets(
+        query,
+        answer,
+        retrieved_docs=[],
+        cite_pool=[],
+    )
+    meta["selection"] = selection_meta
+    meta["selected_target_count"] = len(refs)
+    meta["coverage"] = round(len(refs) / len(targets), 3)
+    if len(refs) != len(targets):
+        meta["reason"] = "incomplete_target_coverage"
+        return [], meta
     meta["picked"] = len(refs)
     return refs, meta
 
