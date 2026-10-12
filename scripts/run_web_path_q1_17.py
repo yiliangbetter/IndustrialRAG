@@ -166,12 +166,44 @@ def grade_text(answer: str, spec: dict) -> tuple[bool, list[str]]:
 
 
 def _image_matches_machine(img: dict, machine_hint: str) -> bool:
-    from iqr_figure_target import _doc_matches_manual_hint  # noqa: WPS433
-
-    blob = " ".join(
-        str(img.get(key) or "")
-        for key in ("source_key", "caption", "context", "url", "path")
+    from iqr_figure_target import (  # noqa: WPS433
+        _doc_matches_manual_hint,
+        _resolve_known_machine_name,
     )
+
+    source_values = [
+        str(img.get(key) or "").strip()
+        for key in (
+            "manual_id",
+            "source_document_id",
+            "source_document",
+            "source_key",
+        )
+        if str(img.get(key) or "").strip()
+    ]
+    expected = _resolve_known_machine_name(machine_hint)
+    resolved_sources = {
+        resolved
+        for value in source_values
+        if (resolved := _resolve_known_machine_name(value))
+    }
+    if expected and resolved_sources:
+        return resolved_sources == {expected}
+
+    fallback_keys = (
+        "locality_machine",
+        "target_machine",
+        "caption",
+        "context",
+        "url",
+        "path",
+    )
+    values = source_values or [
+        str(img.get(key) or "").strip()
+        for key in fallback_keys
+        if str(img.get(key) or "").strip()
+    ]
+    blob = " ".join(values)
     if not blob.strip():
         return False
     probe = {"file_path": blob}
@@ -187,7 +219,8 @@ def _image_matches_component(img: dict, component: str) -> bool:
     head = _listing_target_head(component)
     cap = str(img.get("caption") or "")
     ctx = str(img.get("context") or "")
-    blob = f"{cap} {ctx}".strip()
+    target = str(img.get("target_component") or img.get("target_anchor") or "")
+    blob = f"{cap} {ctx} {target}".strip()
     if not blob:
         return False
     if _label_matches_listing_target(cap, head) or _label_matches_listing_target(
@@ -197,11 +230,27 @@ def _image_matches_component(img: dict, component: str) -> bool:
     return head in blob or component in blob
 
 
+def _normalize_expected_image_pairs(
+    pairs: list[tuple[str, str]] | list[list[str]] | None,
+) -> list[tuple[str, str]]:
+    """Return valid explicit machine/component pairs from the gold fixture."""
+    out: list[tuple[str, str]] = []
+    for pair in pairs or []:
+        if len(pair) != 2:
+            continue
+        machine, component = (str(value).strip() for value in pair)
+        if machine and component:
+            out.append((machine, component))
+    return out
+
+
 def _grade_images_answer_pairs(
     answer: str,
     imgs: list[dict],
     *,
+    expected_pairs: list[tuple[str, str]] | list[list[str]] | None = None,
     pair_waive: list[tuple[str, str]] | None = None,
+    eligible_image_indexes: set[int] | None = None,
 ) -> tuple[bool, list[str]]:
     from iqr_figure_target import _machine_component_targets_from_answer  # noqa: WPS433
     from iqr_terms import _listing_target_head, _normalize_label_key  # noqa: WPS433
@@ -218,7 +267,10 @@ def _grade_images_answer_pairs(
             waived_keys.add(
                 (_normalize_label_key(machine), _normalize_label_key(component))
             )
-    raw_pairs = _machine_component_targets_from_answer(answer)
+    raw_pairs = _normalize_expected_image_pairs(expected_pairs)
+    explicit_pairs = bool(raw_pairs)
+    if not explicit_pairs:
+        raw_pairs = _machine_component_targets_from_answer(answer)
     pairs: list[tuple[str, str]] = []
     seen: set[tuple[str, str]] = set()
     for machine, component in raw_pairs:
@@ -231,8 +283,9 @@ def _grade_images_answer_pairs(
             continue
         seen.add(key)
         pairs.append((machine, component))
-    if len(pairs) < 2:
-        notes.append(f"answer_pairs:{len(pairs)}<2")
+    min_pairs = 1 if explicit_pairs else 2
+    if len(pairs) < min_pairs:
+        notes.append(f"answer_pairs:{len(pairs)}<{min_pairs}")
         return False, notes
     required_pairs = [
         (m, c)
@@ -246,13 +299,37 @@ def _grade_images_answer_pairs(
     ]
     if waived_hit:
         notes.append(f"pair_waived:{waived_hit}")
-    uncovered: list[str] = []
-    for machine, component in required_pairs:
-        if not any(
-            _image_matches_machine(img, machine)
+    allowed_indexes = (
+        set(range(len(imgs)))
+        if eligible_image_indexes is None
+        else set(eligible_image_indexes)
+    )
+    candidates = [
+        [
+            index
+            for index, img in enumerate(imgs)
+            if index in allowed_indexes
+            and _image_matches_machine(img, machine)
             and _image_matches_component(img, component)
-            for img in imgs
-        ):
+        ]
+        for machine, component in required_pairs
+    ]
+    image_to_pair: dict[int, int] = {}
+
+    def assign(pair_index: int, seen_images: set[int]) -> bool:
+        for image_index in candidates[pair_index]:
+            if image_index in seen_images:
+                continue
+            seen_images.add(image_index)
+            previous_pair = image_to_pair.get(image_index)
+            if previous_pair is None or assign(previous_pair, seen_images):
+                image_to_pair[image_index] = pair_index
+                return True
+        return False
+
+    uncovered: list[str] = []
+    for pair_index, (machine, component) in enumerate(required_pairs):
+        if not assign(pair_index, set()):
             uncovered.append(f"{machine}/{component}")
     machines = {_normalize_label_key(m) for m, _ in required_pairs}
     if uncovered:
@@ -263,9 +340,22 @@ def _grade_images_answer_pairs(
     return ok, notes
 
 
+def _valid_placement_indexes(placements: list[dict], image_count: int) -> set[int]:
+    """Unique, in-range image indexes represented by placement events."""
+    out: set[int] = set()
+    for placement in placements:
+        index = placement.get("image_index") if isinstance(placement, dict) else None
+        if isinstance(index, bool) or not isinstance(index, int):
+            continue
+        if 0 <= index < image_count:
+            out.add(index)
+    return out
+
+
 def grade_images(result: dict, spec: dict) -> tuple[bool, list[str]]:
     imgs = result.get("images") or []
     pls = result.get("placements") or []
+    placed_indexes = _valid_placement_indexes(pls, len(imgs))
     caps = [str(i.get("caption") or "") for i in imgs]
     want = spec.get("want_images")
     notes: list[str] = []
@@ -281,11 +371,19 @@ def grade_images(result: dict, spec: dict) -> tuple[bool, list[str]]:
     if spec.get("image_answer_pairs"):
         waive_raw = spec.get("image_pair_waive") or []
         pair_waive = [(str(m), str(c)) for m, c in waive_raw if m and c]
-        return _grade_images_answer_pairs(
+        min_placements = int(spec.get("image_min_placements") or 0)
+        ok, pair_notes = _grade_images_answer_pairs(
             str(result.get("answer") or ""),
             imgs,
+            expected_pairs=spec.get("image_expected_pairs"),
             pair_waive=pair_waive,
+            eligible_image_indexes=(placed_indexes if min_placements else None),
         )
+        notes.extend(pair_notes)
+        if min_placements and len(placed_indexes) < min_placements:
+            notes.append(f"placement_count:{len(placed_indexes)}<{min_placements}")
+            ok = False
+        return ok, notes
 
     if not pls:
         notes.append("no_placements")
@@ -321,19 +419,44 @@ def grade_images(result: dict, spec: dict) -> tuple[bool, list[str]]:
             1
             for img in imgs
             if any(
-                t in str(img.get("caption") or "") or t in str(img.get("context") or "")
+                t
+                in " ".join(
+                    str(img.get(key) or "")
+                    for key in (
+                        "caption",
+                        "context",
+                        "target_component",
+                        "target_anchor",
+                    )
+                )
                 for t in topic_any
             )
         )
         if topic_hits < min(min_c, len(imgs)):
             notes.append(f"caption_topic:{topic_hits}/{min_c}")
+            return False, notes
+
+    min_placements = int(spec.get("image_min_placements") or 0)
+    if min_placements and len(placed_indexes) < min_placements:
+        notes.append(f"placement_count:{len(placed_indexes)}<{min_placements}")
+        return False, notes
 
     min_sources = int(spec.get("image_min_sources") or 0)
     if min_sources > 0:
         sources = {
-            str(img.get("source_key") or "").strip()
+            str(
+                img.get("manual_id")
+                or img.get("source_document_id")
+                or img.get("source_key")
+                or ""
+            ).strip()
             for img in imgs
-            if str(img.get("source_key") or "").strip()
+            if str(
+                img.get("manual_id")
+                or img.get("source_document_id")
+                or img.get("source_key")
+                or ""
+            ).strip()
         }
         if len(sources) < min_sources:
             notes.append(f"image_sources:{len(sources)}<{min_sources}")
@@ -678,6 +801,11 @@ def _expected_image_hint(spec: dict) -> str:
     if spec.get("want_images") is not True:
         return "—"
     if spec.get("image_answer_pairs"):
+        expected_pairs = _normalize_expected_image_pairs(
+            spec.get("image_expected_pairs")
+        )
+        if expected_pairs:
+            return f"期望：{len(expected_pairs)} 个金标 (机型, 部件) 各 1 张配图"
         return "期望：答案每个 (机型, 部件) 各 1 张配图，图数 ≥ 答案部件条数"
     caps = spec.get("caption_any") or []
     if caps:
@@ -770,7 +898,10 @@ def write_report(
     )
     for r in rows:
         g = r["grade"]
-        caps = [str(i.get("caption") or "") for i in r.get("images") or []]
+        caps = [
+            str(i.get("display_caption") or i.get("caption") or "")
+            for i in r.get("images") or []
+        ]
         cap_summary = "; ".join(c for c in caps if c) or "—"
         if len(cap_summary) > 48:
             cap_summary = cap_summary[:45] + "…"
@@ -853,9 +984,16 @@ def write_report(
             lines.append("（无配图）")
         else:
             for idx, img in enumerate(imgs):
-                cap = str(img.get("caption") or "（无图注）")
+                cap = str(
+                    img.get("display_caption") or img.get("caption") or "（无图注）"
+                )
                 page = img.get("page")
-                src = str(img.get("source_key") or "")
+                src = str(
+                    img.get("source_document")
+                    or img.get("manual_id")
+                    or img.get("source_key")
+                    or ""
+                )
                 meta = f"**{cap}**"
                 if page is not None:
                     meta += f" · p{page}"
