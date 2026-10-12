@@ -278,7 +278,8 @@ function showRetrievalScope(ui, ev) {
 }
 
 function figureHtml(img) {
-  const cap = img.caption ? escapeHtml(img.caption) : "相关图片";
+  const caption = img.display_caption || img.caption || "相关图片";
+  const cap = escapeHtml(caption);
   const page =
     img.page != null
       ? `<span class="img-page">第 ${escapeHtml(String(img.page))} 页</span>`
@@ -535,19 +536,22 @@ function filterPlacementsBySectionDedup(placements, images, rawText) {
   return kept;
 }
 
-function dedupImagesForDisplay(images, rawText, placements) {
+function dedupImageEntriesForDisplay(images, rawText, placements) {
   const seenBySection = new Map();
-  return (images || []).filter((img, idx) => {
+  const entries = [];
+  for (const [idx, img] of (images || []).entries()) {
     const section =
       sectionForImageIndex(idx, placements, rawText, images) || "_";
     const key = imageDisplayDedupKey(img);
-    if (!key) return true;
-    if (!seenBySection.has(section)) seenBySection.set(section, new Set());
-    const sectionSeen = seenBySection.get(section);
-    if (sectionSeen.has(key)) return false;
-    sectionSeen.add(key);
-    return true;
-  });
+    if (key) {
+      if (!seenBySection.has(section)) seenBySection.set(section, new Set());
+      const sectionSeen = seenBySection.get(section);
+      if (sectionSeen.has(key)) continue;
+      sectionSeen.add(key);
+    }
+    entries.push({ image: img, imageIndex: idx, section, key });
+  }
+  return entries;
 }
 
 function findInsertPointInSection(root, rawText, placement) {
@@ -786,7 +790,7 @@ function appendFiguresToAnswerEnd(answerMd, images) {
   if (!count) return 0;
   const refsH3 = findReferencesHeading(answerMd);
   if (refsH3) {
-    refsH3.insertAdjacentElement("beforebegin", frag);
+    refsH3.before(frag);
   } else {
     answerMd.appendChild(frag);
   }
@@ -800,12 +804,13 @@ function showAnswerImageFallback(ui, images) {
 }
 
 function applyInlineImages(ui, ev) {
-  if (!ui?.answerMd || !ev?.placements?.length || !ev?.images?.length) return;
+  if (!ui?.answerMd || !ev?.images?.length) return;
   if (ui.imagesEl) ui.imagesEl.hidden = true;
   const rawText = ui.answerRaw || "";
+  const placements = ev.placements || [];
   renderMarkdown(ui.answerMd, rawText);
   const ordered = filterPlacementsBySectionDedup(
-    ev.placements,
+    placements,
     ev.images,
     rawText
   );
@@ -819,26 +824,41 @@ function applyInlineImages(ui, ev) {
     wrapper.innerHTML = figureHtml(img);
     const fig = wrapper.firstElementChild;
     if (!fig) continue;
-    pending.push({ insertAfter, fig });
+    pending.push({
+      insertAfter,
+      fig,
+      imageIndex: pl.image_index,
+      section: sectionKeyForPlacement(rawText, pl),
+      key: imageDisplayDedupKey(img),
+    });
   }
   let inserted = 0;
+  const insertedIndexes = new Set();
+  const insertedKeys = new Set();
   for (let i = pending.length - 1; i >= 0; i--) {
     if (insertFigureAfterAnchor(pending[i].insertAfter, pending[i].fig)) {
       inserted += 1;
+      insertedIndexes.add(pending[i].imageIndex);
+      if (pending[i].key) {
+        insertedKeys.add(`${pending[i].section}\u0000${pending[i].key}`);
+      }
     }
   }
-  ui.inlineFiguresApplied = inserted > 0;
-  const displayImages = dedupImagesForDisplay(
+  const displayEntries = dedupImageEntriesForDisplay(
     ev.images,
     rawText,
-    ev.placements
+    placements
   );
-  if (!ui.inlineFiguresApplied && displayImages.length) {
-    const appended = appendFiguresToAnswerEnd(ui.answerMd, displayImages);
-    ui.inlineFiguresApplied = appended > 0;
-  }
-  if (!ui.inlineFiguresApplied && displayImages.length) {
-    showAnswerImageFallback(ui, displayImages);
+  const remainingImages = displayEntries
+    .filter(({ imageIndex, section, key }) => {
+      if (insertedIndexes.has(imageIndex)) return false;
+      return !key || !insertedKeys.has(`${section}\u0000${key}`);
+    })
+    .map(({ image }) => image);
+  const appended = appendFiguresToAnswerEnd(ui.answerMd, remainingImages);
+  ui.inlineFiguresApplied = inserted + appended > 0;
+  if (remainingImages.length && !appended) {
+    showAnswerImageFallback(ui, remainingImages);
   }
   scrollMessages();
 }
@@ -852,7 +872,8 @@ function showRelatedImages(ui, ev) {
   ui.imagesEl.hidden = false;
   const cards = ev.images
     .map((img) => {
-      const cap = img.caption ? escapeHtml(img.caption) : "相关图片";
+      const caption = img.display_caption || img.caption || "相关图片";
+      const cap = escapeHtml(caption);
       const page =
         img.page != null
           ? `<span class="img-page">第 ${escapeHtml(String(img.page))} 页</span>`
