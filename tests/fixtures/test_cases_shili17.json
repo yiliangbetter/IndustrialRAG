@@ -4,7 +4,7 @@
     "source": "docs/测试例.txt + docs/测试例参考答案.md",
     "schema": {
       "text": "text_all(须全含) / text_any(可选含) / text_need2(每组至少命中一个) / text_min_len / text_machine_cycles(机型-周期配对)",
-      "image": "want_images(true/false/null) / caption_any / caption_min_match / caption_min / caption_topic_any / image_min_sources / image_answer_pairs((机型,部件)配对) / image_pair_waive(豁免对)"
+      "image": "want_images(true/false/null) / caption_any / caption_min_match / caption_min / caption_topic_any / image_min_sources / image_min_placements / image_answer_pairs / image_expected_pairs((机型,部件)金标) / image_pair_waive(豁免对)"
     }
   },
   "cases": [
@@ -143,6 +143,7 @@
       "image": {
         "want_images": true,
         "caption_min": 4,
+        "image_min_placements": 4,
         "image_min_sources": 4,
         "caption_topic_any": ["电控"]
       }
@@ -158,7 +159,16 @@
           ["高速自动"]
         ]
       },
-      "image": {"want_images": true, "image_answer_pairs": true}
+      "image": {
+        "want_images": true,
+        "image_answer_pairs": true,
+        "image_min_placements": 3,
+        "image_expected_pairs": [
+          ["自动封边机", "气源三联件中的油杯"],
+          ["双端封边机", "气源三联件中的油杯"],
+          ["高速自动封边机", "气源三联件中的油杯"]
+        ]
+      }
     },
     {
       "id": 17,
@@ -177,6 +187,16 @@
       "image": {
         "want_images": true,
         "image_answer_pairs": true,
+        "image_min_placements": 7,
+        "image_expected_pairs": [
+          ["自动封边机", "激光器出光口"],
+          ["高速智能封边机", "仿形靠模"],
+          ["高速智能封边机", "压带轮"],
+          ["高速智能封边机", "涂胶轴"],
+          ["高速智能封边机", "涂胶电机"],
+          ["双端封边机", "激光器出光口"],
+          ["高速自动封边机", "激光器出光口"]
+        ],
         "image_pair_waive": [["自动封边机", "熔胶盒"]]
       }
     }
