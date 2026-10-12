@@ -9,19 +9,23 @@ from __future__ import annotations
 import json
 import os
 import re
-from pathlib import Path
 from typing import Any
-from raganything.utils import (
-    discriminative_terms,
-    image_label_for_item,
-    image_label_text,
-    short_label_bag_aligns,
-    substantive_bigrams,
-    text_term_alignment_symmetric,
-)
-from iqr_protocol import (
-    _is_image_metadata_line,
-    extract_image_refs_from_context,
+
+from iqr_align import (
+    _SECTION_HEADING_RE,
+    _SECTION_NUM_RE,
+    _answer_chunk_term_overlap,
+    _chunk_citation_score,
+    _chunk_figure_context_aligns_query,
+    _chunk_subject_score,
+    _figure_ref_passes_align_gate,
+    _line_citation_overlap,
+    _normalize_citation_blob,
+    _query_aligned_figure_candidate_docs,
+    _ref_aligns_with_retrieval_focus,
+    _ref_effective_label,
+    _ref_inline_context_text,
+    _ref_inline_in_retrieved_context,
 )
 from iqr_config import (
     _env_bool_image,
@@ -29,13 +33,10 @@ from iqr_config import (
     _image_min_ref_align,
     _min_substantive_term_len,
 )
-from iqr_terms import (
-    _listing_target_head,
-    _normalize_label_key,
-    _query_subject_needles,
-    _query_terms,
-    _subject_action_clauses,
-    _term_overlap_ratio,
+from iqr_protocol import (
+    _is_image_metadata_line,
+    extract_image_refs_from_context,
+    image_path_identity,
 )
 from iqr_store import (
     _dedupe_doc_list_by_chunk_identity,
@@ -53,21 +54,22 @@ from iqr_store import (
     _unique_retrieved_doc_count,
     text_from_retrieved_docs,
 )
-from iqr_align import (
-    _SECTION_HEADING_RE,
-    _SECTION_NUM_RE,
-    _answer_chunk_term_overlap,
-    _chunk_citation_score,
-    _chunk_figure_context_aligns_query,
-    _chunk_subject_score,
-    _figure_ref_passes_align_gate,
-    _line_citation_overlap,
-    _normalize_citation_blob,
-    _query_aligned_figure_candidate_docs,
-    _ref_aligns_with_retrieval_focus,
-    _ref_effective_label,
-    _ref_inline_context_text,
-    _ref_inline_in_retrieved_context,
+from iqr_terms import (
+    _listing_target_head,
+    _normalize_label_key,
+    _query_subject_needles,
+    _query_terms,
+    _subject_action_clauses,
+    _term_overlap_ratio,
+)
+
+from raganything.utils import (
+    discriminative_terms,
+    image_label_for_item,
+    image_label_text,
+    short_label_bag_aligns,
+    substantive_bigrams,
+    text_term_alignment_symmetric,
 )
 
 
@@ -384,7 +386,7 @@ def _best_inline_figure_from_pool(
         for ref in refs:
             if _is_cover_page_ref(ref):
                 continue
-            path_key = Path(str(ref.get("path") or "")).name
+            path_key = image_path_identity(str(ref.get("path") or ""))
             if path_key and path_key in excluded_paths:
                 continue
             if not _figure_ref_passes_align_gate(
@@ -442,6 +444,7 @@ def _figure_ref_from_content_list_for_target(
         _figure_ref_matches_target_topic,
         _is_cover_page_ref,
     )
+
     from raganything.utils import best_image_for_text_item, context_text_for_image
 
     align_blob = _anchor_align_blob(anchor_text, query)

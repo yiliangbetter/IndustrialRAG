@@ -9,29 +9,17 @@ from __future__ import annotations
 import re
 from pathlib import Path
 from typing import Any
-from raganything.utils import text_term_alignment_symmetric
-from iqr_protocol import _image_score_for_logic_line
-from iqr_media import (
-    encode_media_token,
-    resolve_media_path,
-)
+
+from iqr_align import _ref_effective_label
+from iqr_anchor import _find_anchor_in_answer
 from iqr_config import (
     _inline_min_place_score,
     _multi_figure_image_limit,
 )
-from iqr_terms import (
-    _is_procedure_steps_query,
-    _listing_target_head,
-    _normalize_label_key,
-    _procedure_step_spans,
-    _query_subject_needles,
+from iqr_explain import (
+    explain_query_images,
+    retrieval_supports_images,
 )
-from iqr_store import (
-    _source_key_from_path,
-    logger,
-)
-from iqr_align import _ref_effective_label
-from iqr_anchor import _find_anchor_in_answer
 from iqr_figure_target import (
     _answer_listing_spans,
     _answer_logic_lines,
@@ -45,10 +33,24 @@ from iqr_figure_target import (
     _refs_from_unified_figure_targets,
     _should_use_unified_figure_targets,
 )
-from iqr_explain import (
-    explain_query_images,
-    retrieval_supports_images,
+from iqr_media import (
+    encode_media_token,
+    resolve_media_path,
 )
+from iqr_protocol import _image_score_for_logic_line
+from iqr_store import (
+    _source_key_from_path,
+    logger,
+)
+from iqr_terms import (
+    _is_procedure_steps_query,
+    _listing_target_head,
+    _normalize_label_key,
+    _procedure_step_spans,
+    _query_subject_needles,
+)
+
+from raganything.utils import text_term_alignment_symmetric
 
 
 def _fallback_end_placements(
@@ -461,20 +463,101 @@ def images_for_api(
     return []
 
 
+_API_FIGURE_PROVENANCE_FIELDS = (
+    "locality_machine",
+    "locality_source",
+    "figure_target_kind",
+    "target_id",
+    "target_order",
+    "target_anchor",
+    "target_component",
+    "target_machine",
+    "figure_id",
+    "document_id",
+    "doc_id",
+    "full_doc_id",
+    "source_document_id",
+    "source_document",
+    "chunk_id",
+    "source_chunk_id",
+    "anchor_chunk_id",
+    "figure_chunk_id",
+    "evidence_chunk_id",
+    "chunk_order_index",
+)
+
+
+def _copy_figure_provenance(ref: dict[str, Any], item: dict[str, Any]) -> None:
+    """Copy JSON-scalar provenance needed for placement and evaluation."""
+    for key in _API_FIGURE_PROVENANCE_FIELDS:
+        value = ref.get(key)
+        if value is None or isinstance(value, (dict, list, tuple, set)):
+            continue
+        if isinstance(value, str):
+            value = value.strip()
+            if not value:
+                continue
+            if key == "source_document":
+                # Keep the document label while not exposing an absolute
+                # parser/KB path in the public API response.
+                value = Path(value.replace("\\", "/")).name or value
+        item[key] = value
+
+
+def _display_caption_for_ref(ref: dict[str, Any], fallback: str) -> str:
+    """Build a concise user-facing label without replacing parser metadata."""
+    machine = str(ref.get("locality_machine") or "").strip()
+    detail = str(
+        ref.get("target_component") or ref.get("target_anchor") or fallback or ""
+    ).strip()
+    detail = re.sub(r"^[#*\-•\s]+", "", detail)
+    detail = detail.replace("**", "")
+    detail = re.sub(r"\s+", " ", detail).strip().strip("*：:。 ")
+    if machine and detail.startswith(machine):
+        detail = detail[len(machine) :].lstrip("：:。 ")
+    if len(detail) > 120:
+        detail = f"{detail[:117].rstrip()}..."
+    if machine and detail:
+        return f"{machine} — {detail}"
+    return detail or machine
+
+
+def _expected_source_key(ref: dict[str, Any], path_str: str) -> str:
+    """Best exact document-folder hint for safe stale-path resolution."""
+    path_key = _source_key_from_path(path_str)
+    path_stem = Path(path_str.replace("\\", "/")).stem
+    if path_key and path_key != path_stem:
+        return path_key
+    source_document = str(ref.get("source_document") or "").strip()
+    if source_document:
+        return Path(source_document.replace("\\", "/")).stem
+    return ""
+
+
 def _api_images_from_figure_refs(
     refs: list[dict[str, Any]],
     media_roots: list[Path],
 ) -> list[dict[str, Any]]:
-    """Resolve figure refs to Web API image descriptors."""
+    """Resolve figure refs to Web API descriptors without losing provenance."""
     out: list[dict[str, Any]] = []
     seen: set[str] = set()
     for ref in refs:
         path_str = ref.get("path") or ""
-        path_key = Path(path_str).name
-        if not path_str or path_key in seen:
+        if not path_str:
             continue
-        resolved = resolve_media_path(path_str, media_roots)
+        expected_source = _expected_source_key(ref, path_str)
+        resolved = resolve_media_path(
+            path_str,
+            media_roots,
+            source_hint=expected_source,
+        )
         if resolved is None:
+            continue
+        try:
+            path_key = str(resolved.resolve())
+        except OSError:
+            path_key = str(resolved)
+        if path_key in seen:
             continue
         root_for_token: Path | None = None
         for root in media_roots:
@@ -488,19 +571,36 @@ def _api_images_from_figure_refs(
             continue
         seen.add(path_key)
         token = encode_media_token(resolved, root_for_token)
-        caption = _ref_effective_label(ref) or str(ref.get("caption") or "").strip()
-        context_snippet = ref.get("context") or ""
+        raw_caption = str(ref.get("caption") or "").strip()
+        caption = _ref_effective_label(ref) or raw_caption
+        context_snippet = str(ref.get("context") or "").strip()
         if not caption and context_snippet:
             caption = context_snippet[:60]
+        # Use the resolved parser-tree path so filename fallback after a
+        # re-ingest still identifies the current document rather than a stale
+        # or relative path stored in the chunk text.
+        source_key = _source_key_from_path(str(resolved))
         item: dict[str, Any] = {
             "url": f"/api/media/image?token={token}",
             "caption": caption,
-            "source_key": _source_key_from_path(path_str),
+            "display_caption": _display_caption_for_ref(ref, caption),
+            "source_key": source_key,
+            "source_label": str(ref.get("locality_machine") or source_key).strip(),
         }
+        _copy_figure_provenance(ref, item)
+        item["manual_id"] = str(item.get("source_document_id") or source_key)
+        target_machine = str(
+            item.get("target_machine") or item.get("locality_machine") or ""
+        ).strip()
+        if target_machine:
+            item["target_machine"] = target_machine
+        if raw_caption:
+            item["raw_caption"] = raw_caption
         if ref.get("page") is not None:
             item["page"] = ref["page"]
         if context_snippet:
             item["context"] = context_snippet
+            item["raw_context"] = context_snippet
         out.append(item)
     if out:
         logger.info(
@@ -509,6 +609,19 @@ def _api_images_from_figure_refs(
             len(refs),
         )
     return out
+
+
+def api_images_from_figure_refs(
+    refs: list[dict[str, Any]],
+    media_roots: list[Path],
+    *,
+    limit: int | None = None,
+) -> list[dict[str, Any]]:
+    """Public conversion for refs already accepted by the strict selector."""
+    selected = (
+        refs if limit is None else refs[: max(0, limit, _multi_figure_image_limit())]
+    )
+    return _api_images_from_figure_refs(selected, media_roots)
 
 
 def resolve_query_images(

@@ -6,12 +6,13 @@ context parsing/normalization.
 
 from __future__ import annotations
 
+import posixpath
 import re
-from pathlib import Path
 from typing import Any, NamedTuple
-from raganything.utils import text_term_alignment_symmetric
+
 from iqr_domain_schema import schema as _domain_schema
 
+from raganything.utils import text_term_alignment_symmetric
 
 _SECTION_MARKER_SPLIT_RE = re.compile(
     "|".join(re.escape(m) for m in _domain_schema.section_markers)
@@ -111,6 +112,11 @@ def _append_logic_line(
 def _image_score_for_logic_line(
     line: _LogicLine, img: dict[str, Any], *, query: str = ""
 ) -> float:
+    from iqr_figure_target import (
+        _label_matches_listing_target,
+        _pair_component_ref_align,
+        _ref_matches_manual_hint,
+    )
     from iqr_terms import (
         _is_procedure_steps_query,
         _line_has_query_subject_hit,
@@ -118,11 +124,6 @@ def _image_score_for_logic_line(
         _normalize_label_key,
         _query_subject_needles,
         _subject_from_machine_field_line,
-    )
-    from iqr_figure_target import (
-        _label_matches_listing_target,
-        _pair_component_ref_align,
-        _ref_matches_manual_hint,
     )
 
     q = (query or "").strip()
@@ -200,6 +201,30 @@ def normalize_image_path(path: str) -> str:
     return p
 
 
+def image_path_identity(path: str) -> str:
+    """Normalized full-path identity used for selection deduplication."""
+    normalized = normalize_image_path(path).replace("\\", "/")
+    return posixpath.normpath(normalized) if normalized else ""
+
+
+def image_document_relative_identity(path: str, source_hint: str) -> str:
+    """Stable image identity below a document folder, independent of KB root."""
+    normalized = image_path_identity(path)
+    if not normalized:
+        return ""
+    parts = tuple(part for part in normalized.split("/") if part not in {"", "."})
+    hint = re.sub(r"\s+", "", (source_hint or "")).casefold()
+    if hint:
+        for index in range(len(parts) - 1, -1, -1):
+            part = re.sub(r"\s+", "", parts[index]).casefold()
+            if part == hint and index + 1 < len(parts):
+                return "/".join(parts[index + 1 :])
+    # Paths without an identifiable document folder are uncommon.  Keeping a
+    # multi-component suffix still distinguishes same-named figures in nearby
+    # parser subdirectories without baking the absolute KB root into the ID.
+    return "/".join(parts[-4:])
+
+
 def _image_block_for_path(context: str, path_match_start: int) -> str:
     """Isolate the ``[图片]`` block that owns this path marker."""
     block_start = context.rfind("[图片]", 0, path_match_start)
@@ -275,7 +300,7 @@ def extract_image_refs_from_context(context: str) -> list[dict[str, Any]]:
         path = normalize_image_path(m.group(1) or m.group(2) or "")
         if not path:
             continue
-        dedupe_key = Path(path).name
+        dedupe_key = image_path_identity(path)
         if dedupe_key in seen:
             continue
         seen.add(dedupe_key)
