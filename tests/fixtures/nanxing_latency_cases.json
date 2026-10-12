@@ -1,0 +1,43 @@
+{
+  "description": "Grounded latency and answer checks for the seven PDFs in docs/nanxing.",
+  "cases": [
+    {
+      "id": "pc-011",
+      "question": "PC封边机出现011气压保护报警时检查哪两项，最低压力是多少？",
+      "source": "PC封边机电气报警排除方法.pdf",
+      "must_include": ["0.6", "压力继电器"],
+      "one_of": [["输入气源", "气源压力"]]
+    },
+    {
+      "id": "machining-table",
+      "question": "加工中心床身台面板多久保养一次，什么厚度必须更换，拆装用什么工具和螺钉？",
+      "source": "加工中心产品维护保养说明-20240510.pdf",
+      "must_include": ["每年", "9", "M8"],
+      "one_of": [["5号内六角", "5#内六角", "5 号内六角", "内六角5号"]],
+      "must_match": ["(低于|小于|不足)9(mm|毫米)|9(mm|毫米)(以下|以内)"]
+    },
+    {
+      "id": "six-drill-magazine",
+      "question": "数控六面钻刀库多久保养一次，用什么润滑脂，如何判断刀夹需要更换？",
+      "source": "数控六面钻产品维护保养说明-20240427.pdf",
+      "must_include": ["两周", "000"],
+      "one_of": [["破损", "变形"], ["松动", "拔插"]]
+    },
+    {
+      "id": "cross-electric-board",
+      "question": "比较NB9-Smart和NB8PCHGM的电控板保养周期及共同检查项。",
+      "source": "高速智能封边机维护保养手册.pdf + 高速自动封边机维护保养手册8-24.pdf",
+      "must_include": ["季度", "半年", "电弧"],
+      "one_of": [
+        ["NB9-Smart", "NB9 Smart"],
+        ["NB8PCHGM", "NB8-PCHGM"],
+        ["变频器", "变压器", "热继电器", "相序保护器"],
+        ["异味", "异常"]
+      ],
+      "must_match": [
+        "nb9[-]?smart[^。；\\n]{0,120}(季度|每3个月|三个月)",
+        "nb8[-]?pchgm[^。；\\n]{0,120}(半年|每6个月|六个月)"
+      ]
+    }
+  ]
+}
