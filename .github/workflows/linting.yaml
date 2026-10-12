@@ -33,4 +33,5 @@ jobs:
               uses: stefanzweifel/git-auto-commit-action@v5
               with:
                 commit_message: "chore: apply linting and formatting"
-                branch: ${{ github.head_ref }}
+                # head_ref is empty on push events; fall back to ref_name so both triggers push to the correct branch
+                branch: ${{ github.head_ref || github.ref_name }}
