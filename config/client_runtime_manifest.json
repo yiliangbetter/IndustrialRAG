@@ -1,0 +1,44 @@
+{
+  "version": 1,
+  "script_entrypoints": [
+    "client_launcher.py",
+    "rag_web_server.py",
+    "rag_pipeline_parse_graph_chat.py"
+  ],
+  "scripts": [
+    "client_env_manager.py",
+    "client_launcher.py",
+    "client_paths.py",
+    "client_setup_service.py",
+    "image_query_refs.py",
+    "iqr_align.py",
+    "iqr_anchor.py",
+    "iqr_config.py",
+    "iqr_domain_schema.py",
+    "iqr_explain.py",
+    "iqr_figure_target.py",
+    "iqr_machine.py",
+    "iqr_media.py",
+    "iqr_placement.py",
+    "iqr_protocol.py",
+    "iqr_query_intent.py",
+    "iqr_store.py",
+    "iqr_terms.py",
+    "query_debug_dump.py",
+    "query_doc_steering.py",
+    "query_progress_hooks.py",
+    "rag_pipeline_parse_graph_chat.py",
+    "rag_web_server.py",
+    "stream_cot_parser.py"
+  ],
+  "configs": [
+    "domain_schema.json",
+    "env.example",
+    "query_steering_profiles.json"
+  ],
+  "models": [
+    "models--BAAI--bge-m3",
+    "models--BAAI--bge-reranker-base",
+    "models--opendatalab--PDF-Extract-Kit-1.0"
+  ]
+}
