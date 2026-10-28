@@ -41,17 +41,22 @@ spec.loader.exec_module(rpc)
 
 from query_test_cases import _load_cases  # noqa: E402
 
+_VOICE29_DATASET = (
+    _ROOT / "tests" / "fixtures" / "evaluation" / "voice29.json"
+)
+
 
 def _green8_ids() -> set[str]:
-    path = _ROOT / "data" / "voice_script_green8.json"
-    data = json.loads(path.read_text(encoding="utf-8"))
-    return {str(c.get("id")) for c in (data.get("cases") or []) if not c.get("skip")}
+    from raganything.evaluation_schema import load_evaluation_dataset
+
+    dataset = load_evaluation_dataset(_VOICE29_DATASET)
+    return {str(case_id) for case_id in dataset.metadata["green8_voice_ids"]}
 
 
 def _load_voice29_non_green8() -> list[dict[str, Any]]:
     green_ids = _green8_ids()
     rows: list[dict[str, Any]] = []
-    for c in _load_cases(_ROOT / "data" / "voice_script_tests.json", limit=0):
+    for c in _load_cases(_VOICE29_DATASET, limit=0):
         vid = str(c.get("id", ""))
         if vid in green_ids:
             continue
@@ -81,8 +86,14 @@ def _load_all_sets(names: set[str]) -> list[dict[str, Any]]:
                 }
             )
     if "green8" in names:
+        green_ids = _green8_ids()
         for i, c in enumerate(
-            _load_cases(_ROOT / "data" / "voice_script_green8.json", limit=0), 1
+            (
+                case
+                for case in _load_cases(_VOICE29_DATASET, limit=0)
+                if str(case.get("id")) in green_ids
+            ),
+            1,
         ):
             rows.append(
                 {

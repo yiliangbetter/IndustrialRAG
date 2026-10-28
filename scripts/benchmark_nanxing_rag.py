@@ -33,7 +33,7 @@ for path in (ROOT, SCRIPTS):
         sys.path.insert(0, str(path))
 
 DEFAULT_BASE = ROOT / "data" / "nanxing_kb"
-DEFAULT_CASES = ROOT / "tests" / "fixtures" / "nanxing_latency_cases.json"
+DEFAULT_CASES = ROOT / "tests" / "fixtures" / "evaluation" / "nanxing_latency.json"
 EXPECTED_SOURCE_FILES = {
     "PC封边机电气报警排除方法.pdf",
     "加工中心产品维护保养说明-20240510.pdf",
@@ -57,7 +57,13 @@ def _event_payload(line: str) -> dict[str, Any] | None:
 
 def _load_cases(path: Path, selected: set[str] | None = None) -> list[dict[str, Any]]:
     payload = json.loads(path.read_text(encoding="utf-8"))
-    cases = payload.get("cases") or []
+    if payload.get("schema_version") == "rag-evaluation-dataset/v1":
+        from raganything.evaluation_legacy import nanxing_latency_legacy_cases
+        from raganything.evaluation_schema import load_evaluation_dataset
+
+        cases = nanxing_latency_legacy_cases(load_evaluation_dataset(path))
+    else:
+        cases = payload.get("cases") or []
     if not isinstance(cases, list) or not cases:
         raise ValueError(f"No benchmark cases in {path}")
     result = [case for case in cases if not selected or str(case.get("id")) in selected]

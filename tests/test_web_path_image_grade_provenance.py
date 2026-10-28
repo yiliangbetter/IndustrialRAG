@@ -4,6 +4,9 @@ import importlib.util
 import sys
 from pathlib import Path
 
+from raganything.evaluation_legacy import load_canonical_fixture
+from raganything.evaluation_legacy_metrics import score_legacy_case
+
 _ROOT = Path(__file__).resolve().parents[1]
 _SCRIPTS = _ROOT / "scripts"
 spec = importlib.util.spec_from_file_location(
@@ -79,6 +82,27 @@ def test_caption_topic_mismatch_is_a_failure():
 
     assert not ok
     assert "caption_topic:0/1" in notes
+
+
+def test_q11_empty_caption_cannot_satisfy_caption_min_match_in_either_grader():
+    dataset = load_canonical_fixture("shili17")
+    case = next(case for case in dataset.cases if case.case_id == "shili17:q11")
+    image_spec = case.metadata["legacy"]["grader_payloads"]["image"]
+    result = {
+        "answer": "压带轮、仿形靠板和涂胶轴都需要清理残胶。",
+        "images": [{"caption": ""}],
+        "placements": [{"image_index": 0}],
+    }
+
+    script_ok, script_notes = suite.grade_images(result, image_spec)
+    legacy_score = score_legacy_case(case, result)
+    legacy_notes = legacy_score.diagnostics["images"]["notes"]
+
+    assert script_ok is False
+    assert legacy_score.metrics["legacy_image_passed"] is False
+    assert script_notes == legacy_notes
+    assert "empty_captions:[0]" in script_notes
+    assert "caption_match:0/4" in script_notes
 
 
 def test_source_diversity_prefers_stable_manual_identity():

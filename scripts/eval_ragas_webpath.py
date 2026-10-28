@@ -1,13 +1,15 @@
 #!/usr/bin/env python3
-"""Read-only RAGAS evaluation on the Web-path query stack (Q1–Q17).
+"""Read-only RAGAS evaluation on the exact production Web query path (Q1–Q17).
 
-Uses the same in-process pipeline as ``run_web_path_q1_17.py`` (``query_progress_hooks``
-+ ``aquery``), **does not** call ingest APIs or modify the knowledge base.
+Uses the same clarification, retrieval, reranking, streaming, and image-finalization
+orchestration as ``/api/query/stream``. It does not call ingest APIs or modify the
+knowledge base. Cases are deliberately executed sequentially because the current
+model-stream lifecycle is not isolated for parallel in-process queries.
 
 Workflow:
-  1. ``build_ragas_ground_truth_shili17.py`` → ``data/ragas_shili17_ground_truth.json``
-  2. This script collects (question, answer, contexts, ground_truth) per case
-  3. RAGAS scores faithfulness / answer relevancy / context recall / context precision
+  1. Load the tracked, versioned Shili17 evaluation dataset
+  2. Collect (question, answer, exact model contexts, reference) per case
+  3. Score faithfulness, relevance, correctness, and retrieval precision/recall
 
 Install eval deps first (keeps sentence-transformers for HF embedding)::
 
@@ -31,8 +33,9 @@ import math
 import os
 import re
 import sys
-import time
+import uuid
 import warnings
+from collections.abc import Callable
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
@@ -46,7 +49,7 @@ sys.path.insert(0, str(_ROOT))
 
 load_dotenv(_ROOT / ".env", override=False)
 
-_DEFAULT_DATASET = _ROOT / "data" / "ragas_shili17_ground_truth.json"
+_DEFAULT_DATASET = _ROOT / "tests" / "fixtures" / "evaluation" / "shili17.json"
 _RESULTS_DIR = _ROOT / "logs" / "ragas_webpath"
 
 warnings.filterwarnings(
@@ -87,93 +90,45 @@ def _parse_ids(raw: str | None, valid: set[int]) -> list[int]:
 
 def _load_dataset(path: Path) -> list[dict[str, Any]]:
     data = json.loads(path.read_text(encoding="utf-8"))
+    if data.get("schema_version") == "rag-evaluation-dataset/v1":
+        from raganything.evaluation_legacy import (  # noqa: WPS433
+            ragas_shili17_cases,
+        )
+        from raganything.evaluation_schema import (  # noqa: WPS433
+            load_evaluation_dataset,
+        )
+
+        return ragas_shili17_cases(load_evaluation_dataset(path))
     cases = list(data.get("test_cases") or [])
     if not cases:
         raise SystemExit(f"No test_cases in {path}")
     return cases
 
 
-def _contexts_from_docs(docs: list[dict[str, Any]] | None) -> list[str]:
-    """One context string per retrieved chunk (dedupe by file_path + prefix)."""
-    out: list[str] = []
-    seen: set[tuple[str, str]] = set()
-    for doc in docs or []:
-        if not isinstance(doc, dict):
-            continue
-        text = ""
-        for key in ("content", "text", "chunk_content", "page_content"):
-            val = doc.get(key)
-            if isinstance(val, str) and val.strip():
-                text = val.strip()
-                break
-        if not text:
-            continue
-        fp = str(doc.get("file_path") or doc.get("source") or "")
-        sig = (fp, text[:120])
-        if sig in seen:
-            continue
-        seen.add(sig)
-        out.append(text)
-    return out
-
-
 async def _collect_webpath_row(
-    rag: Any,
-    rpc: Any,
+    web: Any,
     *,
     case: dict[str, Any],
     mode: str,
-    parser_root: Path,
 ) -> dict[str, Any]:
-    from query_doc_steering import strip_manual_circled_step_markers  # noqa: WPS433
-    from query_progress_hooks import (  # noqa: WPS433
-        get_query_debug_state,
-        query_progress_hooks,
-        set_query_media_roots,
-        set_query_text_for_images,
-    )
-    from stream_cot_parser import parse_complete_cot  # noqa: WPS433
-
     qid = case["id"]
     question = case["question"]
     ground_truth = case.get("ground_truth") or ""
-    t0 = time.perf_counter()
-    error: str | None = None
-    answer = ""
-    contexts: list[str] = []
-
-    try:
-        async with query_progress_hooks():
-            set_query_media_roots([parser_root.resolve()])
-            set_query_text_for_images(question.strip())
-            raw = await rag.aquery(
-                question,
-                mode=mode,
-                vlm_enhanced=False,
-                **rpc._query_extras_from_env(question),
-            )
-            if not isinstance(raw, str):
-                parts: list[str] = []
-                async for chunk in raw:
-                    if chunk:
-                        parts.append(chunk if isinstance(chunk, str) else str(chunk))
-                raw = "".join(parts)
-            _thinking, answer = parse_complete_cot(raw or "")
-            answer = strip_manual_circled_step_markers((answer or "").strip())
-            state = get_query_debug_state()
-            contexts = _contexts_from_docs(state.get("retrieved_docs"))
-    except Exception as exc:
-        error = str(exc)
+    body = web.QueryBody(query=question, mode=mode, stream=True)
+    trace = await web.execute_query_with_trace(body)
+    contexts = list(trace.get("contexts") or [])
 
     return {
         "id": qid,
         "question": question,
         "ground_truth": ground_truth,
-        "answer": answer,
+        "answer": str(trace.get("answer") or ""),
         "contexts": contexts,
         "context_count": len(contexts),
-        "duration_ms": int((time.perf_counter() - t0) * 1000),
-        "error": error,
+        "duration_ms": int(trace.get("duration_ms") or 0),
+        "outcome": trace.get("outcome"),
+        "error": trace.get("error"),
+        "trace": trace,
     }
 
 
@@ -183,34 +138,108 @@ async def collect_rows(
     mode: str,
     wd: Path,
     pod: Path,
+    on_progress: Callable[[list[dict[str, Any]]], None] | None = None,
+    diagnostics: dict[str, Any] | None = None,
 ) -> list[dict[str, Any]]:
-    rpc = _load_rpc()
-    rag, _, _ = await rpc._build_rag(wd, pod)
+    original_environment = dict(os.environ)
+    rag: Any = None
     rows: list[dict[str, Any]] = []
     try:
+        os.environ.update(
+            {
+                "RAG_WEB_WORKING_DIR": str(wd),
+                "RAG_WEB_PARSER_OUTPUT_DIR": str(pod),
+            }
+        )
+        evaluation_environment = dict(os.environ)
+        rpc = _load_rpc()
+
+        # Dynamic imports can load .env-backed modules and mutate os.environ.
+        # Keep setup and every query pinned to the explicit evaluation values.
+        os.environ.clear()
+        os.environ.update(evaluation_environment)
+        rag, config, _logger = await rpc._build_rag(
+            wd,
+            pod,
+            enable_llm_cache=False,
+        )
+
+        # Import after the explicit evaluation environment is set. The Web
+        # module's client bootstrap reloads configuration at import time, so
+        # restore our frozen values before query helpers read them.
+        import rag_web_server as web  # noqa: WPS433
+
+        os.environ.clear()
+        os.environ.update(evaluation_environment)
+        web._RPC = rpc
+        web.state.rag = rag
+        web.state.config = config
+        web.state.working_dir = str(wd)
+        web.state.parser_output_dir = str(pod)
+        web.state.query_mode = mode
+        web.state.ready = True
+
         for i, case in enumerate(cases, 1):
             print(f"[collect {i}/{len(cases)}] Q{case['id']}", flush=True)
-            row = await _collect_webpath_row(
-                rag, rpc, case=case, mode=mode, parser_root=pod
-            )
+            try:
+                row = await _collect_webpath_row(web, case=case, mode=mode)
+            except Exception as exc:  # noqa: BLE001 - preserve the paid batch
+                row = {
+                    "id": case.get("id"),
+                    "question": case.get("question"),
+                    "ground_truth": case.get("ground_truth") or "",
+                    "answer": "",
+                    "contexts": [],
+                    "context_count": 0,
+                    "duration_ms": 0,
+                    "outcome": "error",
+                    "error": f"{type(exc).__name__}: {exc}",
+                    "trace": {},
+                }
             rows.append(row)
+            if on_progress is not None:
+                on_progress(rows)
             print(
-                f"  answer_chars={len(row['answer'])} contexts={row['context_count']} "
-                f"ms={row['duration_ms']}",
+                f"  outcome={row['outcome']} answer_chars={len(row['answer'])} "
+                f"contexts={row['context_count']} ms={row['duration_ms']}",
                 flush=True,
             )
             if row.get("error"):
                 print(f"  error: {row['error']}", flush=True)
     finally:
-        await rag.finalize_storages()
+        try:
+            if rag is not None:
+                try:
+                    await rag.finalize_storages()
+                except Exception as exc:  # noqa: BLE001 - rows are still valuable
+                    message = f"{type(exc).__name__}: {exc}"
+                    if diagnostics is not None:
+                        diagnostics["finalization_error"] = message
+                    print(
+                        f"WARNING: storage finalization failed after collection: {message}",
+                        file=sys.stderr,
+                        flush=True,
+                    )
+        finally:
+            os.environ.clear()
+            os.environ.update(original_environment)
     return rows
 
 
 def _write_jsonl(path: Path, rows: list[dict[str, Any]]) -> None:
+    content = "".join(json.dumps(row, ensure_ascii=False) + "\n" for row in rows)
+    _atomic_write_text(path, content)
+
+
+def _atomic_write_text(path: Path, content: str) -> None:
+    """Replace one artifact atomically so a failed checkpoint keeps its predecessor."""
     path.parent.mkdir(parents=True, exist_ok=True)
-    with path.open("w", encoding="utf-8") as f:
-        for row in rows:
-            f.write(json.dumps(row, ensure_ascii=False) + "\n")
+    temporary = path.with_name(f".{path.name}.{uuid.uuid4().hex}.tmp")
+    try:
+        temporary.write_text(content, encoding="utf-8")
+        os.replace(temporary, path)
+    finally:
+        temporary.unlink(missing_ok=True)
 
 
 def _read_jsonl(path: Path) -> list[dict[str, Any]]:
@@ -220,10 +249,6 @@ def _read_jsonl(path: Path) -> list[dict[str, Any]]:
         if line:
             rows.append(json.loads(line))
     return rows
-
-
-def _is_nan(value: Any) -> bool:
-    return isinstance(value, float) and math.isnan(value)
 
 
 _KNOWN_RAGAS_METRICS = frozenset(
@@ -254,15 +279,15 @@ _RAGAS_INPUT_COLS = frozenset(
 def _parse_metric_value(val: Any) -> float | None:
     if val is None:
         return None
-    if isinstance(val, float) and math.isnan(val):
-        return None
     if isinstance(val, (int, float)):
-        return float(val)
+        parsed = float(val)
+        return parsed if math.isfinite(parsed) else None
     if isinstance(val, str):
         try:
-            return float(val)
+            parsed = float(val)
         except ValueError:
             return None
+        return parsed if math.isfinite(parsed) else None
     return None
 
 
@@ -302,7 +327,7 @@ def _build_ragas_llm():
         or os.getenv("OPENAI_API_KEY")
     )
     if not api_key:
-        raise EnvironmentError(
+        raise OSError(
             "Set EVAL_LLM_BINDING_API_KEY, LLM_BINDING_API_KEY, or OPENAI_API_KEY"
         )
 
@@ -320,7 +345,7 @@ def _build_ragas_llm():
     base_llm = ChatOpenAI(**llm_kwargs)
     try:
         eval_llm = LangchainLLMWrapper(langchain_llm=base_llm, bypass_n=True)
-    except Exception:
+    except Exception:  # noqa: BLE001 - compatibility varies across RAGAS releases
         eval_llm = base_llm
     return eval_llm, model
 
@@ -333,9 +358,9 @@ def _build_ragas_embeddings():
     if not eval_backend:
         if eval_model.startswith("text-embedding"):
             eval_backend = "api"
-        elif eval_model:
-            eval_backend = "hf"
-        elif (os.getenv("EMBEDDING_BACKEND") or "").strip().lower() == "hf":
+        elif (
+            eval_model or (os.getenv("EMBEDDING_BACKEND") or "").strip().lower() == "hf"
+        ):
             eval_backend = "hf"
         else:
             eval_backend = "api"
@@ -347,7 +372,9 @@ def _build_ragas_embeddings():
             raise ImportError(
                 "Local RAGAS embeddings need langchain-community + sentence-transformers"
             ) from exc
-        from raganything.local_hf_embedding import _resolve_embedding_device  # noqa: WPS433
+        from raganything.local_hf_embedding import (  # noqa: WPS433
+            _resolve_embedding_device,
+        )
 
         model_id = eval_model or (os.getenv("EMBEDDING_MODEL") or "BAAI/bge-m3").strip()
         model_path = _resolve_hf_model_path(model_id)
@@ -372,7 +399,7 @@ def _build_ragas_embeddings():
         or os.getenv("OPENAI_API_KEY")
     )
     if not api_key:
-        raise EnvironmentError(
+        raise OSError(
             "API embeddings need EVAL_EMBEDDING_BINDING_API_KEY or LLM_BINDING_API_KEY"
         )
     base_url = os.getenv("EVAL_EMBEDDING_BINDING_HOST") or os.getenv("LLM_BINDING_HOST")
@@ -384,11 +411,180 @@ def _build_ragas_embeddings():
     return OpenAIEmbeddings(**embed_kwargs), model
 
 
+def _row_error(row: dict[str, Any]) -> Any:
+    """Return an error exposed either by the row or its underlying trace."""
+    error = row.get("error")
+    if error:
+        return error
+    trace = row.get("trace")
+    if isinstance(trace, dict):
+        return trace.get("error")
+    return None
+
+
+def _unevaluated_reason(row: dict[str, Any]) -> str | None:
+    """Explain why a collected row is unsafe or incomplete for RAGAS."""
+    answer = str(row.get("answer") or "").strip()
+    contexts = row.get("contexts")
+    outcome = str(row.get("outcome") or "").strip()
+    error = _row_error(row)
+
+    # A stream can emit answer deltas before its provider fails. Treating that
+    # partial text as a completed answer would produce deceptively valid scores.
+    if answer and (error or outcome == "error"):
+        return "partial_answer_ended_in_error"
+    if error or outcome == "error":
+        return "query_error"
+    if outcome != "answer":
+        return "outcome_not_answer"
+
+    trace = row.get("trace")
+    if isinstance(trace, dict) and "terminal_event" in trace:
+        terminal = trace.get("terminal_event")
+        if not isinstance(terminal, dict) or terminal.get("type") != "done":
+            return "terminal_not_done"
+    if isinstance(trace, dict) and trace.get("contexts_complete") is False:
+        return "incomplete_context_capture"
+
+    if not answer and not contexts:
+        return "missing_answer_and_contexts"
+    if not answer:
+        return "missing_answer"
+    if not contexts:
+        return "missing_contexts"
+    return None
+
+
+def _classify_ragas_rows(
+    rows: list[dict[str, Any]],
+) -> tuple[list[dict[str, Any]], list[dict[str, Any]]]:
+    usable: list[dict[str, Any]] = []
+    unevaluated: list[dict[str, Any]] = []
+    for row in rows:
+        reason = _unevaluated_reason(row)
+        if reason is None:
+            usable.append(row)
+            continue
+        unevaluated.append(
+            {
+                "id": row.get("id"),
+                "outcome": row.get("outcome"),
+                "error": _row_error(row),
+                "reason": reason,
+            }
+        )
+    return usable, unevaluated
+
+
+def _finalize_ragas_scores(
+    *,
+    rows: list[dict[str, Any]],
+    usable: list[dict[str, Any]],
+    unevaluated: list[dict[str, Any]],
+    score_rows: list[dict[str, Any]],
+    metric_cols: list[str],
+    llm_model: str | None,
+    embedding_model: str | None,
+) -> dict[str, Any]:
+    """Account for judge failures at case and metric granularity."""
+    per_case: list[dict[str, Any]] = []
+    for index, case_row in enumerate(usable):
+        raw_scores = score_rows[index] if index < len(score_rows) else {}
+        scores = {
+            column: _parse_metric_value(raw_scores.get(column))
+            for column in metric_cols
+        }
+        missing_metrics = [column for column, value in scores.items() if value is None]
+        if not metric_cols:
+            missing_metrics = ["<no_metric_columns>"]
+        per_case.append(
+            {
+                "id": case_row.get("id"),
+                "question": case_row.get("question"),
+                "scores": scores,
+                "missing_metrics": missing_metrics,
+                "fully_evaluated": not missing_metrics,
+            }
+        )
+
+    metric_coverage: dict[str, dict[str, Any]] = {}
+    summary: dict[str, float | None] = {}
+    for column in metric_cols:
+        values = [
+            item["scores"][column]
+            for item in per_case
+            if item["scores"].get(column) is not None
+        ]
+        evaluated_count = len(values)
+        metric_coverage[column] = {
+            "evaluated": evaluated_count,
+            "missing": len(usable) - evaluated_count,
+            "coverage": (round(evaluated_count / len(rows), 4) if rows else 0.0),
+            "eligible_coverage": (
+                round(evaluated_count / len(usable), 4) if usable else 0.0
+            ),
+        }
+        summary[column] = round(sum(values) / len(values), 4) if values else None
+
+    fully_evaluated = sum(item["fully_evaluated"] for item in per_case)
+    partially_evaluated = sum(
+        any(value is not None for value in item["scores"].values())
+        and not item["fully_evaluated"]
+        for item in per_case
+    )
+    judge_incomplete = [
+        {
+            "id": item.get("id"),
+            "missing_metrics": item["missing_metrics"],
+        }
+        for item in per_case
+        if not item["fully_evaluated"]
+    ]
+    return {
+        "eligible": len(usable),
+        "evaluated": fully_evaluated,
+        "partially_evaluated": partially_evaluated,
+        "skipped": len(rows) - fully_evaluated,
+        "coverage": round(fully_evaluated / len(rows), 4) if rows else 0.0,
+        "eligibility_coverage": (round(len(usable) / len(rows), 4) if rows else 0.0),
+        "unevaluated": unevaluated,
+        "judge_incomplete": judge_incomplete,
+        "metric_coverage": metric_coverage,
+        "llm_model": llm_model,
+        "embedding_model": embedding_model,
+        "summary": summary,
+        "per_case": per_case,
+        "raw_columns": metric_cols,
+    }
+
+
 def run_ragas_eval(rows: list[dict[str, Any]]) -> dict[str, Any]:
+    usable, unevaluated = _classify_ragas_rows(rows)
+    if not usable:
+        # Return a normal result so the caller can still persist ragas.json and
+        # report.txt for failed/clarified/empty batches.
+        return {
+            "eligible": 0,
+            "evaluated": 0,
+            "partially_evaluated": 0,
+            "skipped": len(rows),
+            "coverage": 0.0,
+            "eligibility_coverage": 0.0,
+            "unevaluated": unevaluated,
+            "judge_incomplete": [],
+            "metric_coverage": {},
+            "llm_model": None,
+            "embedding_model": None,
+            "summary": {},
+            "per_case": [],
+            "raw_columns": [],
+        }
+
     try:
         from datasets import Dataset
         from ragas import evaluate
         from ragas.metrics import (
+            AnswerCorrectness,
             AnswerRelevancy,
             ContextPrecision,
             ContextRecall,
@@ -398,10 +594,6 @@ def run_ragas_eval(rows: list[dict[str, Any]]) -> dict[str, Any]:
         raise ImportError(
             "RAGAS eval deps missing or incompatible. Install with: uv sync --extra eval"
         ) from exc
-
-    usable = [r for r in rows if (r.get("answer") or "").strip() and r.get("contexts")]
-    if not usable:
-        raise RuntimeError("No rows with both answer and contexts; cannot run RAGAS")
 
     eval_llm, llm_model = _build_ragas_llm()
     embeddings, embed_model = _build_ragas_embeddings()
@@ -416,6 +608,7 @@ def run_ragas_eval(rows: list[dict[str, Any]]) -> dict[str, Any]:
     metrics = [
         Faithfulness(llm=eval_llm),
         AnswerRelevancy(llm=eval_llm, embeddings=embeddings),
+        AnswerCorrectness(llm=eval_llm, embeddings=embeddings),
         ContextRecall(llm=eval_llm),
         ContextPrecision(llm=eval_llm),
     ]
@@ -427,40 +620,17 @@ def run_ragas_eval(rows: list[dict[str, Any]]) -> dict[str, Any]:
     result = evaluate(dataset, metrics=metrics)
     df = result.to_pandas()
 
-    per_case: list[dict[str, Any]] = []
     metric_cols = _metric_columns(df)
-    for idx, row in df.iterrows():
-        case_row = usable[int(idx)]
-        scores = {}
-        for col in metric_cols:
-            scores[col] = _parse_metric_value(row[col])
-        per_case.append(
-            {
-                "id": case_row.get("id"),
-                "question": case_row.get("question"),
-                "scores": scores,
-            }
-        )
-
-    summary: dict[str, float | None] = {}
-    for col in metric_cols:
-        vals = [r["scores"].get(col) for r in per_case if r["scores"].get(col) is not None]
-        summary[col] = round(sum(vals) / len(vals), 4) if vals else None
-
-    ragas_score_vals = [v for v in summary.values() if v is not None]
-    summary["ragas_score"] = (
-        round(sum(ragas_score_vals) / len(ragas_score_vals), 4) if ragas_score_vals else None
+    score_rows = [dict(row) for _, row in df.iterrows()]
+    return _finalize_ragas_scores(
+        rows=rows,
+        usable=usable,
+        unevaluated=unevaluated,
+        score_rows=score_rows,
+        metric_cols=metric_cols,
+        llm_model=llm_model,
+        embedding_model=embed_model,
     )
-
-    return {
-        "evaluated": len(usable),
-        "skipped": len(rows) - len(usable),
-        "llm_model": llm_model,
-        "embedding_model": embed_model,
-        "summary": summary,
-        "per_case": per_case,
-        "raw_columns": metric_cols,
-    }
 
 
 def _write_results(
@@ -475,12 +645,18 @@ def _write_results(
     run_path = out_dir / "run.jsonl"
     _write_jsonl(run_path, rows)
     meta_path = out_dir / "meta.json"
-    meta_path.write_text(json.dumps(meta, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
+    _atomic_write_text(
+        meta_path,
+        json.dumps(meta, ensure_ascii=False, indent=2) + "\n",
+    )
 
     csv_path: Path | None = None
     if ragas:
         ragas_path = out_dir / "ragas.json"
-        ragas_path.write_text(json.dumps(ragas, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
+        _atomic_write_text(
+            ragas_path,
+            json.dumps(ragas, ensure_ascii=False, indent=2) + "\n",
+        )
         csv_path = out_dir / "ragas_scores.csv"
         with csv_path.open("w", encoding="utf-8", newline="") as f:
             writer = csv.writer(f)
@@ -517,29 +693,70 @@ def _format_report(
         f"run_jsonl: {run_path}",
         "",
     ]
+    collection_diagnostics = meta.get("collection_diagnostics") or {}
+    if collection_diagnostics:
+        lines.append("--- Collection diagnostics ---")
+        for key, value in collection_diagnostics.items():
+            lines.append(f"  {key}: {value}")
+        lines.append("")
     if ragas:
         lines.append("--- RAGAS summary ---")
+        lines.append(f"eligible: {ragas.get('eligible', 0)}")
+        lines.append(f"eligibility_coverage: {ragas.get('eligibility_coverage', 0.0)}")
+        lines.append(f"evaluated: {ragas.get('evaluated', 0)}")
+        lines.append(f"partially_evaluated: {ragas.get('partially_evaluated', 0)}")
+        lines.append(f"skipped: {ragas.get('skipped', 0)}")
+        lines.append(f"coverage: {ragas.get('coverage', 0.0)}")
         for key, val in (ragas.get("summary") or {}).items():
             lines.append(f"  {key}: {val}")
+        metric_coverage = ragas.get("metric_coverage") or {}
+        if metric_coverage:
+            lines.append("metric_coverage:")
+            for key, values in metric_coverage.items():
+                lines.append(
+                    f"  {key}: {values.get('evaluated', 0)}/{len(rows)} "
+                    f"({values.get('coverage', 0.0)})"
+                )
         lines.append("")
-        lines.append("id   faithfulness  answer_relevancy  context_recall  context_precision")
-        for item in ragas.get("per_case") or []:
-            s = item.get("scores") or {}
+        lines.append(
+            "id   faithfulness  answer_relevancy  answer_correctness  "
+            "context_recall  context_precision"
+        )
 
-            def _fmt(key: str) -> str:
-                val = s.get(key)
-                return f"{val:.3f}" if isinstance(val, (int, float)) else "—"
+        def _fmt(scores: dict[str, Any], key: str) -> str:
+            val = scores.get(key)
+            return f"{val:.3f}" if isinstance(val, (int, float)) else "—"
+
+        for item in ragas.get("per_case") or []:
+            scores = item.get("scores") or {}
 
             lines.append(
-                f"{str(item.get('id')):>3}  "
-                f"{_fmt('faithfulness'):>13}  "
-                f"{_fmt('answer_relevancy'):>16}  "
-                f"{_fmt('context_recall'):>14}  "
-                f"{_fmt('context_precision'):>17}"
+                f"{item.get('id')!s:>3}  "
+                f"{_fmt(scores, 'faithfulness'):>13}  "
+                f"{_fmt(scores, 'answer_relevancy'):>16}  "
+                f"{_fmt(scores, 'answer_correctness'):>18}  "
+                f"{_fmt(scores, 'context_recall'):>14}  "
+                f"{_fmt(scores, 'context_precision'):>17}"
             )
         if csv_path:
             lines.append("")
             lines.append(f"csv: {csv_path}")
+        unevaluated = ragas.get("unevaluated") or []
+        if unevaluated:
+            lines.append("")
+            lines.append("--- Unevaluated rows ---")
+            for item in unevaluated:
+                detail = f"outcome={item.get('outcome') or '—'}"
+                if item.get("error"):
+                    detail += f", error={item['error']}"
+                lines.append(f"  {item.get('id')}: {item.get('reason')} ({detail})")
+        judge_incomplete = ragas.get("judge_incomplete") or []
+        if judge_incomplete:
+            lines.append("")
+            lines.append("--- Incomplete judge rows ---")
+            for item in judge_incomplete:
+                missing = ", ".join(item.get("missing_metrics") or [])
+                lines.append(f"  {item.get('id')}: missing {missing}")
     else:
         lines.append("(RAGAS scoring skipped — use without --collect-only to evaluate)")
     lines.append("")
@@ -579,15 +796,35 @@ async def _async_main(args: argparse.Namespace) -> None:
         stamp = args.run_jsonl.resolve().parent.name or stamp
         print(f"Loaded {len(rows)} rows from {args.run_jsonl}", flush=True)
     else:
-        rows = await collect_rows(cases, mode=mode, wd=wd, pod=pod)
-        # Persist collection before RAGAS (scoring can fail on dep/API issues)
         out_dir = _RESULTS_DIR / stamp
         out_dir.mkdir(parents=True, exist_ok=True)
         collect_path = out_dir / "run.jsonl"
-        _write_jsonl(collect_path, rows)
-        (out_dir / "meta.json").write_text(
-            json.dumps(meta, ensure_ascii=False, indent=2) + "\n", encoding="utf-8"
+        collection_diagnostics: dict[str, Any] = {}
+
+        def _checkpoint(partial_rows: list[dict[str, Any]]) -> None:
+            _write_jsonl(collect_path, partial_rows)
+
+        # Persist metadata before the first paid call and checkpoint after each
+        # case, so an interruption or later scoring failure cannot erase work.
+        _atomic_write_text(
+            out_dir / "meta.json",
+            json.dumps(meta, ensure_ascii=False, indent=2) + "\n",
         )
+        rows = await collect_rows(
+            cases,
+            mode=mode,
+            wd=wd,
+            pod=pod,
+            on_progress=_checkpoint,
+            diagnostics=collection_diagnostics,
+        )
+        if collection_diagnostics:
+            meta["collection_diagnostics"] = collection_diagnostics
+            _atomic_write_text(
+                out_dir / "meta.json",
+                json.dumps(meta, ensure_ascii=False, indent=2) + "\n",
+            )
+        _write_jsonl(collect_path, rows)
         print(f"Saved collection -> {collect_path}", flush=True)
 
     ragas: dict[str, Any] | None = None
@@ -604,7 +841,7 @@ async def _async_main(args: argparse.Namespace) -> None:
         csv_path=csv_path,
     )
     report_path = run_path.parent / "report.txt"
-    report_path.write_text(report, encoding="utf-8")
+    _atomic_write_text(report_path, report)
     print(report)
     print(f"Report: {report_path}", flush=True)
 
@@ -615,14 +852,16 @@ def main() -> None:
         "--dataset",
         type=Path,
         default=_DEFAULT_DATASET,
-        help="Ground-truth JSON (default: data/ragas_shili17_ground_truth.json)",
+        help="Versioned evaluation dataset (default: canonical Shili17 fixture)",
     )
     p.add_argument(
         "--ids",
         default="",
         help="Comma-separated case ids (default: all in dataset)",
     )
-    p.add_argument("--mode", default="", help="LightRAG mode (default: RAG_QUERY_MODE or mix)")
+    p.add_argument(
+        "--mode", default="", help="LightRAG mode (default: RAG_QUERY_MODE or mix)"
+    )
     p.add_argument(
         "--collect-only",
         action="store_true",

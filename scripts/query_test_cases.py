@@ -1,7 +1,7 @@
 """Shared test-case loading for query batch / diagnostic scripts.
 
-Parses shili17 (``docs/测试例.txt``) and voice-script JSON
-(``data/voice_script_*.json``) case sources into ``{id, query, ...}`` rows.
+Parses shili17 (``docs/测试例.txt``) and canonical or legacy voice-script JSON
+case sources into ``{id, query, ...}`` rows.
 Extracted from a since-removed scoring script so that clarify-gate
 and rerank diagnostics keep a single case-loading implementation.
 """
@@ -13,14 +13,15 @@ import re
 from pathlib import Path
 
 _ROOT = Path(__file__).resolve().parent.parent
+_CANONICAL_VOICE29 = _ROOT / "tests" / "fixtures" / "evaluation" / "voice29.json"
 
 _SOURCE_PRESETS: dict[str, Path] = {
     "shili": _ROOT / "docs" / "测试例.txt",
     "shili17": _ROOT / "docs" / "测试例.txt",
-    "voice": _ROOT / "data" / "voice_script_tests.json",
-    "voice29": _ROOT / "data" / "voice_script_tests.json",
-    "voice_green8": _ROOT / "data" / "voice_script_green8.json",
-    "green8": _ROOT / "data" / "voice_script_green8.json",
+    "voice": _CANONICAL_VOICE29,
+    "voice29": _CANONICAL_VOICE29,
+    "voice_green8": _CANONICAL_VOICE29,
+    "green8": _CANONICAL_VOICE29,
 }
 
 
@@ -48,9 +49,16 @@ def _parse_voice_script_cases(
     path: Path, *, limit: int = 0, group: str | None = None
 ) -> list[dict[str, str]]:
     data = json.loads(path.read_text(encoding="utf-8"))
+    if data.get("schema_version") == "rag-evaluation-dataset/v1":
+        from raganything.evaluation_legacy import voice29_legacy_cases
+        from raganything.evaluation_schema import load_evaluation_dataset
+
+        cases = voice29_legacy_cases(load_evaluation_dataset(path))
+    else:
+        cases = data.get("cases") or []
     group_filter = (group or "").strip()
     rows: list[dict[str, str]] = []
-    for case in data.get("cases") or []:
+    for case in cases:
         if case.get("skip"):
             continue
         case_group = str(case.get("group") or "").strip()
@@ -75,7 +83,27 @@ def _parse_voice_script_cases(
     return rows
 
 
-def _load_cases(source: Path, *, limit: int, group: str | None = None) -> list[dict[str, str]]:
+def _load_cases(
+    source: Path, *, limit: int, group: str | None = None
+) -> list[dict[str, str]]:
     if source.suffix.lower() == ".json":
         return _parse_voice_script_cases(source, limit=limit, group=group)
     return _parse_shili_questions(source, limit=limit)
+
+
+def _load_preset_cases(
+    preset: str, *, limit: int = 0, group: str | None = None
+) -> list[dict[str, str]]:
+    """Load a named source, including the canonical Green8 subset view."""
+    try:
+        source = _SOURCE_PRESETS[preset]
+    except KeyError:
+        raise ValueError(f"Unknown query case preset: {preset}") from None
+    rows = _load_cases(source, limit=0, group=group)
+    if preset in {"green8", "voice_green8"}:
+        from raganything.evaluation_schema import load_evaluation_dataset
+
+        dataset = load_evaluation_dataset(_CANONICAL_VOICE29)
+        wanted = {str(case_id) for case_id in dataset.metadata["green8_voice_ids"]}
+        rows = [row for row in rows if row["id"] in wanted]
+    return rows[:limit] if limit > 0 else rows

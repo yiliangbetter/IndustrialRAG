@@ -19,14 +19,16 @@ sys.path.insert(0, str(_ROOT / "scripts"))
 load_dotenv(_ROOT / ".env", override=False)
 
 spec = importlib.util.spec_from_file_location(
-    "rag_pipeline_parse_graph_chat", _ROOT / "scripts" / "rag_pipeline_parse_graph_chat.py"
+    "rag_pipeline_parse_graph_chat",
+    _ROOT / "scripts" / "rag_pipeline_parse_graph_chat.py",
 )
 rpc = importlib.util.module_from_spec(spec)
 assert spec.loader is not None
 spec.loader.exec_module(rpc)
 
-from query_test_cases import _load_cases  # noqa: E402
-from raganything.clarify_gate import (  # noqa: E402
+from query_test_cases import _load_preset_cases
+
+from raganything.clarify_gate import (
     ClarifyBypass,
     ClarifyRequired,
     clarify_direct_rerank_min,
@@ -36,16 +38,16 @@ from raganything.clarify_gate import (  # noqa: E402
 
 _SOURCE_PRESETS = {
     "shili17": _ROOT / "docs" / "测试例.txt",
-    "green8": _ROOT / "data" / "voice_script_green8.json",
+    "green8": _ROOT / "tests" / "fixtures" / "evaluation" / "voice29.json",
 }
 
 
-async def _run(source: Path, *, limit: int, out: Path | None) -> None:
+async def _run(source_key: str, source: Path, *, limit: int, out: Path | None) -> None:
     os.environ.setdefault("RAG_CLARIFY_ENABLED", "1")
     wd = (_ROOT / "data" / "rag_storage").resolve()
     pod = (_ROOT / "data" / "pipeline_parse").resolve()
-    rag, _, _ = await rpc._build_rag(wd, pod)
-    cases = _load_cases(source, limit=limit)
+    rag, _, _ = await rpc._build_rag(wd, pod, enable_llm_cache=False)
+    cases = _load_preset_cases(source_key, limit=limit)
     direct_min = clarify_direct_rerank_min()
     lines: list[str] = []
     lines.append(f"Clarify gate v4 batch — {source.name}")
@@ -68,9 +70,7 @@ async def _run(source: Path, *, limit: int, out: Path | None) -> None:
                 f"#{cid} final={final_score} {outcome}/{reason} candidates={n_cand}  {q[:50]}"
             )
         elif isinstance(result, ClarifyBypass):
-            lines.append(
-                f"#{cid} final={final_score} bypass={result.reason}  {q[:50]}"
-            )
+            lines.append(f"#{cid} final={final_score} bypass={result.reason}  {q[:50]}")
         else:
             lines.append(f"#{cid} final={final_score} unknown  {q[:50]}")
 
@@ -90,7 +90,7 @@ def main() -> None:
     p.add_argument("--out", type=Path, default=None)
     args = p.parse_args()
     source = _SOURCE_PRESETS[args.source]
-    asyncio.run(_run(source, limit=args.limit, out=args.out))
+    asyncio.run(_run(args.source, source, limit=args.limit, out=args.out))
 
 
 if __name__ == "__main__":

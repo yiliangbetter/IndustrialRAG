@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Batch-test AI 智能客服话术 against data/voice_script_tests.json."""
+"""Batch-test AI 智能客服话术 against the tracked Voice29 dataset."""
 
 from __future__ import annotations
 
@@ -22,7 +22,7 @@ sys.path.insert(0, str(_SCRIPTS))
 sys.path.insert(0, str(_ROOT))
 load_dotenv(_ROOT / ".env", override=False)
 
-_DEFAULT_CASES = _ROOT / "data" / "voice_script_tests.json"
+_DEFAULT_CASES = _ROOT / "tests" / "fixtures" / "evaluation" / "voice29.json"
 _REPORT_DIR = _ROOT / "logs" / "voice_script_tests"
 _FALLBACK_ANY = ("人工客服", "转人工", "专线", "400-888-2033")
 
@@ -33,6 +33,16 @@ def _load_rpc():
     mod = importlib.util.module_from_spec(spec)
     spec.loader.exec_module(mod)
     return mod
+
+
+def _load_cases_file(path: Path) -> list[dict]:
+    payload = json.loads(path.read_text(encoding="utf-8"))
+    if payload.get("schema_version") == "rag-evaluation-dataset/v1":
+        from raganything.evaluation_legacy import voice29_legacy_cases
+        from raganything.evaluation_schema import load_evaluation_dataset
+
+        return voice29_legacy_cases(load_evaluation_dataset(path))
+    return list(payload.get("cases") or [])
 
 
 def _norm(text: str) -> str:
@@ -58,7 +68,6 @@ def grade_response(answer: str, case: dict) -> tuple[bool, list[str], str]:
         if not (answer or "").strip():
             return False, ["（空应答）"], "empty"
         return True, [], "skipped"
-    expect = case.get("expect") or "script"
     answer = (answer or "").strip()
     if not answer:
         return False, ["（空应答）"], "empty"
@@ -77,8 +86,7 @@ def grade_response(answer: str, case: dict) -> tuple[bool, list[str], str]:
 
     if text_any:
         hits = [t for t in text_any if _norm(t) in _norm(answer) or t in answer]
-        min_hits = 1 if expect == "technical" else 1
-        if len(hits) >= min_hits:
+        if hits:
             return True, [], "script"
         if grade.get("accept_fallback") and fallback_hits:
             return True, [], "fallback"
@@ -94,14 +102,23 @@ async def run_cases(
     *,
     mode: str,
     wd: Path,
+    pod: Path,
     query_mode: str,
     include_skip: bool,
 ) -> list[dict]:
     rpc = _load_rpc()
-    rag, _, pod = await rpc._build_rag(wd, wd)
+    rag, _, _logger = await rpc._build_rag(
+        wd,
+        pod,
+        enable_llm_cache=False,
+    )
     parser_root = pod.resolve()
     from query_doc_steering import strip_manual_circled_step_markers
-    from query_progress_hooks import query_progress_hooks, set_query_text_for_images
+    from query_progress_hooks import (
+        query_progress_hooks,
+        set_query_media_roots,
+        set_query_text_for_images,
+    )
     from stream_cot_parser import parse_complete_cot
 
     rows: list[dict] = []
@@ -112,6 +129,7 @@ async def run_cases(
             utterance = (case.get("utterances") or [case.get("standard_question")])[0]
             t0 = time.perf_counter()
             async with query_progress_hooks():
+                set_query_media_roots([parser_root])
                 set_query_text_for_images(utterance.strip())
                 raw = await rag.aquery(
                     utterance,
@@ -164,7 +182,7 @@ def write_report(path: Path, rows: list[dict], *, query_mode: str, wd: Path) -> 
         f"- 时间：{datetime.now().astimezone().isoformat()}",
         f"- RAG 模式：{query_mode}",
         f"- 工作目录：`{wd}`",
-        f"- 参考答案：`docs/AI智能客服话术测试参考答案.md`",
+        "- 参考答案：`docs/AI智能客服话术测试参考答案.md`",
         f"- 通过：**{passed}/{len(rows)}**",
         "",
         "## 汇总",
@@ -201,30 +219,56 @@ def write_report(path: Path, rows: list[dict], *, query_mode: str, wd: Path) -> 
     path.write_text("\n".join(lines), encoding="utf-8")
 
 
-def main() -> int:
+def _default_path(primary_env: str, legacy_env: str, fallback: Path) -> Path:
+    """Resolve a CLI path default using production, legacy, then local values."""
+    return Path(os.getenv(primary_env) or os.getenv(legacy_env) or fallback)
+
+
+def _parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     parser = argparse.ArgumentParser(description="Voice script test batch runner")
     parser.add_argument("--cases", type=Path, default=_DEFAULT_CASES)
     parser.add_argument("--ids", type=str, default="", help="Comma IDs e.g. 1,3,5")
     parser.add_argument("--group", choices=["商务", "技术", "综合", ""], default="技术")
-    parser.add_argument("--expect", choices=["script", "transfer", "technical", ""], default="")
+    parser.add_argument(
+        "--expect", choices=["script", "transfer", "technical", ""], default=""
+    )
     parser.add_argument("--include-skip", action="store_true")
     parser.add_argument("--mode", choices=["rag", "local"], default="rag")
-    parser.add_argument("--response", type=str, default="", help="local mode: answer text")
+    parser.add_argument(
+        "--response", type=str, default="", help="local mode: answer text"
+    )
     parser.add_argument("--case-id", type=int, default=0, help="local mode: case id")
     parser.add_argument("--query-mode", default=os.getenv("RAG_QUERY_MODE", "mix"))
     parser.add_argument(
         "--wd",
         type=Path,
-        default=Path(os.getenv("RAG_WORKING_DIR", _ROOT / "data" / "rag_storage")),
+        default=_default_path(
+            "RAG_WEB_WORKING_DIR",
+            "RAG_WORKING_DIR",
+            _ROOT / "data" / "rag_storage",
+        ),
     )
-    args = parser.parse_args()
+    parser.add_argument(
+        "--pod",
+        type=Path,
+        default=_default_path(
+            "RAG_WEB_PARSER_OUTPUT_DIR",
+            "PARSER_OUTPUT_DIR",
+            _ROOT / "data" / "pipeline_parse",
+        ),
+        help="Parser output directory containing document media and layout output",
+    )
+    return parser.parse_args(argv)
+
+
+def main() -> int:
+    args = _parse_args()
 
     if not args.cases.is_file():
-        print(f"Cases file missing. Run: python scripts/build_voice_script_tests.py", file=sys.stderr)
+        print(f"Cases file missing: {args.cases}", file=sys.stderr)
         return 1
 
-    payload = json.loads(args.cases.read_text(encoding="utf-8"))
-    cases: list[dict] = payload.get("cases") or []
+    cases = _load_cases_file(args.cases)
 
     if args.ids:
         wanted = {int(x.strip()) for x in args.ids.split(",") if x.strip()}
@@ -251,17 +295,19 @@ def main() -> int:
         return 1
 
     wd = args.wd.resolve()
-    print(f"Running {len(cases)} voice script cases, wd={wd}", flush=True)
+    pod = args.pod.resolve()
+    print(f"Running {len(cases)} voice script cases, wd={wd}, pod={pod}", flush=True)
     rows = asyncio.run(
         run_cases(
             cases,
             mode=args.mode,
             wd=wd,
+            pod=pod,
             query_mode=args.query_mode,
             include_skip=args.include_skip,
         )
     )
-    stamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+    stamp = datetime.now().astimezone().strftime("%Y%m%d_%H%M%S")
     tag = args.group or "all"
     report = _REPORT_DIR / f"{stamp}_{tag}.md"
     write_report(report, rows, query_mode=args.query_mode, wd=wd)

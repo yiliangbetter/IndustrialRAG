@@ -23,9 +23,11 @@ from __future__ import annotations
 
 import asyncio
 import contextlib
+import copy
 import importlib.util
 import inspect
 import json
+import math
 import os
 import shutil
 import sys
@@ -1346,20 +1348,32 @@ async def _iter_hook_events_until_task_done(
 
 
 def _sse_progress_event(ev: dict[str, Any]) -> str | None:
+    payload = _progress_event_payload(ev)
+    return _sse(payload) if payload is not None else None
+
+
+def _progress_event_payload(ev: dict[str, Any]) -> dict[str, Any] | None:
+    """Return hook events that are part of the public query event contract."""
     if ev.get("type") in (
         "status",
         "retrieval_scope",
         "related_images",
         "inline_images",
     ):
-        return _sse(ev)
+        return dict(ev)
     return None
 
 
-async def _query_stream_events(
+async def _query_event_payloads(
     q: str, mode: str, body: QueryBody
-) -> AsyncIterator[str]:
-    """SSE tied to real LightRAG stages (retrieve → rerank → generate), then token deltas."""
+) -> AsyncIterator[dict[str, Any]]:
+    """Structured events from the production query path.
+
+    This is the transport-independent contract used by both the Web SSE endpoint
+    and offline evaluation.  Keeping clarification, retrieval, generation, and
+    image placement in one iterator prevents evaluation from drifting away from
+    the behavior users see in the browser.
+    """
     from query_doc_steering import strip_manual_circled_step_markers  # noqa: WPS433
     from query_progress_hooks import (
         query_progress_hooks,
@@ -1387,9 +1401,9 @@ async def _query_stream_events(
             async for ev in _iter_hook_events_until_task_done(
                 progress_queue, gate_task
             ):
-                sse = _sse_progress_event(ev)
-                if sse is not None:
-                    yield sse
+                payload = _progress_event_payload(ev)
+                if payload is not None:
+                    yield payload
 
             try:
                 gate_result, gate_wall_s = await gate_task
@@ -1405,8 +1419,8 @@ async def _query_stream_events(
                 if isinstance(gate_http_error.detail, str)
                 else str(gate_http_error.detail)
             )
-            yield _sse({"type": "error", "message": detail})
-            yield _sse({"type": "done", "mode": mode, "error": True})
+            yield {"type": "error", "message": detail}
+            yield {"type": "done", "mode": mode, "error": True}
             return
 
         clarify_gate_meta = _clarify_bypass_meta(gate_result)
@@ -1429,34 +1443,28 @@ async def _query_stream_events(
                 },
                 web_timing=web_timing,
             )
-            yield _sse(
-                {
-                    "type": "status",
-                    "text": (
-                        gate_result.data.get("message")
-                        if gate_result.gate_outcome == "reject"
-                        else "需要澄清：请从下列推荐问法中选择一条。"
-                    ),
-                }
-            )
-            yield _sse(
-                {
-                    "type": "clarification_required",
-                    "data": {
-                        "gate_outcome": gate_result.gate_outcome,
-                        **gate_result.data,
-                    },
-                }
-            )
+            yield {
+                "type": "status",
+                "text": (
+                    gate_result.data.get("message")
+                    if gate_result.gate_outcome == "reject"
+                    else "需要澄清：请从下列推荐问法中选择一条。"
+                ),
+            }
+            yield {
+                "type": "clarification_required",
+                "data": {
+                    "gate_outcome": gate_result.gate_outcome,
+                    **gate_result.data,
+                },
+            }
             if dump_path is not None:
-                yield _sse(
-                    {
-                        "type": "query_debug_saved",
-                        "path": str(dump_path),
-                        "name": dump_path.name,
-                    }
-                )
-            yield _sse({"type": "done", "mode": mode, "clarification_only": True})
+                yield {
+                    "type": "query_debug_saved",
+                    "path": str(dump_path),
+                    "name": dump_path.name,
+                }
+            yield {"type": "done", "mode": mode, "clarification_only": True}
             return
 
         set_query_media_roots([parser_root])
@@ -1497,9 +1505,9 @@ async def _query_stream_events(
                     if prog_task in done and not prog_task.cancelled():
                         try:
                             ev = prog_task.result()
-                            sse = _sse_progress_event(ev)
-                            if sse is not None:
-                                yield sse
+                            progress_payload = _progress_event_payload(ev)
+                            if progress_payload is not None:
+                                yield progress_payload
                         except Exception:
                             pass
 
@@ -1515,14 +1523,12 @@ async def _query_stream_events(
                                 duration_ms=int((time.perf_counter() - started) * 1000),
                             )
                             if dump_path is not None:
-                                yield _sse(
-                                    {
-                                        "type": "query_debug_saved",
-                                        "path": str(dump_path),
-                                        "name": dump_path.name,
-                                    }
-                                )
-                            yield _sse({"type": "error", "message": stream_error})
+                                yield {
+                                    "type": "query_debug_saved",
+                                    "path": str(dump_path),
+                                    "name": dump_path.name,
+                                }
+                            yield {"type": "error", "message": stream_error}
                             return
 
                         try:
@@ -1537,9 +1543,7 @@ async def _query_stream_events(
                                             "first_response",
                                         )
                                         thinking_parts.append(piece)
-                                        yield _sse(
-                                            {"type": "thinking_delta", "text": piece}
-                                        )
+                                        yield {"type": "thinking_delta", "text": piece}
                                     else:
                                         first_response_s = _mark_first_delta(
                                             request_started,
@@ -1552,9 +1556,7 @@ async def _query_stream_events(
                                             "first_answer",
                                         )
                                         answer_parts.append(piece)
-                                        yield _sse(
-                                            {"type": "answer_delta", "text": piece}
-                                        )
+                                        yield {"type": "answer_delta", "text": piece}
                             for ev_kind, piece in cot_parser.flush():
                                 if not piece:
                                     continue
@@ -1565,9 +1567,7 @@ async def _query_stream_events(
                                         "first_response",
                                     )
                                     thinking_parts.append(piece)
-                                    yield _sse(
-                                        {"type": "thinking_delta", "text": piece}
-                                    )
+                                    yield {"type": "thinking_delta", "text": piece}
                                 else:
                                     first_response_s = _mark_first_delta(
                                         request_started,
@@ -1581,7 +1581,7 @@ async def _query_stream_events(
                                     )
                                     piece = strip_manual_circled_step_markers(piece)
                                     answer_parts.append(piece)
-                                    yield _sse({"type": "answer_delta", "text": piece})
+                                    yield {"type": "answer_delta", "text": piece}
                         except Exception as exc:
                             stream_error = _friendly_query_error(exc)
                             dump_path = _persist_query_debug_dump(
@@ -1592,14 +1592,12 @@ async def _query_stream_events(
                                 duration_ms=int((time.perf_counter() - started) * 1000),
                             )
                             if dump_path is not None:
-                                yield _sse(
-                                    {
-                                        "type": "query_debug_saved",
-                                        "path": str(dump_path),
-                                        "name": dump_path.name,
-                                    }
-                                )
-                            yield _sse({"type": "error", "message": stream_error})
+                                yield {
+                                    "type": "query_debug_saved",
+                                    "path": str(dump_path),
+                                    "name": dump_path.name,
+                                }
+                            yield {"type": "error", "message": stream_error}
                             return
                         final_answer = strip_manual_circled_step_markers(
                             "".join(answer_parts).strip()
@@ -1610,15 +1608,13 @@ async def _query_stream_events(
                         related = inline_result.get("images") or []
                         placements = inline_result.get("placements") or []
                         if related and placements:
-                            yield _sse(
-                                {
-                                    "type": "inline_images",
-                                    "images": related,
-                                    "placements": placements,
-                                }
-                            )
+                            yield {
+                                "type": "inline_images",
+                                "images": related,
+                                "placements": placements,
+                            }
                         elif related:
-                            yield _sse({"type": "related_images", "images": related})
+                            yield {"type": "related_images", "images": related}
                         answer_wall_s = time.perf_counter() - started
                         web_timing = _finalize_web_timing(
                             gate_result,
@@ -1638,15 +1634,13 @@ async def _query_stream_events(
                             web_timing=web_timing,
                         )
                         if dump_path is not None:
-                            yield _sse(
-                                {
-                                    "type": "query_debug_saved",
-                                    "path": str(dump_path),
-                                    "name": dump_path.name,
-                                }
-                            )
+                            yield {
+                                "type": "query_debug_saved",
+                                "path": str(dump_path),
+                                "name": dump_path.name,
+                            }
                         answer_completed = True
-                        yield _sse({"type": "done", "mode": mode})
+                        yield {"type": "done", "mode": mode}
                         return
             finally:
                 if not worker.done():
@@ -1660,6 +1654,190 @@ async def _query_stream_events(
             _finalize_clarify_bypass(body, gate_result)
         _clear_clarify_injection_if_set()
         _release_rerank_after_web_query()
+
+
+def _trace_context_capture(
+    debug_state: dict[str, Any],
+) -> tuple[list[dict[str, Any]], str, bool]:
+    """Return ordered model chunks plus provenance and completeness.
+
+    ``llm_chunks_for_images`` is the retained, untruncated batch passed through
+    the answer-model chunk pipeline. ``llm_input.chunks`` is a size-limited
+    debug serialization and is used only for older paths that did not retain
+    the exact batch. Retrieval output is the final compatibility fallback and
+    must never be presented as a complete model-input capture.
+    """
+    exact_chunks = debug_state.get("llm_chunks_for_images")
+    if isinstance(exact_chunks, list):
+        rows = [item for item in exact_chunks if isinstance(item, dict)]
+        return copy.deepcopy(rows), "llm_chunks_for_images", True
+
+    llm_input = debug_state.get("llm_input")
+    if isinstance(llm_input, dict) and "chunks" in llm_input:
+        chunks = llm_input.get("chunks")
+        if isinstance(chunks, list):
+            rows = [item for item in chunks if isinstance(item, dict)]
+            return copy.deepcopy(rows), "llm_input.chunks", False
+        return [], "llm_input.chunks", False
+    retrieved = debug_state.get("retrieved_docs")
+    if isinstance(retrieved, list):
+        rows = [item for item in retrieved if isinstance(item, dict)]
+        return copy.deepcopy(rows), "retrieved_docs", False
+    return [], "none", False
+
+
+def _trace_context_documents(debug_state: dict[str, Any]) -> list[dict[str, Any]]:
+    """Backward-compatible list-only view of :func:`_trace_context_capture`."""
+    documents, _source, _complete = _trace_context_capture(debug_state)
+    return documents
+
+
+def _trace_json_safe(value: Any) -> Any:
+    """Detach trace data into strict JSON-compatible values."""
+    if value is None or isinstance(value, (str, bool, int)):
+        return value
+    if isinstance(value, float):
+        return value if math.isfinite(value) else str(value)
+    if isinstance(value, Path):
+        return str(value)
+    if isinstance(value, dict):
+        return {str(key): _trace_json_safe(child) for key, child in value.items()}
+    if isinstance(value, set):
+        return [_trace_json_safe(child) for child in sorted(value, key=str)]
+    if isinstance(value, (list, tuple)):
+        return [_trace_json_safe(child) for child in value]
+    return str(value)
+
+
+def _trace_context_texts(documents: list[dict[str, Any]]) -> list[str]:
+    """Extract one context string per model-bound chunk without deduplication."""
+    contexts: list[str] = []
+    for document in documents:
+        for key in ("content", "text", "chunk_content", "page_content"):
+            value = document.get(key)
+            if isinstance(value, str) and value.strip():
+                contexts.append(value.strip())
+                break
+    return contexts
+
+
+async def execute_query_with_trace(body: QueryBody) -> dict[str, Any]:
+    """Execute one production-path query and return a durable evaluation trace.
+
+    The collector intentionally does not auto-follow a clarification.  A caller
+    that wants to evaluate the follow-up interaction should make a second call
+    with the chosen clarification fields populated on ``QueryBody``.
+    """
+    from query_progress_hooks import get_query_debug_state  # noqa: WPS433
+
+    query = body.query.strip()
+    mode = (body.mode or state.query_mode or "mix").strip()
+    started = time.perf_counter()
+    events: list[dict[str, Any]] = []
+    status_timeline: list[dict[str, Any]] = []
+    thinking_parts: list[str] = []
+    answer_parts: list[str] = []
+    images: list[dict[str, Any]] = []
+    placements: list[dict[str, Any]] = []
+    clarification: dict[str, Any] | None = None
+    terminal_event: dict[str, Any] | None = None
+    error: str | None = None
+
+    try:
+        async for payload in _query_event_payloads(query, mode, body):
+            event = copy.deepcopy(payload)
+            event["elapsed_ms"] = int((time.perf_counter() - started) * 1000)
+            events.append(event)
+            kind = str(payload.get("type") or "")
+            if kind in {"status", "retrieval_scope"}:
+                status_timeline.append(copy.deepcopy(event))
+            elif kind == "thinking_delta":
+                thinking_parts.append(str(payload.get("text") or ""))
+            elif kind == "answer_delta":
+                answer_parts.append(str(payload.get("text") or ""))
+            elif kind == "clarification_required":
+                data = payload.get("data")
+                clarification = copy.deepcopy(data) if isinstance(data, dict) else {}
+            elif kind in {"related_images", "inline_images"}:
+                raw_images = payload.get("images")
+                if isinstance(raw_images, list):
+                    images.extend(
+                        copy.deepcopy(
+                            [item for item in raw_images if isinstance(item, dict)]
+                        )
+                    )
+                raw_placements = payload.get("placements")
+                if isinstance(raw_placements, list):
+                    placements.extend(
+                        copy.deepcopy(
+                            [item for item in raw_placements if isinstance(item, dict)]
+                        )
+                    )
+            elif kind == "error":
+                error = str(payload.get("message") or "query failed")
+            elif kind == "done":
+                terminal_event = copy.deepcopy(payload)
+    except Exception as exc:  # noqa: BLE001 - convert product-path failures to trace data
+        error = _friendly_query_error(exc)
+        events.append(
+            {
+                "type": "error",
+                "message": error,
+                "unexpected": True,
+                "elapsed_ms": int((time.perf_counter() - started) * 1000),
+            }
+        )
+
+    debug_state = _trace_json_safe(get_query_debug_state())
+    if not isinstance(debug_state, dict):
+        debug_state = {}
+    context_documents, context_source, contexts_complete = _trace_context_capture(
+        debug_state
+    )
+    answer = "".join(answer_parts).strip()
+    thinking = "".join(thinking_parts).strip()
+    if error is not None:
+        outcome = "error"
+    elif clarification is not None:
+        gate_outcome = str(clarification.get("gate_outcome") or "")
+        outcome = "reject" if gate_outcome == "reject" else "clarify"
+    elif answer:
+        outcome = "answer"
+    else:
+        outcome = "empty"
+
+    trace = {
+        "schema_version": "rag_query_trace_v1",
+        "query": query,
+        "mode": mode,
+        "outcome": outcome,
+        "answer": answer,
+        "thinking": thinking,
+        "clarification": clarification,
+        "error": error,
+        "duration_ms": int((time.perf_counter() - started) * 1000),
+        "events": events,
+        "status_timeline": status_timeline,
+        "terminal_event": terminal_event,
+        "images": images,
+        "placements": placements,
+        "contexts": _trace_context_texts(context_documents),
+        "context_documents": context_documents,
+        "context_source": context_source,
+        "contexts_complete": contexts_complete,
+        "debug_state": debug_state,
+    }
+    safe_trace = _trace_json_safe(trace)
+    assert isinstance(safe_trace, dict)
+    return safe_trace
+
+
+async def _query_stream_events(
+    q: str, mode: str, body: QueryBody
+) -> AsyncIterator[str]:
+    """Serialize production query events as server-sent events for the Web UI."""
+    async for payload in _query_event_payloads(q, mode, body):
+        yield _sse(payload)
 
 
 @app.post("/api/query/stream")

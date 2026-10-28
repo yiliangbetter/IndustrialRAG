@@ -14,6 +14,13 @@ def _sse(payload: dict) -> str:
     return "data: " + json.dumps(payload, ensure_ascii=False) + "\n\n"
 
 
+def test_default_cases_use_tracked_canonical_dataset():
+    cases = bench._load_cases(bench.DEFAULT_CASES)
+
+    assert len(cases) == 4
+    assert cases[0]["id"] == "pc-011"
+
+
 def test_grade_normalizes_spacing_and_checks_choice_groups():
     case = {
         "must_include": ["0.6", "压力继电器"],

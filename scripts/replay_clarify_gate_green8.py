@@ -567,13 +567,17 @@ async def _replay_case(
     return row
 
 
+_VOICE29_DATASET = (
+    _ROOT / "tests" / "fixtures" / "evaluation" / "voice29.json"
+)
+
 _SOURCE_PRESETS: dict[str, Path | list[Path]] = {
-    "green8": _ROOT / "data" / "voice_script_green8.json",
+    "green8": _VOICE29_DATASET,
     "shili17": _ROOT / "docs" / "测试例.txt",
-    "voice29": _ROOT / "data" / "voice_script_tests.json",
+    "voice29": _VOICE29_DATASET,
     "all": [
         _ROOT / "docs" / "测试例.txt",
-        _ROOT / "data" / "voice_script_green8.json",
+        _VOICE29_DATASET,
     ],
 }
 
@@ -594,14 +598,13 @@ def _missing_source_hint(path: Path) -> str:
     if path.name == "voice_script_tests.json":
         return (
             f"缺少用例文件: {path}\n"
-            "请从 Markdown 生成: uv run python scripts/build_voice_script_tests_from_md.py\n"
-            "或从 Excel 生成: uv run python scripts/build_voice_script_tests.py"
+            "请改用已跟踪的 tests/fixtures/evaluation/voice29.json，"
+            "或从 Excel 重新生成。"
         )
     if path.name == "voice_script_green8.json":
         return (
             f"缺少用例文件: {path}\n"
-            "可运行: uv run python scripts/extract_voice_green8.py "
-            "(需先有 voice_script_tests.json)，或从 docs/voice_script_green8_tests.txt 恢复。"
+            "请使用 --source green8；该视图从规范 Voice29 数据集选择 8 条完整用例。"
         )
     return f"用例文件不存在: {path}"
 
@@ -612,8 +615,17 @@ def _load_all_cases(source_key: str, *, limit: int) -> tuple[list[dict[str, Any]
         rows: list[dict[str, Any]] = []
         labels: list[str] = []
         for path in preset:
-            label = "shili17" if "测试例" in str(path) else path.stem
+            label = (
+                "shili17"
+                if "测试例" in str(path)
+                else "green8"
+                if path == _VOICE29_DATASET
+                else path.stem
+            )
             chunk = _load_source_cases(path, limit=0)
+            if label == "green8":
+                green_ids = _green8_voice_ids()
+                chunk = [row for row in chunk if str(row.get("id")) in green_ids]
             for row in chunk:
                 row["source_set"] = label
             rows.extend(chunk)
@@ -622,7 +634,12 @@ def _load_all_cases(source_key: str, *, limit: int) -> tuple[list[dict[str, Any]
             rows = rows[:limit]
         return rows, labels
     path = Path(preset) if not isinstance(preset, Path) else preset
-    rows = _load_source_cases(path, limit=limit)
+    rows = _load_source_cases(path, limit=0 if source_key == "green8" else limit)
+    if source_key == "green8":
+        green_ids = _green8_voice_ids()
+        rows = [row for row in rows if str(row.get("id")) in green_ids]
+        if limit > 0:
+            rows = rows[:limit]
     for row in rows:
         row["source_set"] = source_key
     return rows, [source_key]
@@ -640,8 +657,15 @@ def _load_source_cases(source: Path, *, limit: int) -> list[dict[str, Any]]:
                 return rows
             raise SystemExit(_missing_source_hint(source))
         data = json.loads(source.read_text(encoding="utf-8"))
+        if data.get("schema_version") == "rag-evaluation-dataset/v1":
+            from raganything.evaluation_legacy import voice29_legacy_cases
+            from raganything.evaluation_schema import load_evaluation_dataset
+
+            source_cases = voice29_legacy_cases(load_evaluation_dataset(source))
+        else:
+            source_cases = data.get("cases") or []
         rows: list[dict[str, Any]] = []
-        for case in data.get("cases") or []:
+        for case in source_cases:
             if case.get("skip"):
                 continue
             q = (case.get("standard_question") or "").strip()
@@ -660,6 +684,13 @@ def _load_source_cases(source: Path, *, limit: int) -> list[dict[str, Any]]:
         raise SystemExit(_missing_source_hint(source))
     slim = _load_cases(source.resolve(), limit=limit)
     return [dict(c) for c in slim]
+
+
+def _green8_voice_ids() -> set[str]:
+    from raganything.evaluation_schema import load_evaluation_dataset
+
+    dataset = load_evaluation_dataset(_VOICE29_DATASET)
+    return {str(case_id) for case_id in dataset.metadata["green8_voice_ids"]}
 
 
 def _format_report(

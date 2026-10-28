@@ -44,11 +44,11 @@ sys.path.insert(0, str(_ROOT))
 load_dotenv(_ROOT / ".env", override=False)
 
 # Key checks from docs/测试例参考答案.md (Q1–Q17)
-_TEST_CASES_PATH = _ROOT / "tests" / "fixtures" / "test_cases_shili17.json"
+_TEST_CASES_PATH = _ROOT / "tests" / "fixtures" / "evaluation" / "shili17.json"
 
 
 def _load_test_cases(path: Path = _TEST_CASES_PATH) -> dict[int, dict]:
-    """Load shili17 cases externalized to ``tests/fixtures/test_cases_shili17.json``.
+    """Load Shili17 from the tracked canonical dataset or legacy fixture.
 
     Phase-1 structural rework: cases live outside the script so the harness
     stays generic. Each case's ``text`` and ``image`` criteria are flattened
@@ -59,6 +59,11 @@ def _load_test_cases(path: Path = _TEST_CASES_PATH) -> dict[int, dict]:
     change; text criteria and the harness stay stable.
     """
     data = json.loads(path.read_text(encoding="utf-8"))
+    if data.get("schema_version") == "rag-evaluation-dataset/v1":
+        from raganything.evaluation_legacy import shili17_legacy_ref
+        from raganything.evaluation_schema import load_evaluation_dataset
+
+        return shili17_legacy_ref(load_evaluation_dataset(path))
     cases: dict[int, dict] = {}
     for case in data["cases"]:
         spec: dict = {"query": case["query"]}
@@ -96,6 +101,16 @@ def _norm(s: str) -> str:
 
 def _contains(term: str, text: str) -> bool:
     return term in text or _norm(term) in _norm(text)
+
+
+def _caption_matches_expected(caption: str, expected: str) -> bool:
+    """Return true only when two non-empty caption strings overlap."""
+
+    caption = (caption or "").strip()
+    expected = (expected or "").strip()
+    return bool(caption and expected) and (
+        expected in caption or caption in expected
+    )
 
 
 def _answer_bullets(answer: str) -> list[str]:
@@ -389,23 +404,38 @@ def grade_images(result: dict, spec: dict) -> tuple[bool, list[str]]:
         notes.append("no_placements")
         return False, notes
 
-    expected = spec.get("caption_any") or []
+    expected = [str(value) for value in spec.get("caption_any") or []]
     if expected:
-        matched = [e for e in expected if any(e in c or c in e for c in caps)]
+        empty_caption_indexes = [
+            index for index, caption in enumerate(caps) if not caption.strip()
+        ]
+        if empty_caption_indexes:
+            notes.append(f"empty_captions:{empty_caption_indexes}")
+        matched = [
+            e
+            for e in expected
+            if any(_caption_matches_expected(c, e) for c in caps)
+        ]
         min_match = int(spec.get("caption_min_match") or 1)
         if len(matched) < min_match:
             notes.append(f"caption_match:{len(matched)}/{len(expected)}")
-        wrong = [c for c in caps if c and not any(e in c or c in e for e in expected)]
+        wrong = [
+            c
+            for c in caps
+            if c and not any(_caption_matches_expected(c, e) for e in expected)
+        ]
         if wrong and expected:
             notes.append(f"extra_or_wrong_caps:{wrong}")
         caps_ok = (
-            all(any(e in c or c in e for e in expected) for c in caps if c)
-            if caps
-            else False
+            bool(caps)
+            and not empty_caption_indexes
+            and all(
+                any(_caption_matches_expected(c, e) for e in expected) for c in caps
+            )
         )
         if caps and not caps_ok:
             notes.append("caption_not_in_expected")
-        ok = len(matched) >= min_match and (not caps or caps_ok)
+        ok = len(matched) >= min_match and caps_ok
         return ok, notes
 
     min_c = int(spec.get("caption_min") or spec.get("image_min") or 1)
