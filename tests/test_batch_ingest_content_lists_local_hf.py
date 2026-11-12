@@ -254,3 +254,110 @@ async def test_async_main_skips_non_list_json_counts_as_failure(
 
     assert code == 1
     mock_rag.insert_content_list.assert_not_called()
+
+
+@pytest.mark.asyncio
+async def test_async_main_accepts_padded_hf_backend(bicl, monkeypatch, tmp_path):
+    """``EMBEDDING_BACKEND`` is stripped and case-folded before the HF gate."""
+    monkeypatch.setenv("EMBEDDING_BACKEND", "  HF  ")
+    repo = tmp_path / "repo"
+    (repo / "output" / "data_upload_test_v3").mkdir(parents=True)
+    wd = tmp_path / "wd"
+    wd.mkdir()
+    monkeypatch.setattr(
+        sys,
+        "argv",
+        [
+            "batch_ingest_content_lists_local_hf",
+            "-w",
+            str(wd),
+            "--data-repo-root",
+            str(repo),
+        ],
+    )
+
+    mock_lr = MagicMock()
+    mock_lr.initialize_storages = AsyncMock()
+    mock_rag = MagicMock()
+    mock_rag.insert_content_list = AsyncMock()
+    mock_rag.finalize_storages = AsyncMock()
+
+    with patch(
+        "raganything.local_hf_embedding.make_local_hf_embedding_func",
+        return_value=MagicMock(),
+    ):
+        with patch("lightrag.LightRAG", return_value=mock_lr):
+            with patch("raganything.RAGAnything", return_value=mock_rag):
+                code = await bicl.async_main()
+
+    assert code == 1
+    assert os.environ["EMBEDDING_BACKEND"] == "hf"
+    mock_rag.insert_content_list.assert_not_called()
+    mock_rag.finalize_storages.assert_not_called()
+
+
+@pytest.mark.asyncio
+async def test_async_main_continues_after_bad_files_and_still_finalizes(
+    bicl, monkeypatch, tmp_path
+):
+    """One bad JSON object and one corrupt file must not drop the other manuals.
+
+    Files are created out of alphabetical order. Ingest order follows the
+    sorted path, the two good lists are inserted, and storages are finalized
+    even though the process exits 1.
+    """
+    monkeypatch.setenv("EMBEDDING_BACKEND", "hf")
+    repo = tmp_path / "repo"
+    out = repo / "output" / "data_upload_test_v3"
+    out.mkdir(parents=True)
+    (out / "z_ok_content_list_v2.json").write_text(
+        json.dumps([{"type": "text", "text": "zeta"}]), encoding="utf-8"
+    )
+    (out / "q_bad_content_list_v2.json").write_text("{not json", encoding="utf-8")
+    (out / "m_dict_content_list_v2.json").write_text(
+        json.dumps({"not": "a list"}), encoding="utf-8"
+    )
+    (out / "a_ok_content_list_v2.json").write_text(
+        json.dumps([{"type": "text", "text": "alpha"}]), encoding="utf-8"
+    )
+    wd = tmp_path / "wd"
+    wd.mkdir()
+    monkeypatch.setattr(
+        sys,
+        "argv",
+        [
+            "batch_ingest_content_lists_local_hf",
+            "-w",
+            str(wd),
+            "--data-repo-root",
+            str(repo),
+        ],
+    )
+
+    mock_lr = MagicMock()
+    mock_lr.initialize_storages = AsyncMock()
+    mock_rag = MagicMock()
+    mock_rag.insert_content_list = AsyncMock()
+    mock_rag.finalize_storages = AsyncMock()
+
+    with patch(
+        "raganything.local_hf_embedding.make_local_hf_embedding_func",
+        return_value=MagicMock(),
+    ):
+        with patch("lightrag.LightRAG", return_value=mock_lr):
+            with patch("raganything.RAGAnything", return_value=mock_rag):
+                code = await bicl.async_main()
+
+    assert code == 1
+    inserted = [call.args[0] for call in mock_rag.insert_content_list.await_args_list]
+    assert inserted == [
+        [{"type": "text", "text": "alpha"}],
+        [{"type": "text", "text": "zeta"}],
+    ]
+    file_paths = [
+        call.kwargs["file_path"]
+        for call in mock_rag.insert_content_list.await_args_list
+    ]
+    assert file_paths[0].endswith("a_ok_content_list_v2.json")
+    assert file_paths[1].endswith("z_ok_content_list_v2.json")
+    mock_rag.finalize_storages.assert_awaited_once()
